@@ -6,6 +6,10 @@ mod activity;
 mod retention;
 pub use retention::{RetentionIssue, RetentionReport};
 mod snapshots;
+#[cfg(unix)]
+pub use activity::{
+    ActiveSessionLocation, active_session_locations, activity_projection_directory,
+};
 pub use activity::{IDLE_SECONDS, SessionActivityGuard};
 pub use snapshots::{SnapshotPruneOutcome, SnapshotRead};
 mod delivery;

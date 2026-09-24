@@ -112,6 +112,24 @@ Preservation completion records an integrity-bound manifest. It is not proof of
 current quiescence, approval or removability. Partial artifacts remain outside
 the source checkout, and a failed capture does not acquire removal authority.
 
+## Activity and source ownership
+
+Live Session activity has a private same-user projection under
+`/tmp/jcode-session-activity-<uid>`. Its kernel lock lasts with the existing
+activity guard. Inspection verifies the original execution namespace and token,
+then reads current Session metadata without initializing a foreign store.
+Committed cwd changes do not require rewriting this projection. Dead process
+ownership is not inferred from a PID. This supplements the local pending-input,
+execution and external-process observations rather than replacing their owners.
+Full caller integration remains part of the staged acceptance boundary above.
+
+Native mutations cannot edit that projection or shared physical-root lease
+metadata, including through aliases. Shell/external effects remain outside this
+native enforcement. Local and file-transport clone acquisition checks Closing
+admission and retains physical source use while Git reads it. Parent creation
+and publication retain shared parent ownership with exclusive child creation
+and no-replacement publication, allowing ordinary parent readers.
+
 ## Journaled removal and retained history
 
 `finish_closeout` consumes an existing current authorization, not a force flag.
@@ -138,6 +156,13 @@ Unconfirmed and Removed entries. An effect without its final receipt stays
 Unconfirmed even if an unlink may already have happened. Pre-removal revocation
 cannot reopen an operation that has started removing data. Further recovery
 controls and their public client remain part of the integration boundary.
+
+Removal observes its existing execution's durable Stop cause before destructive
+admission and between journaled entries. An admitted entry finishes its receipt,
+then Stop retains partial progress for a new, separately identified attempt.
+The production adapter must own the blocking producer independently of client
+waiting and keep inspection/control responsive. Stop is not new deletion
+authority, rollback, or permission to reuse an old terminal execution.
 
 Closed is published only after the original/quarantine paths are absent and the
 owned holding directory is empty and removed. `closed_checkout_history` retains

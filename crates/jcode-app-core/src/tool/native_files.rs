@@ -121,6 +121,12 @@ impl NativeFilePolicy for BoundPolicy {
         } else {
             None
         };
+        for (_, path) in &resolved {
+            protect_shared_control(path)?;
+        }
+        for path in removals {
+            protect_shared_control(&resolve_removal_entry(path)?)?;
+        }
         let files: Box<dyn NativeFilePermit> = if managed && !artifacts_only {
             let workspace = WorkspaceService::new(&self.durable);
             let permit = if self.child.is_some() {
@@ -150,6 +156,38 @@ struct Protection {
     scratch: Option<PathBuf>,
     artifacts: Option<PathBuf>,
 }
+fn protect_shared_control(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions or side effects.
+        let uid = unsafe { libc::geteuid() };
+        for root in [
+            crate::execution::activity_projection_directory(),
+            PathBuf::from(format!("/tmp/jcode-workspace-root-leases-{uid}")),
+        ] {
+            ensure!(
+                !path.starts_with(resolve_target(&root)?),
+                "Native file mutation cannot edit shared harness ownership state"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn shared_control_metadata_rejects_direct_and_aliased_native_mutation() {
+    let root = crate::execution::activity_projection_directory();
+    assert!(protect_shared_control(&resolve_target(&root.join("fixture.json")).unwrap()).is_err());
+    let temporary = tempfile::tempdir().unwrap();
+    let alias = temporary.path().join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    assert!(protect_shared_control(&resolve_target(&alias.join("fixture.json")).unwrap()).is_err());
+    assert!(
+        protect_shared_control(&resolve_target(&temporary.path().join("ordinary")).unwrap())
+            .is_ok()
+    );
+}
 impl Protection {
     fn check(&self, path: &Path) -> Result<()> {
         let artifact = self
@@ -174,6 +212,7 @@ struct RestrictedPermit {
 }
 impl RestrictedPermit {
     fn check(&self, path: &Path) -> Result<()> {
+        protect_shared_control(&resolve_target(path)?)?;
         if let Some(child) = &self.child {
             child.check_path(path)?;
         }

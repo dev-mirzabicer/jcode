@@ -13,6 +13,30 @@ pub struct CloseoutRuntime<'a> {
 }
 
 impl<'a> CloseoutRuntime<'a> {
+    pub(super) fn check_stop(&self) -> Result<()> {
+        let reference = self.capture.reference().map_err(io)?;
+        let run = self
+            .execution
+            .inspect(&reference.invocation_id)
+            .map_err(io)?
+            .ok_or_else(|| {
+                issue(
+                    IssueCode::RecoveryRequired,
+                    "Closeout execution identity is missing",
+                )
+            })?;
+        if run.stop_cause.is_some() || run.state.terminal() {
+            return Err(issue(
+                IssueCode::Busy,
+                format!(
+                    "Closeout execution {} was stopped; inspect retained progress before a new attempt",
+                    run.id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn new(
         session_root: &'a Path,
         execution: &'a ExecutionStore,
@@ -125,6 +149,28 @@ impl WorkspaceService {
         findings: &mut Vec<CloseoutWorkFinding>,
     ) -> Result<()> {
         let root = stored.binding.observed_path();
+        match crate::execution::active_session_locations() {
+            Ok(active) => {
+                for activity in active {
+                    if activity
+                        .working_directory
+                        .as_deref()
+                        .map(|cwd| touches(cwd, root))
+                        .transpose()?
+                        .unwrap_or(false)
+                    {
+                        findings.push(finding(CloseoutWorkKind::Session,
+                            format!("{}:{}", activity.session_root.display(), activity.session),
+                            "A runtime namespace has a kernel-owned active Session in this checkout"));
+                    }
+                }
+            }
+            Err(error) => findings.push(finding(
+                CloseoutWorkKind::Unknown,
+                "cross-namespace-activity",
+                error.to_string(),
+            )),
+        }
         if touches(executor_cwd, root)? || touches(&std::env::current_dir().map_err(io)?, root)? {
             findings.push(finding(
                 CloseoutWorkKind::Executor,

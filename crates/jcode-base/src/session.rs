@@ -29,6 +29,15 @@ impl StreamingGuard {
             crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
         let _admission =
             workspace.acquire_location_use(session.working_dir.as_deref().map(Path::new), &[])?;
+        #[cfg(unix)]
+        {
+            let mut guard = Self::new(session.id.clone())?;
+            guard
+                ._activity
+                .publish_location(&crate::storage::jcode_dir()?)?;
+            Ok(guard)
+        }
+        #[cfg(not(unix))]
         Self::new(session.id.clone())
     }
     pub(crate) fn new(session_id: impl Into<String>) -> anyhow::Result<Self> {

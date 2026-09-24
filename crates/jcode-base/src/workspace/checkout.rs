@@ -548,7 +548,10 @@ impl WorkspaceService {
         } else {
             self.prepare_clone_parent(&operation.destination)?
         };
-        let _root = self.acquire_binding(&parent)?;
+        // Child creation/publication uses exclusive names and no-replacement
+        // rename. Keep the parent alive without excluding source readers or
+        // ordinary work sharing this directory.
+        let _root = self.acquire_mutation_binding(&parent)?;
         let final_path = operation.public.review.destination.clone();
         if final_path.parent() != Some(parent.observed_path()) {
             return Err(issue(
@@ -622,6 +625,34 @@ impl WorkspaceService {
                 self.verify_acquired(&operation, &stage)?;
             } else {
                 self.check_cancel(request)?;
+                let local_source = match &operation.public.review.spec.source {
+                    CloneSource::Local { path } => Some(path.clone()),
+                    CloneSource::Remote { url } if url.starts_with("file://") => Some(
+                        url::Url::parse(url)
+                            .map_err(io)?
+                            .to_file_path()
+                            .map_err(|_| {
+                                issue(
+                                    IssueCode::InvalidInput,
+                                    "Local Git URL does not identify a filesystem path",
+                                )
+                            })?,
+                    ),
+                    _ => None,
+                };
+                let _source_use = local_source
+                    .as_deref()
+                    .map(|path| self.acquire_location_use(Some(path), &[]))
+                    .transpose()?;
+                let source_binding = local_source
+                    .as_deref()
+                    .map(|path| self.resolver.bind_directory(path).map_err(io))
+                    .transpose()?;
+                let _source_root = source_binding
+                    .as_ref()
+                    .map(|binding| self.acquire_mutation_binding(binding))
+                    .transpose()?;
+                self.checkpoint("clone_source_admitted")?;
                 self.verify_source(&operation)?;
                 let template = self.root.join("clone-empty-template");
                 storage::private_dir(&template)?;
@@ -733,7 +764,7 @@ impl WorkspaceService {
                 "Clone destination already exists",
             ));
         }
-        let _ancestor_lease = self.acquire_binding(&current)?;
+        let _ancestor_lease = self.acquire_mutation_binding(&current)?;
         for component in components.iter().take(components.len() - 1) {
             let Component::Normal(name) = component else {
                 return Err(corrupt("Invalid destination suffix"));

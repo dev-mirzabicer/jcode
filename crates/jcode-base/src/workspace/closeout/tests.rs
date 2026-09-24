@@ -9,6 +9,292 @@ struct Fixture {
 }
 
 #[tokio::test]
+async fn removal_honors_durable_execution_stop_and_resumes_with_new_capture() {
+    use jcode_tool_core::OutputCapture;
+    let (fixture, record, first_capture) = prepared_approval_fixture(true, false).await;
+    let sessions = fixture._directory.path().join("sessions-state");
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let runtime = CloseoutRuntime::new(
+        &sessions,
+        &execution,
+        fixture._directory.path(),
+        &first_capture,
+    );
+    let review = fixture
+        .service
+        .review_closeout_removal(record.operation, record.revision, &runtime)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .declare_closeout_no_loss(
+            "fixture-agent",
+            RequestId::new(),
+            review.target(),
+            "synthetic assessment",
+            &runtime,
+        )
+        .await
+        .unwrap();
+    let run = execution
+        .inspect(&first_capture.reference().unwrap().invocation_id)
+        .unwrap()
+        .unwrap();
+    let stop_store = execution.clone();
+    let mut controlled = fixture.service.clone();
+    controlled.fault = Some(std::sync::Arc::new(move |stage| {
+        if stage == "closeout_entry_unlinked" {
+            assert!(
+                stop_store
+                    .request_stop(
+                        &run.id,
+                        &run.owner,
+                        jcode_tool_types::StopCause::HumanCancellation
+                    )
+                    .unwrap()
+            );
+        }
+        Ok(())
+    }));
+    assert_eq!(
+        controlled
+            .finish_closeout(record.operation, &runtime)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::Busy
+    );
+    let partial = fixture.service.inspect_closeout(record.operation).unwrap();
+    assert_eq!(partial.stage, CloseoutStage::RecoveryRequired);
+    assert_eq!(partial.removed_entries, 1);
+    assert!(partial.quarantine.as_ref().unwrap().is_dir());
+    let mut output = jcode_tool_types::ToolOutput::new("");
+    output.source = jcode_tool_types::OutputSource::Retained(first_capture.reference().unwrap());
+    first_capture
+        .seal(output, crate::execution::RunState::Cancelled)
+        .unwrap();
+    let second_capture = capture(&fixture, record.operation);
+    let resumed = CloseoutRuntime::new(
+        &sessions,
+        &execution,
+        fixture._directory.path(),
+        &second_capture,
+    );
+    assert_eq!(
+        fixture
+            .service
+            .finish_closeout(record.operation, &resumed)
+            .await
+            .unwrap()
+            .stage,
+        CloseoutStage::Closed
+    );
+    finish_capture(&second_capture);
+}
+
+#[tokio::test]
+async fn clone_sources_observe_closing_and_retain_physical_use_until_acquisition_finishes() {
+    for file_transport in [false, true] {
+        let fixture = Fixture::new();
+        let Entity::Location(location) = fixture
+            .service
+            .inspect(EntityId::Location(fixture.location))
+            .unwrap()
+        else {
+            panic!()
+        };
+        let LocationKind::Checkout { repository, .. } = location.kind else {
+            panic!()
+        };
+        let parent = fixture
+            .service
+            .resolver
+            .bind_directory(fixture._directory.path())
+            .unwrap();
+        let source_binding = fixture
+            .service
+            .resolver
+            .bind_directory(&fixture.root)
+            .unwrap();
+        let destination = fixture._directory.path().join("independent");
+        let source = if file_transport {
+            CloneSource::Remote {
+                url: url::Url::from_directory_path(fixture.root.canonicalize().unwrap())
+                    .unwrap()
+                    .to_string(),
+            }
+        } else {
+            CloneSource::Local {
+                path: fixture.root.clone(),
+            }
+        };
+        let spec = CloneSpec {
+            home: location.home.unwrap(),
+            repository,
+            name: "independent".into(),
+            source,
+            base: CloneBase::Branch {
+                name: git_text(&fixture.root, &["symbolic-ref", "--short", "HEAD"])
+                    .trim()
+                    .into(),
+            },
+            branch: CloneBranch::Detached,
+            remotes: vec![],
+            destination: CloneDestination::Custom {
+                volume_uuid: parent.volume().as_str().into(),
+                path: destination.clone(),
+            },
+            submodules: false,
+            lfs: false,
+            trusted_submodule_urls: vec![],
+            trusted_lfs_urls: vec![],
+        };
+        let review = fixture
+            .service
+            .review_clone(fixture.service.status().unwrap().revision, spec)
+            .unwrap();
+        let clone = fixture
+            .service
+            .begin_clone(RequestId::new(), review.id)
+            .unwrap();
+        let closeout = fixture.begin(false);
+        fixture
+            .service
+            .fence_closeout(closeout.operation, closeout.revision)
+            .unwrap();
+        let capture = capture(&fixture, clone.operation);
+        assert_eq!(
+            fixture
+                .service
+                .execute_clone(clone.request, &capture)
+                .await
+                .unwrap_err()
+                .code,
+            IssueCode::LiveWork
+        );
+        assert!(!destination.exists());
+        let closeout = fixture
+            .service
+            .inspect_closeout(closeout.operation)
+            .unwrap();
+        fixture
+            .service
+            .revoke_closeout(
+                &fixture.client,
+                RequestId::new(),
+                closeout.operation,
+                closeout.revision,
+            )
+            .unwrap();
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_copy = observed.clone();
+        let other = fixture.service.clone();
+        let mut producer = fixture.service.clone();
+        producer.fault = Some(std::sync::Arc::new(move |stage| {
+            if stage == "clone_source_admitted" {
+                assert!(
+                    matches!(other.acquire_binding(&source_binding), Err(error) if error.code == IssueCode::Busy)
+                );
+                observed_copy.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }));
+        let _ordinary_parent_use = fixture.service.acquire_mutation_binding(&parent).unwrap();
+        assert_eq!(
+            producer
+                .execute_clone(clone.request, &capture)
+                .await
+                .unwrap()
+                .state,
+            CloneState::Ready
+        );
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(destination.join(".git").is_dir());
+        assert!(fixture.root.join(".git").is_dir());
+        finish_capture(&capture);
+    }
+}
+
+#[test]
+fn work_observation_includes_other_namespace_and_tracks_committed_location() {
+    let _environment = crate::storage::lock_test_env();
+    let fixture = Fixture::new();
+    let foreign_root = crate::storage::jcode_dir().unwrap();
+    let local_root = fixture._directory.path().join("local-sessions");
+    let local_execution = crate::execution::ExecutionStore::open(&local_root).unwrap();
+    let mut session = crate::session::Session::create(None, None);
+    session.working_dir = Some(fixture.root.canonicalize().unwrap().display().to_string());
+    session.save().unwrap();
+    let before = session.messages.clone();
+    let activity = crate::session::StreamingGuard::for_session(&session).unwrap();
+    let started = fixture.begin(false);
+    let stored = load(&fixture.service.connection().unwrap(), started.operation).unwrap();
+    let mut findings = Vec::new();
+    fixture
+        .service
+        .observe_closeout_work(
+            &stored,
+            &local_root,
+            &local_execution,
+            fixture._directory.path(),
+            &mut findings,
+        )
+        .unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.kind == CloseoutWorkKind::Session
+                && finding.identity.contains(&session.id)),
+        "{findings:?}"
+    );
+    let projections = crate::execution::active_session_locations().unwrap();
+    assert!(projections.iter().any(|entry| entry.session == session.id
+        && entry.session_root == foreign_root.canonicalize().unwrap()));
+    // Synthetic committed location change through the real persistence owner.
+    // This checks observation, not the public move/notice workflow tested elsewhere.
+    session.working_dir = Some(
+        fixture
+            ._directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string(),
+    );
+    session.save().unwrap();
+    findings.clear();
+    fixture
+        .service
+        .observe_closeout_work(
+            &stored,
+            &local_root,
+            &local_execution,
+            fixture._directory.path(),
+            &mut findings,
+        )
+        .unwrap();
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.kind == CloseoutWorkKind::Session
+                && finding.identity.contains(&session.id)),
+        "{findings:?}"
+    );
+    assert_eq!(
+        serde_json::to_value(&session.messages).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    drop(activity);
+    assert!(
+        !crate::execution::active_session_locations()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.session == session.id)
+    );
+}
+
+#[tokio::test]
 async fn removal_rechecks_authority_after_concurrent_human_revocation() {
     let (fixture, record, capture) = prepared_approval_fixture(true, false).await;
     let sessions = fixture._directory.path().join("sessions-state");

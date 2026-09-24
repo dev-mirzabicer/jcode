@@ -5,6 +5,12 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::fs::{File, OpenOptions};
 
 pub const IDLE_SECONDS: i64 = 7 * 24 * 60 * 60;
+#[cfg(unix)]
+mod projection;
+#[cfg(unix)]
+pub use projection::{
+    ActiveSessionLocation, active_session_locations, activity_projection_directory,
+};
 
 pub struct SessionActivityGuard {
     store: ExecutionStore,
@@ -12,6 +18,8 @@ pub struct SessionActivityGuard {
     session: String,
     token: String,
     _lease: File,
+    #[cfg(unix)]
+    projection: Option<projection::Projection>,
 }
 impl Drop for SessionActivityGuard {
     fn drop(&mut self) {
@@ -138,6 +146,8 @@ impl ExecutionStore {
             session: session.into(),
             token,
             _lease: lease,
+            #[cfg(unix)]
+            projection: None,
         })
     }
 

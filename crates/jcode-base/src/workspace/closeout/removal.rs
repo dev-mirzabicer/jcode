@@ -194,6 +194,7 @@ impl WorkspaceService {
         if stored.record.stage == CloseoutStage::Closed {
             return Ok(stored.record);
         }
+        runtime.check_stop()?;
         let authorization = stored.record.authorization.as_ref().ok_or_else(|| {
             issue(
                 IssueCode::PermissionRequired,
@@ -397,6 +398,7 @@ impl WorkspaceService {
                     .ok_or_else(|| corrupt("Approved review missing"))?;
                 self.validate_closeout_review(stored, review, runtime)
                     .await?;
+                runtime.check_stop()?;
                 let binding = self
                     .resolver
                     .publish_empty_child(
@@ -491,6 +493,7 @@ impl WorkspaceService {
                     ));
                 }
             }
+            runtime.check_stop()?;
             self.retire_worktree(stored, runtime).await?;
             if present(&removal.holding)?
                 && !work::external_work(
@@ -583,6 +586,7 @@ impl WorkspaceService {
                 if sequence <= stored.record.removed_entries {
                     return Ok(());
                 }
+                runtime.check_stop()?;
                 self.remove_entry(stored, item, &holding, root_guard.as_ref())?;
                 Ok(())
             })?;
