@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct LfsObject {
     pub oid: String,
     pub size: u64,
+    #[serde(with = "jcode_workspace_types::filesystem_path")]
     pub source: PathBuf,
     pub preserved: PathBuf,
     pub restored: PathBuf,

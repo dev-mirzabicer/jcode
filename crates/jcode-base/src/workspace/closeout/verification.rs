@@ -140,6 +140,11 @@ pub(super) fn linked_content(
 }
 
 pub(super) fn references_digest(references: &references::References) -> Result<String> {
+    #[derive(Serialize)]
+    struct ResolvedPaths(
+        #[serde(with = "jcode_workspace_types::filesystem_path")] PathBuf,
+        #[serde(with = "jcode_workspace_types::filesystem_path")] PathBuf,
+    );
     let mut stable = references.clone();
     // The operation itself owns this lifecycle transition. Organization,
     // binding, sessions, grants and linked data still remain in the fingerprint.
@@ -149,7 +154,7 @@ pub(super) fn references_digest(references: &references::References) -> Result<S
         .links
         .iter()
         .map(|link| {
-            Ok((
+            Ok(ResolvedPaths(
                 crate::location::native_files::resolve_target(&link.path).map_err(io)?,
                 crate::location::native_files::resolve_removal_entry(&link.path).map_err(io)?,
             ))

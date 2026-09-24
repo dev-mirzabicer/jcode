@@ -699,14 +699,14 @@ impl JcodeClient {
         &self,
         request: jcode_harness_api::CloseoutRequest,
     ) -> Result<jcode_harness_api::CloseoutReply> {
-        self.require_capability("checkout_closeout_v1")?;
+        self.require_capability("checkout_closeout_v2")?;
         if !matches!(
             self.request_ok(ApiRequest::CloseoutProbe)?.event,
-            ApiEvent::CloseoutCapabilities { version: Some(1) }
+            ApiEvent::CloseoutCapabilities { version: Some(2) }
         ) {
             return Err(Error::new(
                 ErrorKind::UnsupportedCapability,
-                "Native checkout closeout version 1 is unavailable",
+                "Native checkout closeout version 2 (lossless Unix paths) is unavailable",
             ));
         }
         let expected = request.clone();

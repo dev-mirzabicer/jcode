@@ -548,11 +548,17 @@ is never killed to stop a task. Ordinary `stop` remains available for older owne
 
 ### Checkout closeout controls
 
-Harness API v1.9 adds `closeout(request)` in both SDKs. It requires the bridge's
-`checkout_closeout_v1` and separately probes the native runtime for version 1.
+Harness API v1.10 adds `closeout(request)` in both SDKs. It requires the bridge's
+`checkout_closeout_v2` and separately probes the native runtime for version 2.
 Unsupported or older runtimes reject before a closeout control is submitted.
 No Session creation or attachment is involved. Target Location IDs and catalog
 revisions come from the workspace catalog, not filesystem path guessing.
+
+Inventory entries, link targets, existing-preservation destinations and removal
+entries use `CloseoutFilesystemPath`: a Unicode string or `{unix_bytes: number[]}`
+for an opaque Unix path. Keep byte paths as bytes (for example `Buffer.from(...)`
+in Node filesystem APIs), never a lossy UTF-8 string. Older closeout versions
+are refused before control submission rather than losing native path identity.
 
 The typed requests cover begin, inventory, disposition, preservation, review,
 approval, finish, recovery, history and exact execution inspection/Stop. The

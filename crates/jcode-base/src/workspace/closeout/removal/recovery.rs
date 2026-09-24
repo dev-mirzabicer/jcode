@@ -6,6 +6,7 @@ use super::*;
 struct Observation {
     view: CloseoutRecoveryPath,
     witness: Option<Witness>,
+    #[serde(with = "jcode_workspace_types::filesystem_path::optional")]
     link: Option<PathBuf>,
     binding: Option<PhysicalBinding>,
 }

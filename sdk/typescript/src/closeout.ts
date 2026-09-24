@@ -1,5 +1,8 @@
 import type {ExecutionRequest, ExecutionResponse, WorkspaceHome, WorkspaceIssueCode} from "./protocol.js";
 
+/** Ordinary paths remain strings. Opaque Unix byte paths must never be decoded lossily. */
+export type CloseoutFilesystemPath = string | {unix_bytes: number[]};
+
 export interface CloseoutIssue {code: WorkspaceIssueCode; detail: string}
 export interface CloseoutSpec {location: string; expected_generation: number; preservation_directory: string | null; conditional_no_loss?: boolean; full_archive?: boolean}
 export type CloseoutStage = "preparing" | "needs_decision" | "preserving" | "ready_for_approval" | "authorized" | "removing" | "closed" | "revoked" | "recovery_required" | "retained";
@@ -27,14 +30,14 @@ export interface CloseoutRecoveryReview {
 }
 export type CloseoutEntryKind = "file" | "directory" | "symlink" | "mount" | "special" | "git" | "reference";
 export interface CloseoutEntry {
-  id: string; path: string; kind: CloseoutEntryKind; bytes: number; sha256: string | null; link_target: string | null;
+  id: string; path: CloseoutFilesystemPath; kind: CloseoutEntryKind; bytes: number; sha256: string | null; link_target: CloseoutFilesystemPath | null;
   links: number; mode: number; facts: string[]; blockers: CloseoutIssue[];
 }
-export type CloseoutDisposition = {kind: "retain" | "redundant"; reason: string} | {kind: "preserve"} | {kind: "preserved"; path: string};
+export type CloseoutDisposition = {kind: "retain" | "redundant"; reason: string} | {kind: "preserve"} | {kind: "preserved"; path: CloseoutFilesystemPath};
 export interface CloseoutDecision {entry: string; disposition: CloseoutDisposition; recorded_by: string}
 export interface CloseoutInventoryPage {operation: string; digest: string; total: number; entries: CloseoutEntry[]; next: number | null}
 export type CloseoutEntryProgress = "not_processed" | "unconfirmed" | "removed";
-export interface CloseoutRemovalEntry {id: string; path: string; progress: CloseoutEntryProgress}
+export interface CloseoutRemovalEntry {id: string; path: CloseoutFilesystemPath; progress: CloseoutEntryProgress}
 export interface CloseoutRemovalPage {operation: string; revision: number; total: number; completed: number; pending: CloseoutRemovalEntry | null; entries: CloseoutRemovalEntry[]; next: number | null}
 export interface WorkspaceLocation {
   id: string; name: string; home: WorkspaceHome | null;

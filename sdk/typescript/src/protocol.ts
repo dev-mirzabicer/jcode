@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 9;
+export const API_VERSION_MINOR = 10;
 import type {CloseoutRequest, CloseoutReply} from "./closeout.js";
 export type * from "./closeout.js";
 

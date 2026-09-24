@@ -1942,7 +1942,7 @@ fn primary_controls_preserve_identity_and_ignore_transport_ack_without_attachmen
 fn closeout_bridge_preserves_admin_identity_without_attaching_and_ignores_ack() {
     let mut bridge = BridgeState::default();
     let operation = "12a99e11-e967-4a1e-a47c-000000000007";
-    for version in [None, Some(1u32)] {
+    for version in [None, Some(1u32), Some(2u32)] {
         let outbound = bridge.api_request_to_legacy(&json!({"id":42,"req":"closeout_probe"}));
         let Outbound::Legacy(wire) = &outbound[0] else {
             panic!()

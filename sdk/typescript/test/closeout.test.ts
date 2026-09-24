@@ -15,10 +15,10 @@ const operation = "12a99e11-e967-4a1e-a47c-000000000007";
 const command: CloseoutRequest = {action:"inventory", operation, digest:"fixture", after:0, limit:10};
 
 test("closeout rejects missing bridge/native support before control submission", async () => {
-  for (const mode of ["old", "none", "newer"]) {
+  for (const mode of ["old", "none", "older", "newer"]) {
     let controls = 0;
-    const server = await startMockHarness({capabilities: mode === "old" ? [] : ["checkout_closeout_v1"], onRequest(request, send) {
-      if (request.req === "closeout_probe") send({v:1, reply_to:request.id, ev:"closeout_capabilities", version:mode === "none" ? null : 2});
+    const server = await startMockHarness({capabilities: mode === "old" ? ["checkout_closeout_v1"] : ["checkout_closeout_v2"], onRequest(request, send) {
+      if (request.req === "closeout_probe") send({v:1, reply_to:request.id, ev:"closeout_capabilities", version:mode === "none" ? null : mode === "older" ? 1 : 3});
       else controls++;
     }});
     const client = await JcodeClient.connect({socketPath:server.socketPath, ensureRuntime:false});
@@ -31,8 +31,8 @@ test("closeout rejects missing bridge/native support before control submission",
 
 test("closeout retains typed refusal and rejects foreign target/digest without a Session", async () => {
   for (const mode of ["correct", "foreign", "rejected", "malformed"]) {
-    const server = await startMockHarness({capabilities:["checkout_closeout_v1"], onRequest(request, send) {
-      if (request.req === "closeout_probe") {send({v:1, reply_to:request.id, ev:"closeout_capabilities", version:1}); return;}
+    const server = await startMockHarness({capabilities:["checkout_closeout_v2"], onRequest(request, send) {
+      if (request.req === "closeout_probe") {send({v:1, reply_to:request.id, ev:"closeout_capabilities", version:2}); return;}
       assert.equal(request.req, "closeout");
       assert.deepEqual(request.request, command);
       const reply = mode === "malformed" ? {status:"state", response:{kind:"inventory",value:null}} : mode === "rejected" ? {status:"rejected", issue:{code:"preservation_incomplete", detail:"synthetic"}} : {
@@ -51,10 +51,10 @@ test("closeout retains typed refusal and rejects foreign target/digest without a
 test("closeout freezes caller intent before capability wait and compares object fields structurally", async () => {
   const input: CloseoutRequest = {action:"execute", request:"12a99e11-e967-4a1e-a47c-000000000008", spec:{operation, expected_revision:7, action:{action:"finish"}}};
   const expected = structuredClone(input);
-  const server = await startMockHarness({capabilities:["checkout_closeout_v1"], onRequest(request, send) {
+  const server = await startMockHarness({capabilities:["checkout_closeout_v2"], onRequest(request, send) {
     if (request.req === "closeout_probe") {
       input.spec.expected_revision = 99;
-      send({v:1, reply_to:request.id, ev:"closeout_capabilities", version:1}); return;
+      send({v:1, reply_to:request.id, ev:"closeout_capabilities", version:2}); return;
     }
     assert.equal(request.req, "closeout");
     assert.deepEqual(request.request, expected);

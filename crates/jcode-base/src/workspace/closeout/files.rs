@@ -10,6 +10,7 @@ mod metadata;
 pub(super) struct PreservedItem {
     pub item: Item,
     pub disposition: CloseoutDisposition,
+    #[serde(default, with = "jcode_workspace_types::filesystem_path::optional")]
     pub saved: Option<PathBuf>,
     #[serde(default)]
     pub metadata_digest: Option<String>,

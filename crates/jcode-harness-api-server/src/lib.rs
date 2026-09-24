@@ -41,7 +41,7 @@ pub use jcode_harness_api::{api_socket_path, legacy_socket_path};
 /// message carrying base64 images) and far below a problem.
 const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
 const BRIDGE_CAPABILITIES: &[&str] = &[
-    "checkout_closeout_v1",
+    "checkout_closeout_v2",
     "primary_control_v1",
     "primary_launch_v1",
     "sessions",

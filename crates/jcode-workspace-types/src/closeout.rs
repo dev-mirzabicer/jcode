@@ -341,10 +341,12 @@ pub enum CloseoutEntryKind {
 pub struct CloseoutEntry {
     /// Bound to inventory contents, never a display row number.
     pub id: String,
+    #[serde(with = "crate::filesystem_path")]
     pub path: PathBuf,
     pub kind: CloseoutEntryKind,
     pub bytes: u64,
     pub sha256: Option<String>,
+    #[serde(default, with = "crate::filesystem_path::optional")]
     pub link_target: Option<PathBuf>,
     pub links: u64,
     pub mode: u32,
@@ -361,6 +363,7 @@ pub enum CloseoutDisposition {
     Preserve,
     /// Verification compares the source with this exact readable destination.
     Preserved {
+        #[serde(with = "crate::filesystem_path")]
         path: PathBuf,
     },
     Redundant {
@@ -395,6 +398,7 @@ pub enum CloseoutEntryProgress {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CloseoutRemovalEntry {
     pub id: String,
+    #[serde(with = "crate::filesystem_path")]
     pub path: PathBuf,
     pub progress: CloseoutEntryProgress,
 }

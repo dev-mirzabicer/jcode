@@ -481,9 +481,9 @@ export class JcodeClient extends EventEmitter {
   /** Administrative control without Session creation. Retain request IDs on retry. */
   async closeout(request: CloseoutRequest): Promise<CloseoutReply> {
     const expected = structuredClone(request);
-    if (!this.supports("checkout_closeout_v1")) throw new HarnessError("unsupported_capability", "Closeout requires checkout_closeout_v1");
+    if (!this.supports("checkout_closeout_v2")) throw new HarnessError("unsupported_capability", "Closeout requires checkout_closeout_v2");
     const capability = await this.expectReply({req:"closeout_probe"}, "closeout_capabilities");
-    if (capability.ev !== "closeout_capabilities" || capability.version !== 1) throw new HarnessError("unsupported_capability", "Native checkout closeout version 1 is unavailable");
+    if (capability.ev !== "closeout_capabilities" || capability.version !== 2) throw new HarnessError("unsupported_capability", "Native checkout closeout version 2 (lossless Unix paths) is unavailable");
     const response = await this.expectReply({req:"closeout", request:expected}, "closeout");
     if (response.ev !== "closeout" || !matchesCloseoutReply(expected, response.reply)) throw new HarnessError("unexpected_reply", "Closeout response identity or kind mismatch");
     return response.reply;

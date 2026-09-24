@@ -33,16 +33,16 @@ fn closeout_sdk_negotiates_and_rejects_foreign_identity_without_creating_session
         after: 0,
         limit: 10,
     };
-    let old = fake_harness_with_capabilities(vec![], |_, _| {
+    let old = fake_harness_with_capabilities(vec!["checkout_closeout_v1".into()], |_, _| {
         panic!("Unsupported closeout reached transport")
     });
     assert_eq!(
         old.closeout(command.clone()).unwrap_err().kind,
         ErrorKind::UnsupportedCapability
     );
-    for version in [None, Some(2)] {
+    for version in [None, Some(1), Some(3)] {
         let client = fake_harness_with_capabilities(
-            vec!["checkout_closeout_v1".into()],
+            vec!["checkout_closeout_v2".into()],
             move |frame, writer| {
                 assert!(matches!(frame.request, ApiRequest::CloseoutProbe));
                 reply(frame, ApiEvent::CloseoutCapabilities { version }, writer);
@@ -55,11 +55,11 @@ fn closeout_sdk_negotiates_and_rejects_foreign_identity_without_creating_session
     }
     for mismatched in [false, true] {
         let client = fake_harness_with_capabilities(
-            vec!["checkout_closeout_v1".into()],
+            vec!["checkout_closeout_v2".into()],
             move |frame, writer| match &frame.request {
                 ApiRequest::CloseoutProbe => reply(
                     frame,
-                    ApiEvent::CloseoutCapabilities { version: Some(1) },
+                    ApiEvent::CloseoutCapabilities { version: Some(2) },
                     writer,
                 ),
                 ApiRequest::Closeout { request } => {

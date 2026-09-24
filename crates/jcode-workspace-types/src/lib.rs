@@ -6,6 +6,7 @@ pub use permissions::*;
 mod checkout;
 pub use checkout::*;
 mod closeout;
+pub mod filesystem_path;
 pub use closeout::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

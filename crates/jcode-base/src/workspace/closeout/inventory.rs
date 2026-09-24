@@ -49,6 +49,7 @@ pub(super) struct Item {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) struct TreeSnapshot {
+    #[serde(with = "jcode_workspace_types::filesystem_path")]
     pub root: PathBuf,
     pub manifest: PathBuf,
     pub digest: String,

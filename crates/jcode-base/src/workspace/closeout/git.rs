@@ -122,11 +122,7 @@ async fn prepare_index_view(
         capture,
     )
     .await?;
-    let text = std::fs::read_to_string(location).map_err(io)?;
-    let path = PathBuf::from(
-        text.strip_suffix('\n')
-            .ok_or_else(|| corrupt("Git index path missing terminator"))?,
-    );
+    let path = read_path_output(&location)?;
     let target = directory.join("index");
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -184,8 +180,11 @@ async fn prepare_index_view(
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) struct RepositorySnapshot {
+    #[serde(with = "jcode_workspace_types::filesystem_path")]
     pub root: PathBuf,
+    #[serde(with = "jcode_workspace_types::filesystem_path")]
     pub git_directory: PathBuf,
+    #[serde(with = "jcode_workspace_types::filesystem_path")]
     pub common_directory: PathBuf,
     pub object_format: String,
     pub refs: BTreeMap<String, String>,
@@ -352,13 +351,12 @@ pub(super) async fn observe(
     let mut observations = BTreeMap::new();
     for (name, arguments) in [
         (
-            "identity",
-            vec![
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-dir",
-                "--git-common-dir",
-            ],
+            "git-directory",
+            vec!["rev-parse", "--path-format=absolute", "--git-dir"],
+        ),
+        (
+            "common-directory",
+            vec!["rev-parse", "--path-format=absolute", "--git-common-dir"],
         ),
         ("format", vec!["rev-parse", "--show-object-format"]),
         (
@@ -374,13 +372,8 @@ pub(super) async fn observe(
         runner.run(root, &arguments, None, &output).await?;
         observations.insert(name.into(), backup::file_digest(&output)?);
     }
-    let identity = std::fs::read_to_string(destination.join("identity")).map_err(io)?;
-    let paths: Vec<_> = identity.lines().collect();
-    if paths.len() != 2 {
-        return Err(corrupt("Invalid Git metadata identity"));
-    }
-    let git_directory = PathBuf::from(paths[0]);
-    let common_directory = PathBuf::from(paths[1]);
+    let git_directory = read_path_output(&destination.join("git-directory"))?;
+    let common_directory = read_path_output(&destination.join("common-directory"))?;
     let object_format = std::fs::read_to_string(destination.join("format"))
         .map_err(io)?
         .trim()
@@ -587,16 +580,10 @@ pub(super) async fn preserve(
         .join("objects")
         .canonicalize()
         .map_err(io)?;
-    if objects.to_string_lossy().contains(['\n', '\r']) {
-        return Err(issue(
-            IssueCode::InvalidInput,
-            "Git object path cannot be represented as a temporary alternate",
-        ));
-    }
     // Only the temporary source borrows objects. Neither source refs nor the
     // restored evidence repository acquires any new dependency or mutation.
     let mut alternates = archive.file(&bare.join("objects/info/alternates"))?;
-    writeln!(alternates, "{}", objects.display()).map_err(io)?;
+    writeln!(alternates, "{}", quoted_alternate(&objects)).map_err(io)?;
     alternates.sync_all().map_err(io)?;
     let mut refs = snapshot.refs.clone();
     let prefix = format!("refs/jcode-closeout/{operation}");
@@ -831,6 +818,40 @@ fn validate_oid(oid: &str) -> Result<()> {
         return Err(corrupt("Invalid Git object identity"));
     }
     Ok(())
+}
+
+fn read_path_output(path: &Path) -> Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = std::fs::read(path).map_err(io)?;
+    let bytes = bytes
+        .strip_suffix(b"\n")
+        .ok_or_else(|| corrupt("Git path observation missing terminator"))?;
+    if bytes.contains(&0) {
+        return Err(corrupt("Git path observation contains NUL"));
+    }
+    let path = PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()));
+    if !path.is_absolute() {
+        return Err(corrupt("Git metadata path must be absolute"));
+    }
+    Ok(path)
+}
+
+fn quoted_alternate(path: &Path) -> String {
+    use std::fmt::Write;
+    use std::os::unix::ffi::OsStrExt;
+    // Git's alternates format accepts C-style quoted byte strings. Octal
+    // escapes keep newline, quote, backslash and opaque bytes unambiguous.
+    let mut quoted = String::from("\"");
+    for byte in path.as_os_str().as_bytes() {
+        match *byte {
+            0x20..=0x7e if !matches!(*byte, b'"' | b'\\') => quoted.push(char::from(*byte)),
+            _ => {
+                write!(&mut quoted, "\\{byte:03o}").expect("String formatting cannot fail");
+            }
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 pub(super) async fn run(

@@ -783,7 +783,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             catalog_version: 1,
                             permissions_version: Some(1),
                             checkout_version: Some(1),
-                            closeout_version: cfg!(target_os = "macos").then_some(1),
+                            closeout_version: cfg!(target_os = "macos").then_some(2),
                             managed_rollout: false,
                         },
                     )
@@ -3689,7 +3689,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     catalog_version: 1,
                     permissions_version: Some(1),
                     checkout_version: Some(1),
-                    closeout_version: cfg!(target_os = "macos").then_some(1),
+                    closeout_version: cfg!(target_os = "macos").then_some(2),
                     managed_rollout: false,
                 });
             }

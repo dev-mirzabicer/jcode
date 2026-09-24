@@ -1102,5 +1102,174 @@
       }
     },
     "accepted": true
+  },
+  {
+    "name": "opaque-entry-and-target",
+    "request": {
+      "action": "inventory",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+      "digest": "fixture",
+      "after": 0,
+      "limit": 2
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "inventory",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "digest": "fixture",
+          "total": 1,
+          "entries": [
+            {
+              "id": "byte-exact",
+              "path": {
+                "unix_bytes": [
+                  101,
+                  255
+                ]
+              },
+              "kind": "symlink",
+              "bytes": 2,
+              "sha256": null,
+              "link_target": {
+                "unix_bytes": [
+                  47,
+                  254
+                ]
+              },
+              "links": 1,
+              "mode": 41471,
+              "facts": [],
+              "blockers": []
+            }
+          ],
+          "next": null
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "opaque-disposition",
+    "request": {
+      "action": "execute",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "spec": {
+        "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_revision": 7,
+        "action": {
+          "action": "disposition",
+          "decision": {
+            "entry": "entry-id",
+            "disposition": {
+              "kind": "preserved",
+              "path": {
+                "unix_bytes": [
+                  47,
+                  255
+                ]
+              }
+            },
+            "recorded_by": "fixture"
+          }
+        }
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_revision": 7,
+            "action": {
+              "action": "disposition",
+              "decision": {
+                "entry": "entry-id",
+                "disposition": {
+                  "kind": "preserved",
+                  "path": {
+                    "unix_bytes": [
+                      47,
+                      255
+                    ]
+                  }
+                },
+                "recorded_by": "fixture"
+              }
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "opaque-disposition-foreign-bytes",
+    "request": {
+      "action": "execute",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "spec": {
+        "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_revision": 7,
+        "action": {
+          "action": "disposition",
+          "decision": {
+            "entry": "entry-id",
+            "disposition": {
+              "kind": "preserved",
+              "path": {
+                "unix_bytes": [
+                  47,
+                  255
+                ]
+              }
+            },
+            "recorded_by": "fixture"
+          }
+        }
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_revision": 7,
+            "action": {
+              "action": "disposition",
+              "decision": {
+                "entry": "entry-id",
+                "disposition": {
+                  "kind": "preserved",
+                  "path": {
+                    "unix_bytes": [
+                      47,
+                      254
+                    ]
+                  }
+                },
+                "recorded_by": "fixture"
+              }
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": false
   }
 ]

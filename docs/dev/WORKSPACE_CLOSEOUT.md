@@ -6,14 +6,14 @@ preservation, closing admission/work observation, review-bound final approval,
 and catalog-journaled removal with retained history. The native workspace
 protocol now supplies the trusted macOS control path through the shared execution
 supervisor. It has been exercised with owned disposable fixtures, not real user
-checkout deletion. Harness API v1.9 and both SDKs consume that same service;
+checkout deletion. Harness API v1.10 and both SDKs consume that same service;
 remaining caller/admission and preservation cases, final combined runtime
 verification and activation remain WP-07 work.
 There is no workspace agent tool or ordinary managed-rollout activation here.
 
 ## Native control and retained execution
 
-`workspace_probe` advertises optional `closeout_version=1` on macOS. Its absence
+`workspace_probe` advertises optional `closeout_version=2` on macOS. Its absence
 means unsupported, not an empty closeout list. `WorkspaceRequest::Closeout`
 contains the typed `CloseoutRequest`; controls do not require creating or
 attaching a primary Session. The same authenticated same-user boundary applies,
@@ -51,7 +51,7 @@ final agent-assisted guidance remain the later C01/C04/C05 consumers.
 
 ## Domain authority
 
-The curated Harness route advertises `checkout_closeout_v1`, then probes the
+The curated Harness route advertises `checkout_closeout_v2`, then probes the
 actual daemon's optional closeout version. `JcodeClient::closeout` in Rust and
 `JcodeClient.closeout` in TypeScript preserve complete typed request/reply
 contracts without Session attachment. The bridge keeps native correlation IDs
@@ -59,7 +59,7 @@ separate from client frame IDs. Bridge and clients reject foreign target/kind
 replies, and exact output-part identity includes part, offset and expected
 digest. TypeScript snapshots caller intent before asynchronous negotiation.
 Domain rejections remain typed `CloseoutReply::Rejected` values, distinct from
-transport or reply-correlation failures. The common 34-case synthetic wire
+transport or reply-correlation failures. The common synthetic wire
 matrix checks both language implementations, not model behavior or prose.
 
 Catalog organization/discovery still has its existing native owner. This
@@ -102,6 +102,23 @@ a fixed-size buffer. Symlinks are recorded without following their targets,
 mount/special-file findings block preservation, and changed source entries
 invalidate the observation. Dispositions identify exact entries and provenance.
 Unknown data is not implicitly classified as disposable.
+
+Closeout version 2 keeps ordinary paths as JSON strings and represents an opaque
+Unix path as `{ "unix_bytes": [47, 255] }`. This applies to inventory paths/link
+targets, retained files, dispositions and removal progress. Rust retains PathBuf
+identity internally; TypeScript exposes `CloseoutFilesystemPath`. Do not coerce
+the byte variant to text for filesystem operations. NUL, unknown fields, invalid
+byte values and noncanonical byte encoding of Unicode paths are rejected.
+Older bridge/native versions are refused before SDK control submission rather
+than silently losing path identity. Ordinary persisted path strings remain valid.
+
+Native APFS rejects non-UTF-8 filenames but permits opaque symlink targets. The
+native fixtures exercise those targets, newline/tab names and a nested Git root
+containing newline/quote characters through preservation and removal. The wire
+codec separately tests distinct opaque filename bytes. This is not a claim that
+APFS accepts filenames its kernel rejects or that another filesystem was tested.
+Git metadata paths are read one framed result at a time, and temporary alternate
+paths use Git's quoted-byte syntax rather than newline splitting or lossy text.
 
 Refresh also snapshots organization/grants, related Session placement and cwd,
 original child-parent identity, side-panel links, child artifacts and instruction

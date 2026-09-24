@@ -1,5 +1,6 @@
 use super::*;
 mod git_edges;
+mod native_paths;
 
 struct Fixture {
     _directory: tempfile::TempDir,

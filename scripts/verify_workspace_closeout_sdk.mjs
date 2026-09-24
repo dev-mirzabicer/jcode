@@ -67,6 +67,9 @@ try {
   await wait(stopped,"cancelled"); evidence.cancelled=true; save();
   record=await inspect(record.operation);
   record=(await perform(record,{action:"refresh"})).value;
+  const inventory=(await call({action:"inventory",operation:record.operation,digest:record.inventory_digest,after:0,limit:200})).value;
+  assert.deepEqual(inventory.entries.find(entry=>entry.path==="opaque-link").link_target,{unix_bytes:fixture.opaque_target});
+  assert(inventory.entries.some(entry=>entry.path===fixture.unusual_name));
   record=(await perform(record,{action:"preserve"})).value;
   const review=(await perform(record,{action:"review_removal"})).value;
   assert.deepEqual(review.issues,[]);
@@ -80,6 +83,8 @@ try {
   assert(capture); assert.equal(fs.statSync(path.join(capture,"verified-restore","payload")).size,fixture.payload_bytes);
   assert.equal(createHash("sha256").update(fs.readFileSync(path.join(capture,"verified-restore","payload"))).digest("hex"),fixture.payload_sha256);
   assert.equal(fs.readFileSync(path.join(capture,"verified-restore","unique"),"utf8"),"unique fixture information\n");
+  assert.equal(fs.readFileSync(path.join(capture,"verified-restore",fixture.unusual_name),"utf8"),"unusual filename contents");
+  assert.deepEqual(fs.readlinkSync(path.join(capture,"verified-restore","opaque-link"),{encoding:"buffer"}),Buffer.from(fixture.opaque_target));
   const output=await call({action:"execution",request:actions.at(-1).request,control:{action:"read",run_id:actions.at(-1).run_id,content:"output",output_size:2000}});
   assert.equal(output.kind,"execution"); assert.equal(output.value.kind,"content");
   evidence.record=record; evidence.history=history; evidence.output_read=true; save();

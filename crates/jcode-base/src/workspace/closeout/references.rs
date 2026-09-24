@@ -16,6 +16,7 @@ pub(super) struct SessionReference {
     pub session: String,
     pub placement: Option<Placement>,
     pub cwd: Option<String>,
+    #[serde(default, with = "jcode_workspace_types::filesystem_path::optional")]
     pub initial_cwd: Option<PathBuf>,
     pub original_parent: Option<String>,
 }
@@ -23,6 +24,7 @@ pub(super) struct SessionReference {
 pub(super) struct Link {
     pub owner: String,
     pub kind: String,
+    #[serde(with = "jcode_workspace_types::filesystem_path")]
     pub path: PathBuf,
 }
 

@@ -39,7 +39,7 @@ try:
     f.start()
     f.counter+=1; f.send({'type':'workspace_probe','id':f.counter})
     probe=f.until(lambda e:e.get('id')==f.counter and e.get('type')=='workspace_capabilities')
-    assert probe.get('closeout_version')==1 and not probe['managed_rollout'], probe
+    assert probe.get('closeout_version')==2 and not probe['managed_rollout'], probe
     rpc('initialize','status',request=uid())
     project=change('create_project',name='fixture-project')
     repository=change('create_repository',name='fixture-repo',remotes=[])
@@ -49,8 +49,13 @@ try:
     size=16*1024*1024
     (checkout/'payload').write_bytes(b'P'*size)
     (checkout/'unique').write_text('unique fixture information\n')
+    unusual='line\n\tname'
+    (checkout/unusual).write_text('unusual filename contents')
+    target=b'/missing/\xff'
+    os.symlink(target,os.fsencode(checkout/'opaque-link'))
     location=change('register_location',name='fixture-checkout',path=str(checkout),registration={'kind':'checkout','home':{'kind':'project','id':project['id']},'repository':repository['id']})
     fixture={'location':location['id'],'checkout':str(checkout.resolve()),'revision':rpc('status','status')['revision'],'payload_bytes':size,'payload_sha256':sha256(checkout/'payload')}
+    fixture.update(unusual_name=unusual,opaque_target=list(target))
     (f.ROOT/'fixture.json').write_text(json.dumps(fixture))
     bridge_binary=str(Path(os.environ['JCODE_WP07_BRIDGE']).resolve())
     bridge=subprocess.Popen([bridge_binary,str(f.ROOT/'api.sock'),str(f.sockpath)],env=f.env,stdout=bridge_log,stderr=bridge_log)
