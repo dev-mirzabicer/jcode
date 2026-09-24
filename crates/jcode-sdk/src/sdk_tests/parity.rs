@@ -34,6 +34,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("set_retention_policy", "setRetentionPolicy"),
     cap("create_session", "createSession"),
     cap("launch_primary", "launchPrimary"),
+    cap("closeout", "closeout"),
     cap("submit_primary_input", "submitPrimaryInput"),
     cap("inspect_primary_input", "inspectPrimaryInput"),
     cap("read_primary_input", "readPrimaryInput"),

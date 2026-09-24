@@ -403,3 +403,30 @@ fn snake_case(name: &str) -> String {
     }
     out
 }
+
+mod correlation_tests {
+    use super::*;
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        request: CloseoutRequest,
+        reply: CloseoutReply,
+        accepted: bool,
+    }
+    #[test]
+    fn shared_closeout_reply_correlation_matrix() {
+        let cases: Vec<Case> = serde_json::from_str(include_str!(
+            "../../../jcode-workspace-types/src/closeout/correlation.json"
+        ))
+        .unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            assert_eq!(
+                case.request.matches_reply(&case.reply),
+                case.accepted,
+                "{}",
+                case.name
+            );
+        }
+    }
+}

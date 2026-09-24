@@ -546,6 +546,32 @@ advertised `execution_force_stop_v1` capability. It targets only a verified owne
 native process. Acceptance is not terminal completion, and the shared Jcode server
 is never killed to stop a task. Ordinary `stop` remains available for older owners.
 
+### Checkout closeout controls
+
+Harness API v1.9 adds `closeout(request)` in both SDKs. It requires the bridge's
+`checkout_closeout_v1` and separately probes the native runtime for version 1.
+Unsupported or older runtimes reject before a closeout control is submitted.
+No Session creation or attachment is involved. Target Location IDs and catalog
+revisions come from the workspace catalog, not filesystem path guessing.
+
+The typed requests cover begin, inventory, disposition, preservation, review,
+approval, finish, recovery, history and exact execution inspection/Stop. The
+reply is either `{status:"state", response:...}` or a typed
+`{status:"rejected", issue:...}`. Transport failures remain SDK errors. Both
+clients reject mismatched operation/request/revision/digest/run identities.
+
+Retain each action request UUID across uncertain replies. An action receipt
+identifies a retained execution, not completion or approval. Inspect the action
+and execution until their authoritative outcome is known before progressing.
+Do not generate a new request simply because transport failed. Explicit new
+attempts use current reviewed state and a new UUID. Human approval remains bound
+to an exact review, and unregister/retain-files is distinct from deletion.
+
+These are trusted same-user controls, not an agent-access or physical-human
+attestation boundary. The ordinary workspace agent tool and final management
+experience remain separately staged. See [checkout closeout](../../docs/dev/WORKSPACE_CLOSEOUT.md)
+for retained data, recovery and native filesystem/process limitations.
+
 ### Explicit managed primary preparation (staged)
 
 Harness API v1.7 adds `launchPrimary(request)` with the `primary_launch_v1`

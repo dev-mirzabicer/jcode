@@ -6,8 +6,9 @@ preservation, closing admission/work observation, review-bound final approval,
 and catalog-journaled removal with retained history. The native workspace
 protocol now supplies the trusted macOS control path through the shared execution
 supervisor. It has been exercised with owned disposable fixtures, not real user
-checkout deletion. Harness/SDK reconciliation, remaining caller/admission and
-preservation cases, and final runtime integration/activation remain WP-07 work.
+checkout deletion. Harness API v1.9 and both SDKs consume that same service;
+remaining caller/admission and preservation cases, final combined runtime
+verification and activation remain WP-07 work.
 There is no workspace agent tool or ordinary managed-rollout activation here.
 
 ## Native control and retained execution
@@ -49,6 +50,20 @@ results retain their revision/target identity. Existing human management and
 final agent-assisted guidance remain the later C01/C04/C05 consumers.
 
 ## Domain authority
+
+The curated Harness route advertises `checkout_closeout_v1`, then probes the
+actual daemon's optional closeout version. `JcodeClient::closeout` in Rust and
+`JcodeClient.closeout` in TypeScript preserve complete typed request/reply
+contracts without Session attachment. The bridge keeps native correlation IDs
+separate from client frame IDs. Bridge and clients reject foreign target/kind
+replies, and exact output-part identity includes part, offset and expected
+digest. TypeScript snapshots caller intent before asynchronous negotiation.
+Domain rejections remain typed `CloseoutReply::Rejected` values, distinct from
+transport or reply-correlation failures. The common 34-case synthetic wire
+matrix checks both language implementations, not model behavior or prose.
+
+Catalog organization/discovery still has its existing native owner. This
+curated closeout API does not add a second catalog or a full workspace CLI.
 
 `jcode-base::workspace::closeout` uses the existing workspace catalog,
 installation identity, operation/receipt tables and physical bindings. An
@@ -238,9 +253,9 @@ references remain independently observed.
 A restored older catalog cannot manufacture receipts for later filesystem
 effects. If those effects cannot be reconciled, resumed removal stays blocked;
 the trusted retain-files alternative remains available without deleting data.
-The ordinary agent capability remains gated; the native trusted dispatcher uses
-these same operations. Harness/SDK and final activated-client verification remain
-part of the package's integration boundary.
+The ordinary agent capability remains gated; native and Harness/SDK trusted
+clients use these same operations. Final combined and activated-runtime
+verification remains part of the package's integration boundary.
 
 Closed is published only after the original/quarantine paths are absent and the
 owned holding directory is empty and removed. `closed_checkout_history` retains
@@ -251,6 +266,18 @@ local operation. Session and execution owners retain transcripts and outputs,
 and missing-cwd repair remains explicit.
 
 ## Current verification route
+
+`scripts/test_workspace_closeout.py` runs the actual daemon and standalone
+Harness bridge in an owned namespace through `scripts/run_isolated_test.py`.
+Pass an explicit immutable TUI `--binary`, a short owned `--artifact-dir`, and
+`JCODE_WP07_BRIDGE`/`JCODE_WP07_RUST_PROBE` pointing to the candidate bridge and
+the compiled opt-in `jcode-sdk` integration test `closeout_native`. Its TypeScript
+client detaches during real running work, reconnects, stops and explicitly
+retries, then preserves, reviews, approves, removes and inspects its disposable
+checkout. Rust reads the same retained history through its real SDK. Teardown
+checks terminal executions before ending the owned daemon/bridge. Artifacts
+record identities, complete/failed outcomes and cleanup; a passing fixture is
+not a claim that the user's shared runtime was activated.
 
 The closing fence changes the catalog lifecycle before checking existing work.
 New dependent turn/tool admission is refused. Already admitted native operations

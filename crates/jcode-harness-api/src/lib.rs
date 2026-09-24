@@ -41,10 +41,16 @@ pub use jcode_tool_types::inspection::{
     TranscriptRange,
 };
 pub use jcode_workspace_types::{
-    GrantCarryChoice, GrantCarryReview, Issue as WorkspaceIssue, LegacyLocationAdoptionRequest,
-    LegacyLocationOrigin, LocationChangeRecord, NewContextKind, PrimaryLaunchRecord,
-    PrimaryLaunchRequest, PrimaryLaunchResponse, PrimaryLocationCommand, PrimaryLocationResponse,
-    RequestId,
+    CloseoutAction, CloseoutActionRecord, CloseoutActionResult, CloseoutActionSpec,
+    CloseoutAuthorization, CloseoutAuthorizationSource, CloseoutDecision, CloseoutDisposition,
+    CloseoutEntry, CloseoutEntryKind, CloseoutEntryProgress, CloseoutHistory,
+    CloseoutInventoryPage, CloseoutRecord, CloseoutRecoveryAction, CloseoutRecoveryPath,
+    CloseoutRecoveryReview, CloseoutRemovalEntry, CloseoutRemovalPage, CloseoutReply,
+    CloseoutRequest, CloseoutResponse, CloseoutReview, CloseoutReviewTarget, CloseoutSpec,
+    CloseoutStage, CloseoutWorkFinding, CloseoutWorkKind, CloseoutWorkReport, GrantCarryChoice,
+    GrantCarryReview, Issue as WorkspaceIssue, LegacyLocationAdoptionRequest, LegacyLocationOrigin,
+    LocationChangeRecord, NewContextKind, PrimaryLaunchRecord, PrimaryLaunchRequest,
+    PrimaryLaunchResponse, PrimaryLocationCommand, PrimaryLocationResponse, RequestId,
 };
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
@@ -60,7 +66,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 8;
+pub const API_VERSION_MINOR: u32 = 9;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

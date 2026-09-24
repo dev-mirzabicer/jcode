@@ -693,6 +693,37 @@ impl JcodeClient {
         }
     }
 
+    /// Administrative closeout control. Keep caller request IDs across uncertain
+    /// replies. An action receipt is not execution or removal completion.
+    pub fn closeout(
+        &self,
+        request: jcode_harness_api::CloseoutRequest,
+    ) -> Result<jcode_harness_api::CloseoutReply> {
+        self.require_capability("checkout_closeout_v1")?;
+        if !matches!(
+            self.request_ok(ApiRequest::CloseoutProbe)?.event,
+            ApiEvent::CloseoutCapabilities { version: Some(1) }
+        ) {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Native checkout closeout version 1 is unavailable",
+            ));
+        }
+        let expected = request.clone();
+        match self
+            .request_ok(ApiRequest::Closeout {
+                request: Box::new(request),
+            })?
+            .event
+        {
+            ApiEvent::Closeout { reply } if expected.matches_reply(&reply) => Ok(*reply),
+            _ => Err(Error::new(
+                ErrorKind::UnexpectedReply,
+                "Closeout response identity or kind mismatch",
+            )),
+        }
+    }
+
     /// Caller retains the UUID across uncertain transport replies. This does
     /// not promise exact-once provider execution or semantic consumption.
     pub fn submit_primary_input(

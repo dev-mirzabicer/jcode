@@ -152,6 +152,8 @@ struct ArchiveState {
 
 #[derive(Debug, Clone, PartialEq)]
 enum SimpleKind {
+    CloseoutProbe,
+    Closeout(Box<jcode_harness_api::CloseoutRequest>),
     PrimaryLaunchProbe,
     PrimaryControl(&'static str),
     PrimaryLaunch,
@@ -587,6 +589,35 @@ impl BridgeState {
                 ));
                 vec![Outbound::Legacy(
                     json!({"type":"workspace","id":id,"request":{"action":"permissions","request":{"action":"review_carry","session":session}}}),
+                )]
+            }
+            "closeout_probe" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::CloseoutProbe));
+                vec![Outbound::Legacy(json!({"type":"workspace_probe", "id":id}))]
+            }
+            "closeout" => {
+                let command = match serde_json::from_value::<jcode_harness_api::CloseoutRequest>(
+                    request["request"].clone(),
+                ) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid closeout control: {error}"),
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple.push((
+                    id,
+                    api_id,
+                    SimpleKind::Closeout(Box::new(command.clone())),
+                ));
+                vec![Outbound::Legacy(
+                    json!({"type":"workspace", "id":id, "request":{"action":"closeout", "request":command}}),
                 )]
             }
             "primary_control_probe"
@@ -1450,8 +1481,74 @@ impl BridgeState {
                     },
                 )]
             }
+            "workspace_capabilities" => {
+                let id = event["id"].as_u64().unwrap_or_default();
+                let Some(api_id) = self.take_simple(id, SimpleKind::CloseoutProbe) else {
+                    return vec![];
+                };
+                let reply = match event.get("closeout_version") {
+                    None | Some(Value::Null) => ApiEvent::CloseoutCapabilities { version: None },
+                    Some(value) => match value.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                        Some(version) => ApiEvent::CloseoutCapabilities {
+                            version: Some(version),
+                        },
+                        None => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Invalid closeout capability version".into(),
+                        },
+                    },
+                };
+                vec![ServerFrame::reply(api_id, reply)]
+            }
             "workspace_response" => {
                 let id = event["id"].as_u64().unwrap_or_default();
+                if let Some(index) = self.pending_simple.iter().position(|(legacy, _, kind)| {
+                    *legacy == id && matches!(kind, SimpleKind::Closeout(_))
+                }) {
+                    let (_, api_id, SimpleKind::Closeout(expected)) =
+                        self.pending_simple.remove(index)
+                    else {
+                        unreachable!()
+                    };
+                    let response = &event["response"];
+                    let parsed = match response["kind"].as_str() {
+                        Some("closeout") => serde_json::from_value::<
+                            jcode_harness_api::CloseoutResponse,
+                        >(response["value"].clone())
+                        .map(|response| jcode_harness_api::CloseoutReply::State {
+                            response: Box::new(response),
+                        }),
+                        Some("error") => {
+                            serde_json::from_value::<jcode_harness_api::WorkspaceIssue>(
+                                response["value"].clone(),
+                            )
+                            .map(|issue| jcode_harness_api::CloseoutReply::Rejected { issue })
+                        }
+                        _ => {
+                            return vec![ServerFrame::reply(
+                                api_id,
+                                ApiEvent::Error {
+                                    code: ErrorCode::Internal,
+                                    message: "Foreign response to closeout request".into(),
+                                },
+                            )];
+                        }
+                    };
+                    let event = match parsed {
+                        Ok(reply) if expected.matches_reply(&reply) => ApiEvent::Closeout {
+                            reply: Box::new(reply),
+                        },
+                        Ok(_) => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Closeout target or response kind mismatch".into(),
+                        },
+                        Err(error) => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: format!("Invalid closeout response: {error}"),
+                        },
+                    };
+                    return vec![ServerFrame::reply(api_id, event)];
+                }
                 let Some(api_id) =
                     self.take_simple(id, SimpleKind::PrimaryControl("grant_carry_review"))
                 else {

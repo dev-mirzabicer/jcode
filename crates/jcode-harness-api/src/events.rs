@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ApiEvent {
+    CloseoutCapabilities {
+        #[serde(default)]
+        version: Option<u32>,
+    },
+    Closeout {
+        reply: Box<crate::CloseoutReply>,
+    },
     PrimaryControlCapabilities {
         input_version: u32,
         location_version: u32,

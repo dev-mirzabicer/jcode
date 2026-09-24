@@ -8,7 +8,9 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 8;
+export const API_VERSION_MINOR = 9;
+import type {CloseoutRequest, CloseoutReply} from "./closeout.js";
+export type * from "./closeout.js";
 
 export type WorkspacePlacement = { kind: "project" | "work_area" | "checkout" | "directory" | "standalone"; id: string };
 export type WorkspaceHome = { kind: "project" | "work_area"; id: string };
@@ -24,7 +26,7 @@ export interface PrimaryLaunchRecord {
   registration_request: string; state: "pending" | "complete" | "failed" | "recovery_required";
   reviewed_revision: number; published_revision: number | null; issue: string | null; backup_pending: boolean;
 }
-export type WorkspaceIssueCode = "needs_grant_choice" | "needs_cwd" | "permission_required" | "invalid_identity" | "conflict" | "busy" | "offline_volume" | "replaced_root" | "corrupt_state" | "recovery_required" | "unsupported_capability" | "invalid_input" | "referenced" | "backup_failed" | "io";
+export type WorkspaceIssueCode = "preservation_incomplete" | "live_work" | "incomplete_capture" | "needs_grant_choice" | "needs_cwd" | "permission_required" | "invalid_identity" | "conflict" | "busy" | "offline_volume" | "replaced_root" | "corrupt_state" | "recovery_required" | "unsupported_capability" | "invalid_input" | "referenced" | "backup_failed" | "io";
 export type PrimaryLaunchResponse = {status: "launched"; record: PrimaryLaunchRecord} | {status: "rejected"; request: string; issue: {code: WorkspaceIssueCode; detail: string}};
 
 export interface PrimaryInputEnvelope {
@@ -185,6 +187,8 @@ export type WorkflowPromptRequest =
   | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };
 
 export type ApiRequest =
+  | {req: "closeout_probe"}
+  | {req: "closeout"; request: CloseoutRequest}
   | {req: "primary_control_probe"}
   | {req: "primary_input"; input:PrimaryInputEnvelope}
   | {req: "primary_input_inspect"; session:string; input:string}
@@ -249,6 +253,8 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
+  | {ev: "closeout_capabilities"; version: number | null}
+  | {ev: "closeout"; reply: CloseoutReply}
   | {ev: "grant_carry_review"; review:GrantCarryReview}
   | {ev: "scoped_context_rejected"; source_session:string; issue:{code:WorkspaceIssueCode;detail:string}}
   | {ev: "scoped_context_created"; source_session:string;session_id:string;kind:NewContextKind}
@@ -402,6 +408,8 @@ export const KNOWN_EVENT_KINDS = [
   "session_inspection",
   "output_cleanup",
   "execution",
+  "closeout_capabilities",
+  "closeout",
   "primary_control_capabilities",
   "grant_carry_review",
   "scoped_context_created",
@@ -457,6 +465,8 @@ export const KNOWN_REQUEST_KINDS = [
   "archive_session",
   "restore_session",
   "set_retention_policy",
+  "closeout_probe",
+  "closeout",
   "primary_control_probe",
   "grant_carry_review",
   "scoped_context",

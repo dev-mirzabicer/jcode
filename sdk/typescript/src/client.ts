@@ -8,6 +8,7 @@ import { NdjsonDecoder, encodeFrame } from "./framing.js";
 import { apiSocketPath, transportEndpoint } from "./sockets.js";
 import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
 import { HarnessError } from "./errors.js";
+import {matchesCloseoutReply, type CloseoutRequest, type CloseoutReply} from "./closeout.js";
 import {
   assertRetryCount,
   buildStructuredCorrectionPrompt,
@@ -475,6 +476,17 @@ export class JcodeClient extends EventEmitter {
     const reply = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
     if (reply.ev !== "primary_control_capabilities" || (location === undefined ? reply.input_version !== 1 : reply.location_version !== 1 || (location && !reply.location_enabled))) throw new HarnessError("unsupported_capability", "Requested primary control is unsupported or staged");
     return reply.legacy_adoption_version ?? 0;
+  }
+
+  /** Administrative control without Session creation. Retain request IDs on retry. */
+  async closeout(request: CloseoutRequest): Promise<CloseoutReply> {
+    const expected = structuredClone(request);
+    if (!this.supports("checkout_closeout_v1")) throw new HarnessError("unsupported_capability", "Closeout requires checkout_closeout_v1");
+    const capability = await this.expectReply({req:"closeout_probe"}, "closeout_capabilities");
+    if (capability.ev !== "closeout_capabilities" || capability.version !== 1) throw new HarnessError("unsupported_capability", "Native checkout closeout version 1 is unavailable");
+    const response = await this.expectReply({req:"closeout", request:expected}, "closeout");
+    if (response.ev !== "closeout" || !matchesCloseoutReply(expected, response.reply)) throw new HarnessError("unexpected_reply", "Closeout response identity or kind mismatch");
+    return response.reply;
   }
 
   async submitPrimaryInput(input: import("./protocol.js").PrimaryInputEnvelope): Promise<import("./protocol.js").PrimaryInputReceipt> {

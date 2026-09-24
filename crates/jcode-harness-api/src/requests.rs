@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ApiRequest {
+    CloseoutProbe,
+    Closeout {
+        request: Box<crate::CloseoutRequest>,
+    },
     PrimaryControlProbe,
     PrimaryInput {
         input: Box<crate::PrimaryInputEnvelope>,

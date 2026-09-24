@@ -22,6 +22,86 @@ use std::time::Duration;
 struct PairTransport(UnixStream);
 
 #[test]
+fn closeout_sdk_negotiates_and_rejects_foreign_identity_without_creating_session() {
+    use jcode_harness_api::{
+        CloseoutInventoryPage, CloseoutReply, CloseoutRequest, CloseoutResponse,
+    };
+    let operation = "12a99e11-e967-4a1e-a47c-000000000007".parse().unwrap();
+    let command = CloseoutRequest::Inventory {
+        operation,
+        digest: "fixture".into(),
+        after: 0,
+        limit: 10,
+    };
+    let old = fake_harness_with_capabilities(vec![], |_, _| {
+        panic!("Unsupported closeout reached transport")
+    });
+    assert_eq!(
+        old.closeout(command.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    for version in [None, Some(2)] {
+        let client = fake_harness_with_capabilities(
+            vec!["checkout_closeout_v1".into()],
+            move |frame, writer| {
+                assert!(matches!(frame.request, ApiRequest::CloseoutProbe));
+                reply(frame, ApiEvent::CloseoutCapabilities { version }, writer);
+            },
+        );
+        assert_eq!(
+            client.closeout(command.clone()).unwrap_err().kind,
+            ErrorKind::UnsupportedCapability
+        );
+    }
+    for mismatched in [false, true] {
+        let client = fake_harness_with_capabilities(
+            vec!["checkout_closeout_v1".into()],
+            move |frame, writer| match &frame.request {
+                ApiRequest::CloseoutProbe => reply(
+                    frame,
+                    ApiEvent::CloseoutCapabilities { version: Some(1) },
+                    writer,
+                ),
+                ApiRequest::Closeout { request } => {
+                    assert!(matches!(
+                        request.as_ref(),
+                        CloseoutRequest::Inventory { .. }
+                    ));
+                    let result = CloseoutReply::State {
+                        response: Box::new(CloseoutResponse::Inventory(CloseoutInventoryPage {
+                            operation,
+                            digest: if mismatched { "foreign" } else { "fixture" }.into(),
+                            total: 0,
+                            entries: vec![],
+                            next: None,
+                        })),
+                    };
+                    reply(
+                        frame,
+                        ApiEvent::Closeout {
+                            reply: Box::new(result),
+                        },
+                        writer,
+                    );
+                }
+                _ => panic!("No Session creation/attachment belongs in closeout"),
+            },
+        );
+        if mismatched {
+            assert_eq!(
+                client.closeout(command.clone()).unwrap_err().kind,
+                ErrorKind::UnexpectedReply
+            );
+        } else {
+            assert!(matches!(
+                client.closeout(command.clone()).unwrap(),
+                CloseoutReply::State { .. }
+            ));
+        }
+    }
+}
+
+#[test]
 fn inspection_and_cleanup_negotiate_capabilities_before_transport() {
     use jcode_harness_api::{
         CleanupRequest, CleanupResponse, InspectionRequest, InspectionResponse,

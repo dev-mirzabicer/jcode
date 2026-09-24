@@ -1939,6 +1939,56 @@ fn primary_controls_preserve_identity_and_ignore_transport_ack_without_attachmen
 }
 
 #[test]
+fn closeout_bridge_preserves_admin_identity_without_attaching_and_ignores_ack() {
+    let mut bridge = BridgeState::default();
+    let operation = "12a99e11-e967-4a1e-a47c-000000000007";
+    for version in [None, Some(1u32)] {
+        let outbound = bridge.api_request_to_legacy(&json!({"id":42,"req":"closeout_probe"}));
+        let Outbound::Legacy(wire) = &outbound[0] else {
+            panic!()
+        };
+        assert_eq!(wire["type"], "workspace_probe");
+        let reply = bridge.legacy_event_to_api(&json!({"id":wire["id"],"type":"workspace_capabilities","catalog_version":1,"closeout_version":version,"managed_rollout":false}));
+        assert_eq!(reply[0].reply_to, Some(42));
+        assert_eq!(reply[0].event, ApiEvent::CloseoutCapabilities { version });
+    }
+    for (api_id, kind) in [(43, "closeout"), (44, "error")] {
+        let outbound = bridge.api_request_to_legacy(&json!({"id":api_id,"req":"closeout","request":{"action":"inventory","operation":operation,"digest":"fixture-digest","after":0,"limit":10}}));
+        let Outbound::Legacy(wire) = &outbound[0] else {
+            panic!()
+        };
+        assert_eq!(wire["request"]["action"], "closeout");
+        assert!(bridge.session_id.is_none() && bridge.pending_attach.is_none());
+        assert!(
+            bridge
+                .legacy_event_to_api(&json!({"type":"ack","id":wire["id"]}))
+                .is_empty()
+        );
+        let value = if kind == "closeout" {
+            json!({"kind":"inventory","value":{"operation":operation,"digest":"fixture-digest","total":0,"entries":[],"next":null}})
+        } else {
+            json!({"code":"preservation_incomplete","detail":"fixture"})
+        };
+        let response = json!({"type":"workspace_response","id":wire["id"],"response":{"kind":kind,"value":value}});
+        let mut foreign = response.clone();
+        foreign["id"] = json!(99999);
+        assert!(bridge.legacy_event_to_api(&foreign).is_empty());
+        let replies = bridge.legacy_event_to_api(&response);
+        assert_eq!(replies[0].reply_to, Some(api_id));
+        assert!(matches!(replies[0].event, ApiEvent::Closeout { .. }));
+        assert!(bridge.legacy_event_to_api(&response).is_empty());
+    }
+    let invalid = bridge.api_request_to_legacy(
+        &json!({"id":45,"req":"closeout","request":{"action":"approve","trusted":true}}),
+    );
+    assert!(
+        invalid
+            .iter()
+            .all(|item| !matches!(item, Outbound::Legacy(_)))
+    );
+}
+
+#[test]
 fn scoped_context_review_and_creation_keep_authority_and_reply_identity_separate() {
     let mut bridge = BridgeState::default();
     let review_id = "12a99e11-e967-4a1e-a47c-000000000005";

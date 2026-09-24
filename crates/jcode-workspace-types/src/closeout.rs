@@ -108,6 +108,102 @@ pub enum CloseoutResponse {
     Execution(jcode_tool_types::execution::ExecutionResponse),
 }
 
+/// Curated client boundary. Domain rejection remains a typed issue, distinct
+/// from transport failure or a mismatched reply.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CloseoutReply {
+    State { response: Box<CloseoutResponse> },
+    Rejected { issue: Issue },
+}
+
+impl CloseoutRequest {
+    pub fn matches_reply(&self, reply: &CloseoutReply) -> bool {
+        let CloseoutReply::State { response } = reply else {
+            return true;
+        };
+        match (self, response.as_ref()) {
+            (Self::Begin { request, spec, .. }, CloseoutResponse::Record(record)) => {
+                record.request == *request
+                    && record.spec.location == spec.location
+                    && record.spec.expected_generation == spec.expected_generation
+                    && record.spec.full_archive == spec.full_archive
+                    && record.spec.preservation_directory == spec.preservation_directory
+                    && (!record.spec.conditional_no_loss || spec.conditional_no_loss)
+            }
+            (
+                Self::Inspect { operation } | Self::Revoke { operation, .. },
+                CloseoutResponse::Record(record),
+            ) => record.operation == *operation,
+            (Self::Execute { request, spec }, CloseoutResponse::Action(record)) => {
+                record.request == *request && record.spec == *spec
+            }
+            (Self::InspectAction { request }, CloseoutResponse::Action(record)) => {
+                record.request == *request
+            }
+            (
+                Self::Inventory {
+                    operation, digest, ..
+                },
+                CloseoutResponse::Inventory(page),
+            ) => page.operation == *operation && page.digest == *digest,
+            (Self::Review { operation }, CloseoutResponse::Review(review)) => review
+                .as_ref()
+                .is_none_or(|review| review.operation == *operation),
+            (Self::Recovery { operation }, CloseoutResponse::Recovery(review)) => review
+                .as_ref()
+                .is_none_or(|review| review.operation == *operation),
+            (
+                Self::RemovalProgress {
+                    operation,
+                    expected_revision,
+                    ..
+                },
+                CloseoutResponse::RemovalProgress(page),
+            ) => page.operation == *operation && page.revision == *expected_revision,
+            (Self::History { location }, CloseoutResponse::History(history)) => {
+                history.location.id == *location
+            }
+            (Self::Execution { control, .. }, CloseoutResponse::Execution(reply)) => {
+                use jcode_tool_types::execution::{
+                    ExecutionRequest as Request, ExecutionResponse as Response,
+                };
+                match (control, reply) {
+                    (Request::Inspect { run_id }, Response::Status { run }) => run.id == *run_id,
+                    (Request::Stop { run_id }, Response::Control { run_id: actual, .. }) => {
+                        actual == run_id
+                    }
+                    (Request::Read { run_id, .. }, Response::Content { run_id: actual, .. }) => {
+                        actual == run_id
+                    }
+                    (
+                        Request::ReadPart {
+                            run_id,
+                            part,
+                            offset,
+                            expected_sha256,
+                            ..
+                        },
+                        Response::Part {
+                            run_id: actual,
+                            page,
+                        },
+                    ) => {
+                        actual == run_id
+                            && page.part == *part
+                            && page.offset == offset.unwrap_or(0)
+                            && expected_sha256
+                                .as_ref()
+                                .is_none_or(|digest| page.sha256 == *digest)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloseoutSpec {

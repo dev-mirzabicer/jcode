@@ -1,0 +1,1106 @@
+[
+  {
+    "name": "begin",
+    "request": {
+      "action": "begin",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "expected_revision": 5,
+      "spec": {
+        "location": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_generation": 1,
+        "preservation_directory": null,
+        "conditional_no_loss": false,
+        "full_archive": true
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "begin-changed-request",
+    "request": {
+      "action": "begin",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "expected_revision": 5,
+      "spec": {
+        "location": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_generation": 1,
+        "preservation_directory": null,
+        "conditional_no_loss": false,
+        "full_archive": true
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "request": "12a99e11-e967-4a1e-a47c-000000000009",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "begin-changed-spec.expected_generation",
+    "request": {
+      "action": "begin",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "expected_revision": 5,
+      "spec": {
+        "location": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_generation": 1,
+        "preservation_directory": null,
+        "conditional_no_loss": false,
+        "full_archive": true
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 2,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "begin-changed-spec.full_archive",
+    "request": {
+      "action": "begin",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "expected_revision": 5,
+      "spec": {
+        "location": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_generation": 1,
+        "preservation_directory": null,
+        "conditional_no_loss": false,
+        "full_archive": true
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": false
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "begin-changed-spec.conditional_no_loss",
+    "request": {
+      "action": "begin",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "expected_revision": 5,
+      "spec": {
+        "location": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_generation": 1,
+        "preservation_directory": null,
+        "conditional_no_loss": false,
+        "full_archive": true
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": true,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "inspect",
+    "request": {
+      "action": "inspect",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "inspect-changed-operation",
+    "request": {
+      "action": "inspect",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000009",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "revoke",
+    "request": {
+      "action": "revoke",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+      "expected_revision": 7
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "revoke-changed-operation",
+    "request": {
+      "action": "revoke",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+      "expected_revision": 7
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "record",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000009",
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "location": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_generation": 1,
+            "preservation_directory": null,
+            "conditional_no_loss": false,
+            "full_archive": true
+          },
+          "revision": 7,
+          "stage": "preparing",
+          "initiated_by": "fixture",
+          "inventory_digest": null,
+          "inventory_entries": 0,
+          "preservation_directory": "/fixture/private",
+          "preservation_volume_ownership": true,
+          "authorization": null,
+          "preservation_digest": null,
+          "quarantine": null,
+          "removed_entries": 0,
+          "issues": []
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "execute",
+    "request": {
+      "action": "execute",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "spec": {
+        "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_revision": 7,
+        "action": {
+          "action": "finish"
+        }
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_revision": 7,
+            "action": {
+              "action": "finish"
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "execute-changed-spec.operation",
+    "request": {
+      "action": "execute",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "spec": {
+        "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_revision": 7,
+        "action": {
+          "action": "finish"
+        }
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000009",
+            "expected_revision": 7,
+            "action": {
+              "action": "finish"
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "execute-changed-spec.expected_revision",
+    "request": {
+      "action": "execute",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "spec": {
+        "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_revision": 7,
+        "action": {
+          "action": "finish"
+        }
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_revision": 8,
+            "action": {
+              "action": "finish"
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "execute-changed-spec.action.action",
+    "request": {
+      "action": "execute",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "spec": {
+        "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+        "expected_revision": 7,
+        "action": {
+          "action": "finish"
+        }
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_revision": 7,
+            "action": {
+              "action": "refresh"
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "inspect-action",
+    "request": {
+      "action": "inspect_action",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000008",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_revision": 7,
+            "action": {
+              "action": "finish"
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "inspect-action-changed-request",
+    "request": {
+      "action": "inspect_action",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "action",
+        "value": {
+          "request": "12a99e11-e967-4a1e-a47c-000000000009",
+          "spec": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "expected_revision": 7,
+            "action": {
+              "action": "finish"
+            }
+          },
+          "initiated_by": "fixture",
+          "run_id": "run-fixture",
+          "result": null,
+          "issue": null
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "inventory",
+    "request": {
+      "action": "inventory",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+      "digest": "fixture",
+      "after": 0,
+      "limit": 2
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "inventory",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "digest": "fixture",
+          "total": 0,
+          "entries": [],
+          "next": null
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "inventory-changed-digest",
+    "request": {
+      "action": "inventory",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+      "digest": "fixture",
+      "after": 0,
+      "limit": 2
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "inventory",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "digest": "changed",
+          "total": 0,
+          "entries": [],
+          "next": null
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "review",
+    "request": {
+      "action": "review",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "review",
+        "value": {
+          "id": "12a99e11-e967-4a1e-a47c-000000000008",
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "revision": 7,
+          "inventory_digest": "fixture",
+          "preservation_digest": "fixture",
+          "references_digest": "fixture",
+          "work": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "observed_at": "2026-09-24T00:00:00Z",
+            "findings": []
+          },
+          "issues": [],
+          "preservation_volume_ownership": true
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "review-changed-operation",
+    "request": {
+      "action": "review",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "review",
+        "value": {
+          "id": "12a99e11-e967-4a1e-a47c-000000000008",
+          "operation": "12a99e11-e967-4a1e-a47c-000000000009",
+          "revision": 7,
+          "inventory_digest": "fixture",
+          "preservation_digest": "fixture",
+          "references_digest": "fixture",
+          "work": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "observed_at": "2026-09-24T00:00:00Z",
+            "findings": []
+          },
+          "issues": [],
+          "preservation_volume_ownership": true
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "review-absent",
+    "request": {
+      "action": "review",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "review",
+        "value": null
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "recovery",
+    "request": {
+      "action": "recovery",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "recovery",
+        "value": {
+          "id": "12a99e11-e967-4a1e-a47c-000000000008",
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "revision": 7,
+          "action": "resume_removal",
+          "paths": [],
+          "adopt_empty_holding": null,
+          "work": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "observed_at": "2026-09-24T00:00:00Z",
+            "findings": []
+          },
+          "issues": []
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "recovery-changed-operation",
+    "request": {
+      "action": "recovery",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "recovery",
+        "value": {
+          "id": "12a99e11-e967-4a1e-a47c-000000000008",
+          "operation": "12a99e11-e967-4a1e-a47c-000000000009",
+          "revision": 7,
+          "action": "resume_removal",
+          "paths": [],
+          "adopt_empty_holding": null,
+          "work": {
+            "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+            "observed_at": "2026-09-24T00:00:00Z",
+            "findings": []
+          },
+          "issues": []
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "progress",
+    "request": {
+      "action": "removal_progress",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+      "expected_revision": 7,
+      "after": 0,
+      "limit": 2
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "removal_progress",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "revision": 7,
+          "total": 0,
+          "completed": 0,
+          "pending": null,
+          "entries": [],
+          "next": null
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "progress-changed-revision",
+    "request": {
+      "action": "removal_progress",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+      "expected_revision": 7,
+      "after": 0,
+      "limit": 2
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "removal_progress",
+        "value": {
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "revision": 8,
+          "total": 0,
+          "completed": 0,
+          "pending": null,
+          "entries": [],
+          "next": null
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "history",
+    "request": {
+      "action": "history",
+      "location": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "history",
+        "value": {
+          "location": {
+            "id": "12a99e11-e967-4a1e-a47c-000000000007",
+            "name": "fixture",
+            "home": null,
+            "kind": {
+              "kind": "standalone",
+              "git": false
+            },
+            "observed_path": "/fixture/absent",
+            "volume_uuid": "fixture",
+            "binding_generation": 1,
+            "lifecycle": "unregistered",
+            "retired": true,
+            "revision": 7
+          },
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "record": null,
+          "preservation_paths": [
+            "/fixture/retained"
+          ],
+          "report": null
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "history-changed-location.id",
+    "request": {
+      "action": "history",
+      "location": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "history",
+        "value": {
+          "location": {
+            "id": "12a99e11-e967-4a1e-a47c-000000000009",
+            "name": "fixture",
+            "home": null,
+            "kind": {
+              "kind": "standalone",
+              "git": false
+            },
+            "observed_path": "/fixture/absent",
+            "volume_uuid": "fixture",
+            "binding_generation": 1,
+            "lifecycle": "unregistered",
+            "retired": true,
+            "revision": 7
+          },
+          "operation": "12a99e11-e967-4a1e-a47c-000000000007",
+          "record": null,
+          "preservation_paths": [
+            "/fixture/retained"
+          ],
+          "report": null
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "part",
+    "request": {
+      "action": "execution",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "control": {
+        "action": "read_part",
+        "run_id": "run-fixture",
+        "part": "stdout.bin",
+        "offset": 7,
+        "expected_sha256": "digest"
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "execution",
+        "value": {
+          "kind": "part",
+          "run_id": "run-fixture",
+          "page": {
+            "part": "stdout.bin",
+            "offset": 7,
+            "total_bytes": 7,
+            "sha256": "digest",
+            "data_base64": "",
+            "next_offset": null
+          }
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "part-changed-run_id",
+    "request": {
+      "action": "execution",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "control": {
+        "action": "read_part",
+        "run_id": "run-fixture",
+        "part": "stdout.bin",
+        "offset": 7,
+        "expected_sha256": "digest"
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "execution",
+        "value": {
+          "kind": "part",
+          "run_id": "run-foreign",
+          "page": {
+            "part": "stdout.bin",
+            "offset": 7,
+            "total_bytes": 7,
+            "sha256": "digest",
+            "data_base64": "",
+            "next_offset": null
+          }
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "part-changed-page.part",
+    "request": {
+      "action": "execution",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "control": {
+        "action": "read_part",
+        "run_id": "run-fixture",
+        "part": "stdout.bin",
+        "offset": 7,
+        "expected_sha256": "digest"
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "execution",
+        "value": {
+          "kind": "part",
+          "run_id": "run-fixture",
+          "page": {
+            "part": "stderr.bin",
+            "offset": 7,
+            "total_bytes": 7,
+            "sha256": "digest",
+            "data_base64": "",
+            "next_offset": null
+          }
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "part-changed-page.offset",
+    "request": {
+      "action": "execution",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "control": {
+        "action": "read_part",
+        "run_id": "run-fixture",
+        "part": "stdout.bin",
+        "offset": 7,
+        "expected_sha256": "digest"
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "execution",
+        "value": {
+          "kind": "part",
+          "run_id": "run-fixture",
+          "page": {
+            "part": "stdout.bin",
+            "offset": 0,
+            "total_bytes": 7,
+            "sha256": "digest",
+            "data_base64": "",
+            "next_offset": null
+          }
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "part-changed-page.sha256",
+    "request": {
+      "action": "execution",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "control": {
+        "action": "read_part",
+        "run_id": "run-fixture",
+        "part": "stdout.bin",
+        "offset": 7,
+        "expected_sha256": "digest"
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "execution",
+        "value": {
+          "kind": "part",
+          "run_id": "run-fixture",
+          "page": {
+            "part": "stdout.bin",
+            "offset": 7,
+            "total_bytes": 7,
+            "sha256": "changed",
+            "data_base64": "",
+            "next_offset": null
+          }
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "stop",
+    "request": {
+      "action": "execution",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "control": {
+        "action": "stop",
+        "run_id": "run-fixture"
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "execution",
+        "value": {
+          "kind": "control",
+          "run_id": "run-fixture",
+          "accepted": true,
+          "state": "running"
+        }
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "stop-changed-run_id",
+    "request": {
+      "action": "execution",
+      "request": "12a99e11-e967-4a1e-a47c-000000000008",
+      "control": {
+        "action": "stop",
+        "run_id": "run-fixture"
+      }
+    },
+    "reply": {
+      "status": "state",
+      "response": {
+        "kind": "execution",
+        "value": {
+          "kind": "control",
+          "run_id": "run-foreign",
+          "accepted": true,
+          "state": "running"
+        }
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "typed-rejection",
+    "request": {
+      "action": "inspect",
+      "operation": "12a99e11-e967-4a1e-a47c-000000000007"
+    },
+    "reply": {
+      "status": "rejected",
+      "issue": {
+        "code": "preservation_incomplete",
+        "detail": "synthetic"
+      }
+    },
+    "accepted": true
+  }
+]
