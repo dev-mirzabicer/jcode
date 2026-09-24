@@ -516,6 +516,8 @@ pub fn copy_external_skill(
     let (skill, source) = select_copy_source(registry, &request)?;
 
     let repository = destination_repository(repositories, &request, true)?;
+    let _destination_use =
+        repositories.retain_source_use(std::slice::from_ref(&repository.root))?;
     let skill_id = match request.destination_id {
         Some(id) => {
             InstructionId::parse(id.to_string()).map_err(|error| copy_error(error.to_string()))?
@@ -557,6 +559,10 @@ pub fn copy_external_skill(
             source.kind.scope()
         )));
     }
+    let _source_use = repositories.retain_source_use(&[
+        source.package_root.clone(),
+        repository.root.join(&package_root),
+    ])?;
     let desired = copied_package(skill, &source, &package_root, &skill_id)?;
     let existing = existing_package_files(&repository.root, &package_root)?;
     let head = repositories
@@ -657,12 +663,15 @@ pub fn prepare_external_skill_copy(
     if source.kind.is_managed() {
         return Err(copy_error("Select an external skill to Copy"));
     }
+    let _source_use = repositories.retain_source_use(std::slice::from_ref(&source.package_root))?;
     let repository = destination_repository(repositories, &request, false)?;
     let id = match request.destination_id {
         Some(id) => InstructionId::parse(id).map_err(|error| copy_error(error.to_string()))?,
         None => copied_skill_id(skill)?,
     };
     let package_root = PathBuf::from("skills").join(id.as_str());
+    let _destination_use =
+        repositories.retain_source_use(&[repository.root.join(&package_root)])?;
     let desired = copied_package(skill, &source, &package_root, &id)?;
     let existing = existing_package_files(&repository.root, &package_root)?;
     let head = repositories.inspect(&repository)?.head.ok_or_else(|| {
@@ -929,6 +938,7 @@ pub fn capture_managed_skill_package(
     repository: &InstructionRepositoryRef,
     package_root: &Path,
 ) -> Result<BTreeMap<PathBuf, Vec<u8>>, InstructionRepositoryError> {
+    let _source_use = repositories.retain_source_use(&[repository.root.join(package_root)])?;
     repositories.open_draft(repository, package_root.join("SKILL.md"))?;
     existing_package_files(&repository.root, package_root)
 }
@@ -1815,5 +1825,184 @@ mod tests {
         )
         .expect_err("symlink must be rejected");
         assert!(error.detail.contains("symlink"), "{error}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn closeout_skill_sources_block_refresh_and_copy_without_losing_snapshots_or_replay() {
+        use crate::workspace::{
+            IssueCode, RequestId, WorkspaceClientAuthority, WorkspaceService, test_support,
+        };
+        let fixture = Fixture::new();
+        let package = fixture.external_global(
+            "source-lifetime",
+            "Synthetic fixture",
+            "original captured content",
+        );
+        std::fs::write(package.join("reference.bin"), [0, 255, 1, 2]).unwrap();
+        let source_root = package.parent().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(source_root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let workspace = WorkspaceService::new(fixture.service.source_state_root().unwrap());
+        let location = test_support::register_checkout(&workspace, source_root);
+        let mut registry = fixture.effective(&fixture.external_registry());
+        let activation = registry.activate("source-lifetime").unwrap().unwrap();
+        let original = activation.rendered_text.clone();
+        let request = |operation_id, destination_id| ManagedSkillCopyRequest {
+            skill_name: "source-lifetime",
+            source: None,
+            working_dir: Some(&fixture.project),
+            destination: ManagedSkillDestination::Global,
+            destination_id: Some(destination_id),
+            operation_id,
+        };
+        let copied = copy_external_skill(
+            &fixture.service,
+            &registry,
+            request("ready-copy", "ready-copy"),
+        )
+        .unwrap();
+        let prepared = prepare_external_skill_copy(
+            &fixture.service,
+            &registry,
+            request("ready-draft", "ready-draft"),
+        )
+        .unwrap();
+        let captured = serde_json::to_value(&prepared.request).unwrap();
+        let guard = fixture
+            .service
+            .retain_source_use(&[source_root.to_path_buf()])
+            .unwrap();
+        assert_eq!(
+            workspace.acquire_root(location).err().unwrap().code,
+            IssueCode::Busy
+        );
+        drop(guard);
+        let closing = test_support::fence(&workspace, location).await;
+        assert!(registry.activate("source-lifetime").is_err());
+        assert!(registry.reload("source-lifetime").is_err());
+        assert_eq!(activation.rendered_text, original);
+        assert_eq!(serde_json::to_value(&prepared.request).unwrap(), captured);
+        assert!(
+            prepare_external_skill_copy(
+                &fixture.service,
+                &registry,
+                request("blocked-draft", "blocked")
+            )
+            .is_err()
+        );
+        assert!(
+            copy_external_skill(
+                &fixture.service,
+                &registry,
+                request("blocked-copy", "blocked")
+            )
+            .is_err()
+        );
+        assert!(!copied.repository.root.join("skills/blocked").exists());
+        assert!(matches!(
+            copy_external_skill(
+                &fixture.service,
+                &registry,
+                request("ready-copy", "ready-copy")
+            )
+            .unwrap()
+            .disposition,
+            ManagedSkillCopyDisposition::AlreadyCommitted
+        ));
+        let mut discovery = SkillRegistry {
+            workspace_state: fixture.service.source_state_root().unwrap().into(),
+            ..SkillRegistry::default()
+        };
+        discovery
+            .load_from_dir(source_root, SkillSourceKind::ExternalJcodeGlobal)
+            .unwrap();
+        assert!(!discovery.diagnostics().is_empty());
+        assert!(
+            discovery.resolve("source-lifetime").is_err(),
+            "Unavailable source is not an empty catalog or fallback"
+        );
+        let client = WorkspaceClientAuthority::authenticated("fixture-human").unwrap();
+        workspace
+            .revoke_closeout(
+                &client,
+                RequestId::new(),
+                closing.operation,
+                closing.revision,
+            )
+            .unwrap();
+        std::fs::write(package.join("SKILL.md"),"---\nname: source-lifetime\ndescription: Synthetic changed fixture\n---\nnew source content\n").unwrap();
+        assert_ne!(
+            registry
+                .activate("source-lifetime")
+                .unwrap()
+                .unwrap()
+                .rendered_text,
+            original
+        );
+        assert_eq!(activation.rendered_text, original);
+        assert_eq!(
+            std::fs::read(package.join("reference.bin")).unwrap(),
+            [0, 255, 1, 2]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn closeout_skill_sources_guard_managed_package_capture_without_changing_prior_capture() {
+        use crate::workspace::{WorkspaceService, test_support};
+        let fixture = Fixture::new();
+        let source =
+            fixture.external_global("capture-lifetime", "Synthetic fixture", "synthetic body");
+        std::fs::write(source.join("reference.bin"), [0, 255, 3, 4]).unwrap();
+        let registry = fixture.effective(&fixture.external_registry());
+        let copied = copy_external_skill(
+            &fixture.service,
+            &registry,
+            ManagedSkillCopyRequest {
+                skill_name: "capture-lifetime",
+                source: None,
+                working_dir: Some(&fixture.project),
+                destination: ManagedSkillDestination::Global,
+                destination_id: None,
+                operation_id: "capture-ready",
+            },
+        )
+        .unwrap();
+        let package = Path::new("skills/capture-lifetime");
+        let captured =
+            capture_managed_skill_package(&fixture.service, &copied.repository, package).unwrap();
+        assert_eq!(captured[&package.join("reference.bin")], [0, 255, 3, 4]);
+        let workspace = WorkspaceService::new(fixture.service.source_state_root().unwrap());
+        let location = test_support::register_checkout(&workspace, &copied.repository.root);
+        test_support::fence(&workspace, location).await;
+        assert!(
+            capture_managed_skill_package(&fixture.service, &copied.repository, package).is_err()
+        );
+        assert_eq!(captured[&package.join("reference.bin")], [0, 255, 3, 4]);
+        assert_eq!(
+            std::fs::read(source.join("reference.bin")).unwrap(),
+            [0, 255, 3, 4]
+        );
     }
 }

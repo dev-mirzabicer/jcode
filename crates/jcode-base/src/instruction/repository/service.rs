@@ -1761,6 +1761,25 @@ impl InstructionRepositoryService {
         })
     }
 
+    pub(crate) fn source_state_root(&self) -> InstructionRepositoryResult<&Path> {
+        Ok(&self.roots()?.durable_state)
+    }
+
+    pub(crate) fn retain_source_use(
+        &self,
+        paths: &[PathBuf],
+    ) -> InstructionRepositoryResult<crate::workspace::WorkspaceUseLease> {
+        crate::workspace::WorkspaceService::new(self.source_state_root()?)
+            .acquire_location_use(None, paths)
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryUnavailable,
+                    "admit instruction package source",
+                    error.to_string(),
+                )
+            })
+    }
+
     fn prepare_repository_seed(
         &self,
         repository: &InstructionRepositoryRef,

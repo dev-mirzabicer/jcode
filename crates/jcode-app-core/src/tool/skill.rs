@@ -11,11 +11,15 @@ use tokio::sync::RwLock;
 
 pub struct SkillTool {
     registry: Arc<RwLock<SkillRegistry>>,
+    repositories: crate::instruction::InstructionRepositoryService,
 }
 
 impl SkillTool {
     pub fn new(registry: Arc<RwLock<SkillRegistry>>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            repositories: crate::instruction::InstructionRepositoryService::new(),
+        }
     }
 
     /// Effective skill set for this call: shared global registry plus the
@@ -24,7 +28,11 @@ impl SkillTool {
     /// visible without daemon restarts and never enter the shared registry.
     async fn effective_registry(&self, working_dir: Option<&std::path::Path>) -> SkillRegistry {
         let global = self.registry.read().await;
-        SkillRegistry::effective_for_working_dir(&global, working_dir)
+        SkillRegistry::effective_for_working_dir_with_repositories(
+            &global,
+            working_dir,
+            &self.repositories,
+        )
     }
 }
 
@@ -202,7 +210,18 @@ impl SkillTool {
 
         append_endorsed_skills(&mut output, &installed);
 
-        Ok(ToolOutput::new(output).with_title("Skills: List"))
+        let mut result = ToolOutput::new(output).with_title("Skills: List");
+        if !registry.diagnostics().is_empty() {
+            let facts = json!({"source_issues": registry.diagnostics().iter().map(|issue| {
+                json!({"name":issue.name,"detail":issue.detail})
+            }).collect::<Vec<_>>()});
+            result.output.push('\n');
+            result
+                .output
+                .push_str(&serde_json::to_string_pretty(&facts)?);
+            result = result.with_metadata(facts);
+        }
+        Ok(result)
     }
 
     async fn reload_skill(&self, name: Option<String>) -> Result<ToolOutput> {
@@ -392,6 +411,60 @@ fn normalize_skill_name(name: Option<String>, action: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn closeout_skill_tool_reports_blocked_alias_without_loading_another_source() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let closing = home.root().join("closing");
+        write_project_skill(&closing, "blocked-skill");
+        let caller = home.root().join("caller");
+        std::fs::create_dir_all(caller.join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(
+            closing.join(".agents/skills/blocked-skill"),
+            caller.join(".agents/skills/blocked-skill"),
+        )
+        .unwrap();
+        let tool = create_test_tool();
+        let before = tool
+            .execute(
+                json!({"action":"load","name":"blocked-skill"}),
+                context_with_working_dir(&caller),
+            )
+            .await
+            .unwrap()
+            .output;
+        crate::workspace::test_support::closing_checkout(
+            &crate::storage::durable_state_dir(),
+            home.root(),
+            &closing,
+        )
+        .await;
+        let listing = tool
+            .execute(json!({"action":"list"}), context_with_working_dir(&caller))
+            .await
+            .unwrap();
+        assert!(
+            !listing.metadata.as_ref().unwrap()["source_issues"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            tool.execute(
+                json!({"action":"load","name":"blocked-skill"}),
+                context_with_working_dir(&caller)
+            )
+            .await
+            .is_err()
+        );
+        assert!(!before.is_empty());
+        assert!(
+            closing
+                .join(".agents/skills/blocked-skill/SKILL.md")
+                .is_file()
+        );
+    }
 
     fn create_test_tool() -> SkillTool {
         let registry = Arc::new(RwLock::new(SkillRegistry::default()));

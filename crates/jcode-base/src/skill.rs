@@ -149,13 +149,27 @@ struct SkillFrontmatter {
 }
 
 /// Registry of available skills
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SkillRegistry {
     skills: HashMap<String, Arc<Skill>>,
     sources: HashMap<String, SkillSource>,
     candidates: Vec<(Arc<Skill>, SkillSource)>,
     blocked: HashMap<String, SkillCatalogDiagnostic>,
     diagnostics: Vec<SkillCatalogDiagnostic>,
+    workspace_state: PathBuf,
+}
+
+impl Default for SkillRegistry {
+    fn default() -> Self {
+        Self {
+            skills: HashMap::new(),
+            sources: HashMap::new(),
+            candidates: Vec::new(),
+            blocked: HashMap::new(),
+            diagnostics: Vec::new(),
+            workspace_state: crate::storage::durable_state_dir(),
+        }
+    }
 }
 
 /// Maximum directory depth scanned under a Claude Code plugin root when
@@ -302,11 +316,19 @@ impl SkillRegistry {
 
     /// Recursively copy a directory
     fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+        let workspace =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+        let _directory_use = workspace
+            .acquire_location_use(None, &[src.into(), dst.into()])
+            .map_err(std::io::Error::other)?;
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
+            let _entry_use = workspace
+                .acquire_location_use(None, &[src_path.clone(), dst_path.clone()])
+                .map_err(std::io::Error::other)?;
 
             if src_path.is_dir() {
                 Self::copy_dir_recursive(&src_path, &dst_path)?;
@@ -434,10 +456,25 @@ impl SkillRegistry {
         repositories: &crate::instruction::InstructionRepositoryService,
     ) -> Self {
         let mut effective = base.clone();
+        match repositories.source_state_root() {
+            Ok(state) => effective.workspace_state = state.to_path_buf(),
+            Err(error) => {
+                effective.diagnostics.push(SkillCatalogDiagnostic {
+                    name: None,
+                    source: None,
+                    detail: error.to_string(),
+                });
+                return effective;
+            }
+        }
         let managed =
             managed::ManagedSkillLayers::load_with_repositories(working_dir, repositories);
         effective.merge_layer(managed.global);
-        if let Ok(overlay) = Self::load_project_overlay(working_dir) {
+        let mut overlay = Self {
+            workspace_state: effective.workspace_state.clone(),
+            ..Self::default()
+        };
+        if overlay.load_project_local_dirs(working_dir).is_ok() {
             effective.merge_overlay(overlay);
         }
         effective.merge_layer(managed.project);
@@ -490,6 +527,10 @@ impl SkillRegistry {
     /// Returns the number of skills loaded. Errors are skipped so a broken
     /// plugin never prevents jcode's own skills from loading.
     fn load_plugin_skills_from_root(&mut self, plugins_root: &Path) -> usize {
+        let Some(_source_use) = self.admit_discovery(plugins_root, SkillSourceKind::ExternalPlugin)
+        else {
+            return 0;
+        };
         let mut count = 0;
         for dir in Self::plugin_skill_dirs_under(plugins_root) {
             count += self
@@ -610,29 +651,41 @@ impl SkillRegistry {
 
     /// Load skills from a directory
     fn load_from_dir(&mut self, dir: &Path, source_kind: SkillSourceKind) -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
-        }
+        self.load_from_dir_count(dir, source_kind).map(|_| ())
+    }
 
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                let skill_file = path.join("SKILL.md");
-                if skill_file.exists()
-                    && let Ok(skill) = Self::parse_skill(&skill_file)
-                {
-                    self.insert_valid(skill, source_kind, None);
-                }
+    fn admit_discovery(
+        &mut self,
+        path: &Path,
+        kind: SkillSourceKind,
+    ) -> Option<crate::workspace::WorkspaceUseLease> {
+        match crate::workspace::WorkspaceService::new(&self.workspace_state)
+            .acquire_location_use(None, &[path.to_path_buf()])
+        {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                self.diagnostics.push(SkillCatalogDiagnostic {
+                    name: None,
+                    source: Some(SkillSource {
+                        kind,
+                        package_root: path.into(),
+                        managed_resource: None,
+                    }),
+                    detail: error.to_string(),
+                });
+                None
             }
         }
-
-        Ok(())
     }
 
     /// Parse a SKILL.md file
     fn parse_skill(path: &Path) -> Result<Skill> {
+        Self::parse_skill_in(path, &crate::storage::durable_state_dir())
+    }
+
+    fn parse_skill_in(path: &Path, state: &Path) -> Result<Skill> {
+        let _source_use = crate::workspace::WorkspaceService::new(state)
+            .acquire_location_use(None, &[path.to_path_buf()])?;
         if !std::fs::metadata(path)?.is_file() {
             anyhow::bail!("Skill source is not a regular file");
         }
@@ -778,7 +831,7 @@ impl SkillRegistry {
 
         if let Some(path) = path {
             if path.exists() {
-                let skill = Self::parse_skill(&path)?;
+                let skill = Self::parse_skill_in(&path, &self.workspace_state)?;
                 self.skills.remove(name);
                 self.sources.remove(name);
                 self.candidates
@@ -854,6 +907,9 @@ impl SkillRegistry {
 
     /// Load skills from a directory and return count
     fn load_from_dir_count(&mut self, dir: &Path, source_kind: SkillSourceKind) -> Result<usize> {
+        let Some(_source_use) = self.admit_discovery(dir, source_kind) else {
+            return Ok(0);
+        };
         if !dir.is_dir() {
             return Ok(0);
         }
@@ -865,11 +921,25 @@ impl SkillRegistry {
 
             if path.is_dir() {
                 let skill_file = path.join("SKILL.md");
-                if skill_file.exists()
-                    && let Ok(skill) = Self::parse_skill(&skill_file)
-                {
-                    self.insert_valid(skill, source_kind, None);
-                    count += 1;
+                if skill_file.exists() {
+                    match Self::parse_skill_in(&skill_file, &self.workspace_state) {
+                        Ok(skill) => {
+                            self.insert_valid(skill, source_kind, None);
+                            count += 1;
+                        }
+                        Err(error) if error.downcast_ref::<crate::workspace::Issue>().is_some() => {
+                            self.diagnostics.push(SkillCatalogDiagnostic {
+                                name: None,
+                                source: Some(SkillSource {
+                                    kind: source_kind,
+                                    package_root: path,
+                                    managed_resource: None,
+                                }),
+                                detail: error.to_string(),
+                            });
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
         }
@@ -1005,12 +1075,14 @@ impl SkillRegistry {
             })?;
         let latest;
         let skill = if source.kind.is_read_only() {
-            latest = Self::parse_skill(&skill.path).map_err(|error| SkillResolutionError {
-                skill_name: Some(name.to_string()),
-                detail: format!(
-                    "read selected external source {}: {error}",
-                    skill.path.display()
-                ),
+            latest = Self::parse_skill_in(&skill.path, &self.workspace_state).map_err(|error| {
+                SkillResolutionError {
+                    skill_name: Some(name.to_string()),
+                    detail: format!(
+                        "read selected external source {}: {error}",
+                        skill.path.display()
+                    ),
+                }
             })?;
             if latest.name != name {
                 return Err(SkillResolutionError {
@@ -1293,6 +1365,9 @@ impl Skill {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("No parent dir"))?;
         let file_path = skill_dir.join(filename);
+        let _source_use =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir())
+                .acquire_location_use(None, std::slice::from_ref(&file_path))?;
         Ok(std::fs::read_to_string(file_path)?)
     }
 

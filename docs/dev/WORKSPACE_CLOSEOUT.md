@@ -257,6 +257,17 @@ and invalid-candidate mechanisms instead of silently activating another source.
 These are specific native owner boundaries, not an OS sandbox or a claim that
 arbitrary shell, browser, computer, MCP or third-party reads are contained.
 
+External skill invocation and reload retain the registry's source namespace.
+Discovery, first-run compatibility import and package-copy/capture readers
+participate in location use. A refused discovery produces a catalog diagnostic,
+not a successful empty selection or an implicit lower-priority invocation.
+Skill-list results expose the diagnostic facts. Managed package capture and
+external Copy hold the source/destination trees while reading their content and
+metadata. A completed Copy can still replay its existing receipt without reading
+its now-unavailable original source. Earlier active text and captured draft
+bytes remain intact. This does not change skill delivery, source precedence,
+the exclusive active-skill mechanism or the later C05 corpus/migration.
+
 ## Journaled removal and retained history
 
 `finish_closeout` consumes an existing current authorization, not a force flag.
