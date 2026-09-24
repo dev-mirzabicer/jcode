@@ -4,7 +4,13 @@ use super::*;
 use rusqlite::{TransactionBehavior, params};
 use std::collections::BTreeMap;
 
+#[cfg(unix)]
+mod approval;
 mod archive;
+#[cfg(unix)]
+mod verification;
+#[cfg(unix)]
+pub use work::CloseoutRuntime;
 mod files;
 #[cfg(unix)]
 mod git;
@@ -29,8 +35,8 @@ struct StoredCloseout {
     references: Option<(PathBuf, String)>,
     preservation: Option<PathBuf>,
     decisions: BTreeMap<String, CloseoutDecision>,
-    final_approval: Option<String>,
-    no_loss: Option<String>,
+    #[serde(default)]
+    review: Option<CloseoutReview>,
 }
 
 impl WorkspaceService {
@@ -189,6 +195,7 @@ impl WorkspaceService {
                 .join(receipt.operation.to_string()),
             preservation_digest: None,
             preservation_volume_ownership,
+            authorization: None,
             quarantine: None,
             removed_entries: 0,
             issues: vec![],
@@ -204,8 +211,7 @@ impl WorkspaceService {
             references: None,
             preservation: None,
             decisions: BTreeMap::new(),
-            final_approval: None,
-            no_loss: None,
+            review: None,
         };
         save(&transaction, &stored)?;
         transaction
@@ -263,8 +269,8 @@ impl WorkspaceService {
         )?;
         stored.record.stage = CloseoutStage::Revoked;
         stored.record.revision = receipt.revision;
-        stored.final_approval = None;
-        stored.no_loss = None;
+        stored.record.authorization = None;
+        stored.review = None;
         if let Entity::Location(mut location) = entity(
             &transaction,
             EntityId::Location(stored.record.spec.location),
@@ -321,11 +327,35 @@ fn load(connection: &Connection, operation: OperationId) -> Result<StoredCloseou
         // historical journal. Old approval must not become fresh authority.
         stored.record.stage = CloseoutStage::RecoveryRequired;
         stored.record.spec.conditional_no_loss = false;
-        stored.final_approval = None;
-        stored.no_loss = None;
+        stored.record.authorization = None;
+        stored.review = None;
         stored.record.issues.push(issue(IssueCode::RecoveryRequired, "Catalog recovery invalidated closeout authority; a trusted client must reconcile the retained operation"));
     }
     Ok(stored)
+}
+
+pub(super) fn invalidate_restored_authority(
+    connection: &Connection,
+    revision: Revision,
+) -> Result<()> {
+    let mut query = connection.prepare("SELECT body FROM operations WHERE kind='closeout' AND state IN ('pending','recovery_required')").map_err(io)?;
+    let bodies = query
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(io)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(io)?;
+    drop(query);
+    for body in bodies {
+        let mut stored: StoredCloseout = decode(&body)?;
+        stored.record.authorization = None;
+        stored.record.spec.conditional_no_loss = false;
+        stored.review = None;
+        stored.record.stage = CloseoutStage::RecoveryRequired;
+        stored.record.revision = revision;
+        stored.record.issues.push(issue(IssueCode::RecoveryRequired, "Catalog restore invalidated closeout authority; inspect retained state before a new trusted decision"));
+        save(connection, &stored)?;
+    }
+    Ok(())
 }
 
 fn save(connection: &Connection, stored: &StoredCloseout) -> Result<()> {

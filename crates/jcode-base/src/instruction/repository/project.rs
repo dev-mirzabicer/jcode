@@ -10,6 +10,50 @@ const PROJECT_CONFIG_RELATIVE_PATH: &str = ".jcode/instructions.toml";
 const CONVENTIONAL_SUBMODULE_PATH: &str = ".jcode/instructions";
 
 impl InstructionRepositoryService {
+    /// Physical preservation dependencies, not active instruction selection.
+    /// Include configured stores and an existing conventional candidate without
+    /// opening Git's mutable index cache or initializing any repository.
+    pub fn preservation_references(
+        &self,
+        launch_dir: impl AsRef<Path>,
+    ) -> InstructionRepositoryResult<Vec<PathBuf>> {
+        let roots = self.roots()?;
+        let project = resolve_project(launch_dir.as_ref()).map_err(|error| {
+            InstructionRepositoryError::new(
+                InstructionRepositoryErrorKind::Configuration,
+                "inspect instruction dependencies",
+                error.to_string(),
+            )
+        })?;
+        let root = project.active_root();
+        let config_path = root.join(PROJECT_CONFIG_RELATIVE_PATH);
+        let mut paths = vec![self.global_repository()?.root];
+        if project_config_present(&config_path)? {
+            let config = load_project_config(&config_path)?;
+            paths.push(
+                configured_repository(
+                    roots,
+                    root,
+                    project.key(),
+                    format!("project-{}", project.key().digest()),
+                    config_path,
+                    config,
+                )?
+                .root,
+            );
+        } else {
+            let candidate = root.join(CONVENTIONAL_SUBMODULE_PATH);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(_) => paths.push(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(config_error(&candidate, &error.to_string())),
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     pub fn resolve_project_root(
         &self,
         launch_dir: impl AsRef<Path>,

@@ -183,13 +183,18 @@ impl WorkspaceService {
                 .parent()
                 .ok_or_else(|| corrupt("Catalog has no parent"))?,
         );
-        match instructions.resolve_project_repository(&location.observed_path) {
-            Ok(Some(repository)) => result.links.push(Link {
-                owner: repository.id,
-                kind: "instruction_repository".into(),
-                path: repository.root,
-            }),
-            Ok(None) => {}
+        match instructions.preservation_references(&location.observed_path) {
+            Ok(paths) => {
+                for path in paths {
+                    if contained(&path, &location.observed_path)? {
+                        result.links.push(Link {
+                            owner: location.id.to_string(),
+                            kind: "instruction_location".into(),
+                            path,
+                        });
+                    }
+                }
+            }
             Err(error) => result.issues.push(issue(
                 IssueCode::IncompleteCapture,
                 format!("Instruction binding cannot be inspected: {error}"),
@@ -212,7 +217,10 @@ fn contained(path: &Path, root: &Path) -> Result<bool> {
     }
     Ok(crate::location::native_files::resolve_target(path)
         .map_err(io)?
-        .starts_with(root))
+        .starts_with(root)
+        || crate::location::native_files::resolve_removal_entry(path)
+            .map_err(io)?
+            .starts_with(root))
 }
 
 pub(super) fn entry(references: &References) -> Result<CloseoutEntry> {

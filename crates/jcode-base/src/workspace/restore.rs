@@ -205,6 +205,7 @@ impl WorkspaceService {
             )
             .map_err(io)?;
             tx.execute("UPDATE session_index SET body=json_set(body,'$.reconciled',json('false'),'$.active',json('false'))",[]).map_err(io)?;
+            closeout::invalidate_restored_authority(&tx, revision)?;
             tx.execute(
                 "UPDATE catalog SET revision=?1",
                 [i64::try_from(revision).map_err(corrupt)?],

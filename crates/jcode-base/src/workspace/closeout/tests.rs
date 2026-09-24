@@ -9,6 +9,434 @@ struct Fixture {
 }
 
 #[tokio::test]
+async fn final_authorization_requires_preserved_linked_content() {
+    let fixture = Fixture::new();
+    let linked = Path::new(".jcode/instructions/linked.md");
+    std::fs::create_dir_all(fixture.root.join(linked.parent().unwrap())).unwrap();
+    std::fs::write(fixture.root.join(linked), "synthetic linked content").unwrap();
+    let sessions = fixture._directory.path().join("sessions-state");
+    let instructions = crate::instruction::InstructionRepositoryService::from_paths(
+        &sessions,
+        fixture.service.root.parent().unwrap(),
+    );
+    assert!(
+        instructions
+            .resolve_project_repository(&fixture.root)
+            .unwrap()
+            .is_none()
+    );
+    let started = fixture.begin(true);
+    let capture = capture(&fixture, started.operation);
+    let mut current = fixture
+        .service
+        .refresh_closeout_in(started.operation, started.revision, &sessions, &capture)
+        .await
+        .unwrap();
+    let page = fixture
+        .service
+        .closeout_inventory(
+            current.operation,
+            current.inventory_digest.as_ref().unwrap(),
+            0,
+            200,
+        )
+        .unwrap();
+    assert!(page.next.is_none());
+    for entry in page.entries {
+        if matches!(
+            entry.kind,
+            CloseoutEntryKind::File | CloseoutEntryKind::Symlink
+        ) {
+            let disposition = if entry.path == linked {
+                CloseoutDisposition::Redundant {
+                    reason: "synthetic judgment".into(),
+                }
+            } else {
+                CloseoutDisposition::Preserve
+            };
+            current = fixture
+                .service
+                .record_closeout_disposition(
+                    current.operation,
+                    current.revision,
+                    CloseoutDecision {
+                        entry: entry.id,
+                        disposition,
+                        recorded_by: "fixture-agent".into(),
+                    },
+                )
+                .unwrap();
+        }
+    }
+    current = fixture
+        .service
+        .preserve_closeout(current.operation, current.revision, &capture)
+        .await
+        .unwrap();
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let runtime = CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+    let review = fixture
+        .service
+        .review_closeout_removal(current.operation, current.revision, &runtime)
+        .await
+        .unwrap();
+    assert!(
+        review
+            .issues
+            .iter()
+            .any(|issue| issue.code == IssueCode::PreservationIncomplete)
+    );
+    assert_eq!(
+        fixture
+            .service
+            .declare_closeout_no_loss(
+                "fixture-agent",
+                RequestId::new(),
+                review.target(),
+                "synthetic assessment",
+                &runtime
+            )
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PreservationIncomplete
+    );
+    assert!(fixture.root.join(linked).is_file());
+    finish_capture(&capture);
+}
+
+#[tokio::test]
+async fn final_authorization_review_reports_committed_backup_failure() {
+    let (fixture, record, capture) = prepared_approval_fixture(false, false).await;
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let sessions = fixture._directory.path().join("sessions-state");
+    let runtime = CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+    let snapshots = fixture.service.root.join("snapshots");
+    let retained = fixture.service.root.join("fixture-retained-snapshots");
+    std::fs::rename(&snapshots, &retained).unwrap();
+    std::fs::write(&snapshots, "owned fixture I/O blocker").unwrap();
+    let result = fixture
+        .service
+        .review_closeout_removal(record.operation, record.revision, &runtime)
+        .await;
+    std::fs::remove_file(&snapshots).unwrap();
+    std::fs::rename(&retained, &snapshots).unwrap();
+    assert_eq!(result.unwrap_err().code, IssueCode::BackupFailed);
+    let review = fixture
+        .service
+        .inspect_closeout_review(record.operation)
+        .unwrap()
+        .unwrap();
+    assert!(review.revision > record.revision);
+    fixture
+        .service
+        .backup(RequestId::new(), "recovered-review".into())
+        .unwrap();
+    let authorized = fixture
+        .service
+        .approve_closeout_removal(&fixture.client, RequestId::new(), review.target(), &runtime)
+        .await
+        .unwrap();
+    assert_eq!(authorized.stage, CloseoutStage::Authorized);
+    assert!(fixture.root.exists());
+    finish_capture(&capture);
+}
+
+#[tokio::test]
+async fn final_authorization_rejects_shared_metadata_and_incomplete_preservation() {
+    let fixture = Fixture::new();
+    let other = fixture._directory.path().join("dependent-worktree");
+    git(
+        &fixture.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "dependent",
+            other.to_str().unwrap(),
+        ],
+    );
+    let started = fixture.begin(true);
+    let capture = capture(&fixture, started.operation);
+    let sessions = fixture._directory.path().join("sessions-state");
+    let current = fixture
+        .service
+        .refresh_closeout_in(started.operation, started.revision, &sessions, &capture)
+        .await
+        .unwrap();
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let runtime = CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+    let review = fixture
+        .service
+        .review_closeout_removal(current.operation, current.revision, &runtime)
+        .await
+        .unwrap();
+    assert!(
+        review
+            .issues
+            .iter()
+            .any(|issue| issue.code == IssueCode::Referenced)
+    );
+    assert!(
+        review
+            .issues
+            .iter()
+            .any(|issue| issue.code == IssueCode::PreservationIncomplete)
+    );
+    assert_eq!(
+        fixture
+            .service
+            .approve_closeout_removal(&fixture.client, RequestId::new(), review.target(), &runtime)
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PreservationIncomplete
+    );
+    assert_eq!(
+        fixture
+            .service
+            .declare_closeout_no_loss(
+                "fixture-agent",
+                RequestId::new(),
+                review.target(),
+                "synthetic assessment",
+                &runtime
+            )
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::PreservationIncomplete
+    );
+    assert!(fixture.root.join(".git").is_dir());
+    assert!(other.join(".git").is_file());
+    finish_capture(&capture);
+}
+
+async fn prepared_approval_fixture(
+    conditional: bool,
+    split_index: bool,
+) -> (Fixture, CloseoutRecord, crate::execution::Capture) {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root.join("payload"), "preserved data").unwrap();
+    if split_index {
+        git(&fixture.root, &["add", "payload"]);
+        git(&fixture.root, &["update-index", "--split-index"]);
+    }
+    let mut spec = fixture.spec(conditional);
+    spec.full_archive = true;
+    let started = fixture
+        .service
+        .begin_closeout(
+            &fixture.client,
+            RequestId::new(),
+            fixture.service.status().unwrap().revision,
+            spec,
+        )
+        .unwrap();
+    let capture = capture(&fixture, started.operation);
+    let current = fixture
+        .service
+        .refresh_closeout_in(
+            started.operation,
+            started.revision,
+            &fixture._directory.path().join("sessions-state"),
+            &capture,
+        )
+        .await
+        .unwrap();
+    let preserved = fixture
+        .service
+        .preserve_closeout(current.operation, current.revision, &capture)
+        .await
+        .unwrap();
+    (fixture, preserved, capture)
+}
+
+#[tokio::test]
+async fn final_authorization_is_review_bound_conditional_only_and_revocable() {
+    for (conditional, split_index) in [(false, false), (true, false), (true, true)] {
+        let (fixture, record, capture) = prepared_approval_fixture(conditional, split_index).await;
+        let execution =
+            crate::execution::ExecutionStore::open(&fixture._directory.path().join("output"))
+                .unwrap();
+        let sessions = fixture._directory.path().join("sessions-state");
+        let runtime =
+            CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+        let review = fixture
+            .service
+            .review_closeout_removal(record.operation, record.revision, &runtime)
+            .await
+            .unwrap();
+        assert!(review.issues.is_empty(), "{:?}", review.issues);
+        let foreign = CloseoutReviewTarget {
+            operation: record.operation,
+            review: ReviewId::new(),
+        };
+        assert_eq!(
+            fixture
+                .service
+                .approve_closeout_removal(&fixture.client, RequestId::new(), foreign, &runtime)
+                .await
+                .unwrap_err()
+                .code,
+            IssueCode::Conflict
+        );
+        let request = RequestId::new();
+        let authorized = if conditional {
+            fixture
+                .service
+                .declare_closeout_no_loss(
+                    "fixture-agent",
+                    request,
+                    review.target(),
+                    "synthetic assessment",
+                    &runtime,
+                )
+                .await
+                .unwrap()
+        } else {
+            assert_eq!(
+                fixture
+                    .service
+                    .declare_closeout_no_loss(
+                        "fixture-agent",
+                        RequestId::new(),
+                        review.target(),
+                        "synthetic assessment",
+                        &runtime
+                    )
+                    .await
+                    .unwrap_err()
+                    .code,
+                IssueCode::PermissionRequired
+            );
+            fixture
+                .service
+                .approve_closeout_removal(&fixture.client, request, review.target(), &runtime)
+                .await
+                .unwrap()
+        };
+        assert_eq!(authorized.stage, CloseoutStage::Authorized);
+        assert_eq!(
+            matches!(
+                authorized.authorization.as_ref().unwrap().source,
+                CloseoutAuthorizationSource::Conditional { .. }
+            ),
+            conditional
+        );
+        let replay = if conditional {
+            fixture
+                .service
+                .declare_closeout_no_loss(
+                    "fixture-agent",
+                    request,
+                    review.target(),
+                    "synthetic assessment",
+                    &runtime,
+                )
+                .await
+                .unwrap()
+        } else {
+            fixture
+                .service
+                .approve_closeout_removal(&fixture.client, request, review.target(), &runtime)
+                .await
+                .unwrap()
+        };
+        assert_eq!(replay.revision, authorized.revision);
+        let revoked = fixture
+            .service
+            .revoke_closeout(
+                &fixture.client,
+                RequestId::new(),
+                record.operation,
+                authorized.revision,
+            )
+            .unwrap();
+        assert_eq!(revoked.stage, CloseoutStage::Revoked);
+        assert!(revoked.authorization.is_none());
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("payload")).unwrap(),
+            "preserved data"
+        );
+        finish_capture(&capture);
+    }
+}
+
+#[tokio::test]
+async fn final_authorization_rechecks_preservation_and_source() {
+    use std::io::BufRead;
+    let (fixture, record, capture) = prepared_approval_fixture(true, false).await;
+    let execution =
+        crate::execution::ExecutionStore::open(&fixture._directory.path().join("output")).unwrap();
+    let sessions = fixture._directory.path().join("sessions-state");
+    let runtime = CloseoutRuntime::new(&sessions, &execution, fixture._directory.path(), &capture);
+    let review = fixture
+        .service
+        .review_closeout_removal(record.operation, record.revision, &runtime)
+        .await
+        .unwrap();
+    assert!(review.issues.is_empty(), "{:?}", review.issues);
+    let stored = load(&fixture.service.connection().unwrap(), record.operation).unwrap();
+    let manifest: preservation::PreservationManifest =
+        storage::read_json(stored.preservation.as_ref().unwrap()).unwrap();
+    let saved = std::io::BufReader::new(std::fs::File::open(manifest.files).unwrap())
+        .lines()
+        .map(|line| decode::<files::PreservedItem>(&line.unwrap()).unwrap())
+        .find(|item| item.item.entry.path == Path::new("payload"))
+        .unwrap()
+        .saved
+        .unwrap();
+    std::fs::write(&saved, "corrupt archive").unwrap();
+    assert!(
+        fixture
+            .service
+            .declare_closeout_no_loss(
+                "fixture-agent",
+                RequestId::new(),
+                review.target(),
+                "synthetic assessment",
+                &runtime
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .service
+            .inspect_closeout(record.operation)
+            .unwrap()
+            .authorization
+            .is_none()
+    );
+    std::fs::write(&saved, "preserved data").unwrap();
+    std::fs::write(fixture.root.join("payload"), "new source data").unwrap();
+    assert_eq!(
+        fixture
+            .service
+            .declare_closeout_no_loss(
+                "fixture-agent",
+                RequestId::new(),
+                review.target(),
+                "synthetic assessment",
+                &runtime
+            )
+            .await
+            .unwrap_err()
+            .code,
+        IssueCode::Conflict
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("payload")).unwrap(),
+        "new source data"
+    );
+    finish_capture(&capture);
+}
+
+#[tokio::test]
 async fn configured_external_volume_preserves_and_reports_actual_protection() {
     let Some(mount) = std::env::var_os("JCODE_WP07_EXTERNAL_MOUNT") else {
         eprintln!("External-volume fixture not selected; no external-volume acceptance claim");
@@ -614,38 +1042,59 @@ fn interrupted_scan_preserves_last_inventory_and_authorization() {
 
 #[test]
 fn catalog_restore_cannot_reactivate_historical_conditional_authority() {
-    let fixture = Fixture::new();
-    let started = fixture.begin(true);
-    let snapshot = fixture
-        .service
-        .backup(RequestId::new(), "pending-closeout".into())
-        .unwrap();
-    fixture
-        .service
-        .revoke_closeout(
-            &fixture.client,
-            RequestId::new(),
-            started.operation,
-            started.revision,
-        )
-        .unwrap();
-    let review = fixture.service.review_restore(snapshot.id).unwrap();
-    fixture
-        .service
-        .apply_restore(RequestId::new(), review.id)
-        .unwrap();
-    let restored = fixture.service.inspect_closeout(started.operation).unwrap();
-    assert_eq!(restored.stage, CloseoutStage::RecoveryRequired);
-    assert!(!restored.spec.conditional_no_loss);
-    assert_eq!(
+    for interrupted in [false, true] {
+        let fixture = Fixture::new();
+        let mut started = fixture.begin(true);
+        if interrupted {
+            started = fixture
+                .service
+                .fence_closeout(started.operation, started.revision)
+                .unwrap();
+            let mut stored =
+                load(&fixture.service.connection().unwrap(), started.operation).unwrap();
+            stored.record.stage = CloseoutStage::RecoveryRequired;
+            stored.record.authorization = Some(CloseoutAuthorization {
+                review: ReviewId::new(),
+                seal: "synthetic prior authorization".into(),
+                source: CloseoutAuthorizationSource::Conditional {
+                    session: "fixture-agent".into(),
+                    assessment: "synthetic assessment".into(),
+                },
+            });
+            save(&fixture.service.connection().unwrap(), &stored).unwrap();
+        }
+        let snapshot = fixture
+            .service
+            .backup(RequestId::new(), "pending-closeout".into())
+            .unwrap();
         fixture
             .service
-            .inventory_closeout(restored.operation, restored.revision)
-            .unwrap_err()
-            .code,
-        IssueCode::RecoveryRequired
-    );
-    assert!(fixture.root.exists());
+            .revoke_closeout(
+                &fixture.client,
+                RequestId::new(),
+                started.operation,
+                started.revision,
+            )
+            .unwrap();
+        let review = fixture.service.review_restore(snapshot.id).unwrap();
+        fixture
+            .service
+            .apply_restore(RequestId::new(), review.id)
+            .unwrap();
+        let restored = fixture.service.inspect_closeout(started.operation).unwrap();
+        assert_eq!(restored.stage, CloseoutStage::RecoveryRequired);
+        assert!(!restored.spec.conditional_no_loss);
+        assert!(restored.authorization.is_none());
+        assert_eq!(
+            fixture
+                .service
+                .inventory_closeout(restored.operation, restored.revision)
+                .unwrap_err()
+                .code,
+            IssueCode::RecoveryRequired
+        );
+        assert!(fixture.root.exists());
+    }
 }
 
 #[test]

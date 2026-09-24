@@ -83,8 +83,8 @@ impl WorkspaceService {
             stored.record.stage = CloseoutStage::Preserving;
             stored.record.preservation_digest = None;
             stored.preservation = None;
-            stored.final_approval = None;
-            stored.no_loss = None;
+            stored.record.authorization = None;
+            stored.review = None;
             save(&transaction, &stored)?;
             transaction.commit().map_err(io)?;
         }

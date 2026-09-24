@@ -11,6 +11,67 @@ use std::process::Stdio;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 mod lfs;
 
+pub(super) fn verify_lfs_manifest(path: &Path) -> Result<()> {
+    let objects: BTreeMap<String, lfs::LfsObject> = storage::read_json(path)?;
+    for object in objects.values() {
+        let metadata = std::fs::symlink_metadata(&object.preserved).map_err(io)?;
+        if !metadata.is_file()
+            || metadata.len() != object.size
+            || backup::file_digest(&object.preserved)? != object.oid
+        {
+            return Err(issue(
+                IssueCode::PreservationIncomplete,
+                "A preserved historical LFS payload is no longer intact",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn dependent_worktrees(stored: &StoredCloseout) -> Result<Vec<Issue>> {
+    use std::os::unix::ffi::OsStrExt;
+    let history = stored.history.as_ref().ok_or_else(|| {
+        issue(
+            IssueCode::IncompleteCapture,
+            "Git history has not been inventoried",
+        )
+    })?;
+    if Some(backup::file_digest(history)?) != stored.history_digest {
+        return Err(corrupt("Git inventory changed"));
+    }
+    let snapshots: Vec<RepositorySnapshot> = storage::read_json(history)?;
+    let mut issues = Vec::new();
+    for snapshot in snapshots {
+        inventory::verify_tree(&snapshot.administration)?;
+        if !snapshot
+            .common_directory
+            .starts_with(stored.binding.observed_path())
+        {
+            continue;
+        }
+        let worktrees = snapshot.capture_directory.join("worktrees");
+        if snapshot.observations.get("worktrees") != Some(&backup::file_digest(&worktrees)?) {
+            return Err(corrupt("Git worktree observation changed"));
+        }
+        for field in std::fs::read(worktrees).map_err(io)?.split(|b| *b == 0) {
+            if let Some(path) = field.strip_prefix(b"worktree ") {
+                let path = Path::new(std::ffi::OsStr::from_bytes(path));
+                let resolved = crate::location::native_files::resolve_target(path).map_err(io)?;
+                if !resolved.starts_with(stored.binding.observed_path()) {
+                    issues.push(issue(
+                        IssueCode::Referenced,
+                        format!(
+                            "An external worktree still depends on Git metadata being removed: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(issues)
+}
+
 fn discover_repositories(root: &Path) -> Result<BTreeSet<PathBuf>> {
     use std::os::unix::fs::MetadataExt;
     let device = std::fs::symlink_metadata(root).map_err(io)?.dev();

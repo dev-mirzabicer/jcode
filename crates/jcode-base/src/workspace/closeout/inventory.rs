@@ -173,8 +173,8 @@ impl WorkspaceService {
         stored.history_digest = None;
         stored.references = None;
         stored.decisions.clear();
-        stored.final_approval = None;
-        stored.no_loss = None;
+        stored.record.authorization = None;
+        stored.review = None;
         save(&transaction, &stored)?;
         transaction.commit().map_err(io)?;
         self.closeout_backup(stored.record)
@@ -270,8 +270,8 @@ impl WorkspaceService {
         stored.record.revision = storage::status(&transaction)?.revision;
         stored.record.stage = CloseoutStage::NeedsDecision;
         stored.decisions.insert(decision.entry.clone(), decision);
-        stored.final_approval = None;
-        stored.no_loss = None;
+        stored.record.authorization = None;
+        stored.review = None;
         stored.record.preservation_digest = None;
         save(&transaction, &stored)?;
         transaction.commit().map_err(io)?;

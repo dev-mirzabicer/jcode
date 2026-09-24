@@ -1,7 +1,7 @@
 //! A closeout is one exact human-authorized transaction, not permission to
 //! delete an arbitrary path. File bodies and large inventories are separate
 //! private records; ordinary operation inspection returns metadata only.
-use crate::{Issue, LocationId, OperationId, RequestId, Revision};
+use crate::{Issue, LocationId, OperationId, RequestId, ReviewId, Revision};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -47,10 +47,55 @@ pub struct CloseoutRecord {
     /// Observed filesystem property, not a claim of encryption or a sandbox.
     #[serde(default)]
     pub preservation_volume_ownership: Option<bool>,
+    #[serde(default)]
+    pub authorization: Option<CloseoutAuthorization>,
     pub preservation_digest: Option<String>,
     pub quarantine: Option<PathBuf>,
     pub removed_entries: u64,
     pub issues: Vec<Issue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutReview {
+    pub id: ReviewId,
+    pub operation: OperationId,
+    pub revision: Revision,
+    pub inventory_digest: Option<String>,
+    pub preservation_digest: Option<String>,
+    pub references_digest: String,
+    pub work: CloseoutWorkReport,
+    pub issues: Vec<Issue>,
+    pub preservation_volume_ownership: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseoutReviewTarget {
+    pub operation: OperationId,
+    pub review: ReviewId,
+}
+
+impl CloseoutReview {
+    pub fn target(&self) -> CloseoutReviewTarget {
+        CloseoutReviewTarget {
+            operation: self.operation,
+            review: self.id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CloseoutAuthorization {
+    pub review: ReviewId,
+    pub seal: String,
+    pub source: CloseoutAuthorizationSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloseoutAuthorizationSource {
+    Human { client: String },
+    Conditional { session: String, assessment: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

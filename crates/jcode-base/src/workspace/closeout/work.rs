@@ -4,6 +4,65 @@ use crate::session::Session;
 use jcode_tool_core::{OutputCapture, OutputStream};
 use std::io::BufRead;
 
+/// Server-owned observation context, never deserialized from an agent request.
+pub struct CloseoutRuntime<'a> {
+    pub(super) session_root: &'a Path,
+    execution: &'a ExecutionStore,
+    executor_cwd: &'a Path,
+    pub(super) capture: &'a dyn OutputCapture,
+}
+
+impl<'a> CloseoutRuntime<'a> {
+    pub fn new(
+        session_root: &'a Path,
+        execution: &'a ExecutionStore,
+        executor_cwd: &'a Path,
+        capture: &'a dyn OutputCapture,
+    ) -> Self {
+        Self {
+            session_root,
+            execution,
+            executor_cwd,
+            capture,
+        }
+    }
+
+    pub(super) async fn observe(
+        &self,
+        service: &WorkspaceService,
+        stored: &StoredCloseout,
+    ) -> Result<CloseoutWorkReport> {
+        let mut findings = Vec::new();
+        service.observe_closeout_work(
+            stored,
+            self.session_root,
+            self.execution,
+            self.executor_cwd,
+            &mut findings,
+        )?;
+        match external_work(
+            service,
+            stored.record.operation,
+            stored.binding.observed_path(),
+            self.capture,
+        )
+        .await
+        {
+            Ok(external) => findings.extend(external),
+            Err(error) => findings.push(finding(
+                CloseoutWorkKind::Unknown,
+                "external-process-inspection",
+                error.to_string(),
+            )),
+        }
+        Ok(CloseoutWorkReport {
+            operation: stored.record.operation,
+            observed_at: chrono::Utc::now().to_rfc3339(),
+            findings,
+        })
+    }
+}
+
 impl WorkspaceService {
     /// Install the admission fence before observing existing owners. This does
     /// not stop them. A nonempty report is a blocker, not a request to kill work.
@@ -57,7 +116,7 @@ impl WorkspaceService {
         Ok((fenced, report))
     }
 
-    fn observe_closeout_work(
+    pub(super) fn observe_closeout_work(
         &self,
         stored: &StoredCloseout,
         session_root: &Path,
@@ -214,7 +273,7 @@ fn finding(
 }
 
 #[cfg(target_os = "macos")]
-async fn external_work(
+pub(super) async fn external_work(
     service: &WorkspaceService,
     operation: OperationId,
     root: &Path,
@@ -343,7 +402,7 @@ async fn external_work(
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn external_work(
+pub(super) async fn external_work(
     _: &WorkspaceService,
     _: OperationId,
     _: &Path,

@@ -2,10 +2,11 @@
 
 This service is being integrated in SP-58-C01/WP-07. The current foundation
 provides catalog-owned authorization, private inventories, verified
-preservation and closing admission/work observation. It does **not** expose checkout removal, a client capability,
+preservation, closing admission/work observation and review-bound final approval.
+It does **not** expose checkout removal, a client capability,
 a workspace agent tool, or a completed closeout workflow. Ordinary managed
 rollout remains unchanged. The rest of WP-07 must integrate current-work gates,
-final approval, removal/recovery, retained history and the public adapter before
+removal/recovery, retained history and the public adapter before
 implementation acceptance.
 
 ## Owners and authority
@@ -18,6 +19,21 @@ conditional-no-loss option defaults off. Agent dispositions do not issue or
 broaden this authorization. Revocation is a trusted control, not a field in an
 agent judgment. Catalog restoration cannot reactivate a pending historical
 closeout authorization.
+
+Final review keeps the root Closing and rechecks actual retained files, Git/LFS
+payloads, administration, current references and live-work observations. A
+trusted client may approve that exact operation/review pair. An agent's no-loss
+declaration can authorize only an operation whose initial human approval enabled
+the conditional option. Neither route can waive structural findings or create
+the initial human grant. Typed provenance distinguishes the two routes, request
+IDs make retry idempotent, and stale target/revision/evidence is rejected.
+
+Restoring the catalog clears pending closeout authority, including an operation
+that was already interrupted before the snapshot. Historical closed receipts are
+not turned into new authority. A review committed before automatic-backup failure
+remains inspectable and reports the partial outcome rather than pretending the
+review was rolled back. The future removal owner must retain physical ownership
+and re-run the same checks at its destructive boundary.
 
 Preparation does not change Session history, stop an active task, retire a
 Location or delete checkout files. No historical cwd is rewritten. The native
@@ -39,6 +55,12 @@ repository references. These use metadata-only owner APIs, not transcript or
 Markdown hydration. Harness-state containment is rejected before inventory;
 independently registered nested locations remain explicit findings. History and
 side-panel state are not rewritten by this inspection.
+Instruction dependencies use a dedicated projection of configured stores and
+existing conventional candidates, not active instruction selection or Git index
+reads. The ordinary instruction activation/resolution policy is unchanged.
+Known linked data cannot rely on a redundant-data disposition when removal is
+reviewed. Other worktrees depending on Git metadata inside the target block
+approval, even if preservation otherwise succeeded.
 
 Complete refresh additionally records offline Git status/index, refs, reflogs,
 worktree/submodule sharing and metadata locations, including nested repositories.
