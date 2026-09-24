@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 /// Deep facade for every Phase 1 domain operation that does not mutate a session.
 #[derive(Clone, Debug)]
 pub struct StartupContext {
+    durable_state: PathBuf,
     plan_store: StartupPlanStore,
     max_plan_entries: usize,
     max_batch_bytes: u64,
@@ -47,11 +48,10 @@ impl StartupContext {
     /// environment variables.
     pub fn from_durable_state_dir(durable_state_dir: impl Into<PathBuf>) -> Self {
         let max_plan_entries = DEFAULT_MAX_STARTUP_PLAN_ENTRIES;
-        let projects_dir = durable_state_dir
-            .into()
-            .join("startup-context")
-            .join("projects");
+        let durable_state = durable_state_dir.into();
+        let projects_dir = durable_state.join("startup-context").join("projects");
         Self {
+            durable_state,
             plan_store: StartupPlanStore::new(projects_dir, max_plan_entries),
             max_plan_entries,
             max_batch_bytes: DEFAULT_MAX_STARTUP_BATCH_BYTES,
@@ -181,13 +181,7 @@ impl StartupContext {
         plan: &StartupProjectPlan,
         failure_policy: StartupFailurePolicy,
     ) -> Result<StartupPreparationOutcome, StartupContextError> {
-        capture::prepare_plan(
-            project,
-            plan,
-            failure_policy,
-            self.max_batch_bytes,
-            self.max_capture_attempts,
-        )
+        capture::prepare_plan(self, project, plan, failure_policy)
     }
 
     pub fn prepare_selection(
@@ -197,14 +191,7 @@ impl StartupContext {
         preview: &StartupSelectionPreview,
         failure_policy: StartupFailurePolicy,
     ) -> Result<StartupPreparationOutcome, StartupContextError> {
-        capture::prepare_preview(
-            project,
-            plan_revision,
-            preview,
-            failure_policy,
-            self.max_batch_bytes,
-            self.max_capture_attempts,
-        )
+        capture::prepare_preview(self, project, plan_revision, preview, failure_policy)
     }
 
     /// Observe one previously captured receipt file using the same path,
@@ -214,12 +201,7 @@ impl StartupContext {
         project: &ActiveProject,
         file: &jcode_session_types::StoredStartupFileReceipt,
     ) -> StartupObservedState {
-        observation::observe_receipt_file(
-            project,
-            file,
-            self.max_batch_bytes,
-            self.max_capture_attempts,
-        )
+        observation::observe_receipt_file(self, project, file)
     }
 
     #[cfg(test)]

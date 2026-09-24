@@ -7,12 +7,22 @@ use std::path::{Path, PathBuf};
 
 const LEASE_DURATION_SECONDS: i64 = 300;
 
-#[derive(Debug)]
 pub(super) struct RepositoryMutationGuard {
+    _filesystem_use: Vec<crate::workspace::WorkspaceUseLease>,
     #[cfg(any(unix, windows))]
     _file: File,
     owner_path: PathBuf,
     operation_id: String,
+}
+
+impl std::fmt::Debug for RepositoryMutationGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryMutationGuard")
+            .field("owner_path", &self.owner_path)
+            .field("operation_id", &self.operation_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -66,7 +76,35 @@ fn acquire_lease(
     operation_id: &str,
     kind: LeaseKind<'_>,
 ) -> InstructionRepositoryResult<RepositoryMutationGuard> {
+    let workspace = crate::workspace::WorkspaceService::new(state_root);
+    let mut filesystem_use = vec![
+        workspace
+            .acquire_location_use(
+                Some(&repository.root),
+                std::slice::from_ref(&repository.root),
+            )
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::MutationBusy,
+                    "admit instruction filesystem work",
+                    error.to_string(),
+                )
+                .repository(repository)
+            })?,
+    ];
     let paths = lease_paths(state_root, repository, kind)?;
+    filesystem_use.push(
+        workspace
+            .acquire_location_use(None, std::slice::from_ref(&paths.lock))
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::MutationBusy,
+                    "admit instruction metadata work",
+                    error.to_string(),
+                )
+                .repository(repository)
+            })?,
+    );
     reject_symlink_components(&paths.owner)?;
     crate::storage::ensure_dir(paths.owner.parent().unwrap_or(state_root)).map_err(|error| {
         InstructionRepositoryError::new(
@@ -115,6 +153,7 @@ fn acquire_lease(
             )
         })?;
         Ok(RepositoryMutationGuard {
+            _filesystem_use: filesystem_use,
             _file: file,
             owner_path: paths.owner,
             operation_id: operation_id.to_string(),
@@ -149,6 +188,7 @@ fn acquire_lease(
             )
         })?;
         Ok(RepositoryMutationGuard {
+            _filesystem_use: filesystem_use,
             _file: file,
             owner_path: paths.owner,
             operation_id: operation_id.to_string(),
@@ -190,6 +230,7 @@ fn acquire_lease(
             lease_io_error(repository, "secure mutation owner", &paths.owner, error)
         })?;
         Ok(RepositoryMutationGuard {
+            _filesystem_use: filesystem_use,
             owner_path: paths.owner,
             operation_id: operation_id.to_string(),
         })

@@ -2748,3 +2748,159 @@ fn scoped_save_preserves_pending_merge_even_after_conflicts_are_staged() {
         );
     }
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closeout_source_gate_protects_instruction_reads_and_mutation_lifetime() {
+    use crate::instruction::{InstructionRuntime, InstructionSelector};
+    use crate::workspace::{
+        Issue, IssueCode, RequestId, WorkspaceClientAuthority, WorkspaceService, test_support,
+    };
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let repository = fixture.service.global_repository().unwrap();
+    let workspace = WorkspaceService::new(&fixture.state);
+    let location = test_support::register_checkout(&workspace, &repository.root);
+    let sources = fixture.service.instruction_sources(None).unwrap();
+    let selector = InstructionSelector::parse(InstructionKind::Module, "common").unwrap();
+    let frozen = InstructionRuntime::discover(sources.clone())
+        .render(&selector, &serde_json::json!({}))
+        .unwrap()
+        .text;
+    let before = std::fs::read(repository.root.join("modules/common.md")).unwrap();
+    let lease =
+        acquire_mutation_lease(&fixture.state, &repository, "source-guard-fixture").unwrap();
+    assert!(matches!(
+        workspace.acquire_root(location),
+        Err(Issue {
+            code: IssueCode::Busy,
+            ..
+        })
+    ));
+    let record = test_support::fence(&workspace, location).await;
+    assert!(
+        fixture
+            .service
+            .read_file(
+                &repository,
+                "modules/common.md",
+                InstructionReadPolicy::WorkingTreeOnly
+            )
+            .is_err()
+    );
+    assert!(
+        InstructionRuntime::discover(sources.clone())
+            .render(&selector, &serde_json::json!({}))
+            .is_err()
+    );
+    drop(lease);
+    assert!(acquire_mutation_lease(&fixture.state, &repository, "blocked-source-guard").is_err());
+    assert_eq!(
+        std::fs::read(repository.root.join("modules/common.md")).unwrap(),
+        before
+    );
+    workspace
+        .revoke_closeout(
+            &WorkspaceClientAuthority::authenticated("fixture-human").unwrap(),
+            RequestId::new(),
+            record.operation,
+            record.revision,
+        )
+        .unwrap();
+    assert_eq!(
+        InstructionRuntime::discover(sources)
+            .render(&selector, &serde_json::json!({}))
+            .unwrap()
+            .text,
+        frozen
+    );
+    acquire_mutation_lease(&fixture.state, &repository, "restored-source-guard").unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closeout_source_gate_cannot_drop_project_addenda_for_an_explicit_global_agent() {
+    use crate::instruction::{InstructionResourceRef, InstructionRuntime, InstructionSelector};
+    use crate::workspace::{WorkspaceService, test_support};
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let global = fixture.service.global_repository().unwrap();
+    let project = fixture._root.path().join("project-instructions");
+    std::fs::create_dir_all(project.join("addenda")).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&project)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(project.join("addenda/extra.md"),"---\nid: extra\nkind: agent-addendum\ntarget: global:worker\n---\nSynthetic project addition").unwrap();
+    let workspace = WorkspaceService::new(&fixture.state);
+    std::fs::write(
+        project.join("AGENTS.md"),
+        "Synthetic external project instructions",
+    )
+    .unwrap();
+    let external_only = fixture
+        .service
+        .instruction_sources(None)
+        .unwrap()
+        .with_project_agents_md(project.join("AGENTS.md"));
+    assert_eq!(
+        InstructionRuntime::discover(external_only.clone())
+            .external_agents()
+            .len(),
+        1
+    );
+    let location = test_support::register_checkout(&workspace, &project);
+    let sources = fixture
+        .service
+        .instruction_sources(None)
+        .unwrap()
+        .with_project_root(&project);
+    let selector = InstructionSelector::parse(InstructionKind::Agent, "global:worker").unwrap();
+    let resource = InstructionResourceRef {
+        scope: InstructionScope::Global,
+        kind: InstructionKind::Agent,
+        id: InstructionId::parse("worker").unwrap(),
+    };
+    let ready = InstructionRuntime::discover(sources.clone());
+    assert!(ready.resolve(&selector).is_ok());
+    assert_eq!(
+        ready.applicable_project_addenda(&resource).unwrap().len(),
+        1
+    );
+    test_support::fence(&workspace, location).await;
+    let blocked = InstructionRuntime::discover(sources);
+    assert!(
+        blocked.resolve(&selector).is_ok(),
+        "Explicit independent global resource remains readable"
+    );
+    assert!(
+        blocked.applicable_project_addenda(&resource).is_err(),
+        "A Closing project source is not an empty addendum set"
+    );
+    assert!(global.root.join("agents/worker.md").is_file());
+    let external_blocked = InstructionRuntime::discover(external_only);
+    assert!(external_blocked.resolve(&selector).is_ok());
+    assert!(
+        external_blocked
+            .applicable_project_addenda(&resource)
+            .is_err()
+    );
+}

@@ -42,6 +42,7 @@ pub struct InstructionRuntime {
     sources: InstructionSources,
     entries: BTreeMap<(InstructionKind, InstructionId), ScopedCandidates>,
     diagnostics: Vec<InstructionDiagnostic>,
+    blocked_sources: Vec<InstructionDiagnostic>,
     external_agents: Vec<ExternalAgentsInstruction>,
 }
 
@@ -55,6 +56,7 @@ impl InstructionRuntime {
             sources,
             entries: BTreeMap::new(),
             diagnostics: Vec::new(),
+            blocked_sources: Vec::new(),
             external_agents: Vec::new(),
         };
         runtime.discover_scope(
@@ -176,6 +178,7 @@ impl InstructionRuntime {
         &self,
         active_agent: &InstructionResourceRef,
     ) -> Result<Vec<&InstructionDocument>, InstructionError> {
+        self.require_source_scope(InstructionScope::Project)?;
         let mut applicable = Vec::new();
         for ((kind, id), scopes) in &self.entries {
             if *kind != InstructionKind::AgentAddendum {
@@ -280,6 +283,7 @@ impl InstructionRuntime {
             ) {
                 continue;
             }
+            self.require_source_scope(scope)?;
             let root = match scope {
                 InstructionScope::Global => Some(&self.sources.global_root),
                 InstructionScope::Project => self.sources.project_root.as_ref(),
@@ -669,7 +673,36 @@ impl InstructionRuntime {
         }
     }
 
+    fn require_source_scope(&self, scope: InstructionScope) -> Result<(), InstructionError> {
+        if let Some(issue) = self
+            .blocked_sources
+            .iter()
+            .find(|issue| issue.scope == scope)
+        {
+            return Err(InstructionError::Io {
+                operation: "admit instruction source",
+                path: issue.path.clone(),
+                detail: issue.detail.clone(),
+            });
+        }
+        Ok(())
+    }
+
     fn discover_scope(&mut self, scope: InstructionScope, root: PathBuf) {
+        let workspace = crate::workspace::WorkspaceService::new(&self.sources.workspace_state);
+        let _source_use = match workspace.acquire_location_use(None, std::slice::from_ref(&root)) {
+            Ok(lease) => lease,
+            Err(error) => {
+                let issue = InstructionDiagnostic {
+                    scope,
+                    path: root,
+                    detail: error.to_string(),
+                };
+                self.blocked_sources.push(issue.clone());
+                self.diagnostics.push(issue);
+                return;
+            }
+        };
         if !self.inspect_directory(scope, &root) {
             return;
         }
@@ -852,6 +885,8 @@ impl InstructionRuntime {
                 ));
             }
         }
+        // The complete managed scope is held by discover_scope. Do not turn a
+        // newly installed Closing fence into cancellation of this admitted read.
         fs::read_to_string(path)
     }
 
@@ -868,18 +903,27 @@ impl InstructionRuntime {
         ];
         for (scope, path) in sources {
             let Some(path) = path else { continue };
-            match fs::read_to_string(&path) {
+            match self.sources.read_source(&path) {
                 Ok(content) => self.external_agents.push(ExternalAgentsInstruction {
                     scope,
                     path,
                     content,
                 }),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => self.diagnostics.push(InstructionDiagnostic {
-                    scope,
-                    path,
-                    detail: error.to_string(),
-                }),
+                Err(error) => {
+                    let issue = InstructionDiagnostic {
+                        scope,
+                        path,
+                        detail: error.to_string(),
+                    };
+                    if error
+                        .get_ref()
+                        .is_some_and(|source| source.is::<crate::workspace::Issue>())
+                    {
+                        self.blocked_sources.push(issue.clone());
+                    }
+                    self.diagnostics.push(issue);
+                }
             }
         }
     }

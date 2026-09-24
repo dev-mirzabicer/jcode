@@ -35,6 +35,8 @@ pub(crate) struct Host {
     pool: Arc<crate::mcp::SharedMcpPool>,
     repositories: InstructionRepositoryService,
     root: PathBuf,
+    workspace: crate::workspace::WorkspaceService,
+    startup: crate::startup_context::StartupContext,
 }
 impl Host {
     pub(crate) fn new(
@@ -47,6 +49,8 @@ impl Host {
             pool,
             repositories,
             root: crate::storage::jcode_dir()?,
+            workspace: crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir()),
+            startup: crate::startup_context::StartupContext::new(),
         })
     }
 
@@ -76,6 +80,7 @@ impl Host {
         object.remove("intent");
         let input: CatalogInput = serde_json::from_value(input)?;
         let cwd = resolve_working_dir(input.working_dir, ctx.working_dir.as_deref())?;
+        let _location_use = self.workspace.acquire_location_use(Some(&cwd), &[])?;
         check_stop(&ctx)?;
         let composer = SystemPromptComposer::from_repository_service(self.repositories.clone());
         let instructions = composer.delegation_catalog(Some(&cwd))?;
@@ -216,6 +221,7 @@ impl Host {
         let result: Result<Agent> = async {
             check_stop(ctx)?;
             let cwd = resolve_working_dir(request.working_dir.clone(), ctx.working_dir.as_deref())?;
+            let _location_use = self.workspace.acquire_location_use(Some(&cwd), &[])?;
             let registry = Registry::new(self.provider.clone()).await;
             let global = registry.skills().read().await.clone();
             let skills = crate::skill::SkillRegistry::effective_for_working_dir_with_repositories(
@@ -265,7 +271,7 @@ impl Host {
                     .into(),
             );
             session.install_system_prompt(activation.state);
-            prepare_startup(&mut session, &request.startup_context, &cwd)?;
+            prepare_startup(&self.startup, &mut session, &request.startup_context, &cwd)?;
             check_stop(ctx)?;
             let artifact_parent = self.root.join("artifacts");
             crate::storage::ensure_dir(&artifact_parent)?;
@@ -562,18 +568,18 @@ fn resolve_working_dir(requested: Option<PathBuf>, caller: Option<&Path>) -> Res
     Ok(path)
 }
 fn prepare_startup(
+    engine: &crate::startup_context::StartupContext,
     session: &mut Session,
     selection: &ChildStartupContext,
     cwd: &Path,
 ) -> Result<()> {
     use crate::startup_context::{
-        StartupContext, StartupFailurePolicy, StartupPreparationOutcome, StartupSelectionInput,
+        StartupFailurePolicy, StartupPreparationOutcome, StartupSelectionInput,
     };
     if matches!(selection, ChildStartupContext::Disabled) {
         session.ensure_initial_session_context_message();
         return Ok(());
     }
-    let engine = StartupContext::new();
     let project = engine.resolve_project(cwd)?;
     let prepared = match selection {
         ChildStartupContext::ProjectDefault => {

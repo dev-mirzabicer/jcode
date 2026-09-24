@@ -1,3 +1,4 @@
+use super::StartupContext;
 use super::selection::{ResolvedStartupTarget, resolve_existing_spec};
 use super::types::{
     ActiveProject, CapturedStartupFile, PreparedStartupEntry, StartupFailurePolicy,
@@ -13,11 +14,10 @@ use std::path::Path;
 type CaptureHook<'a> = Option<&'a dyn Fn(&Path, usize)>;
 
 pub(super) fn prepare_plan(
+    engine: &StartupContext,
     project: &ActiveProject,
     plan: &StartupProjectPlan,
     policy: StartupFailurePolicy,
-    max_batch_bytes: u64,
-    max_capture_attempts: usize,
 ) -> Result<StartupPreparationOutcome, super::types::StartupContextError> {
     if plan.project_key() != project.key() {
         return Err(super::types::StartupContextError::PlanProjectMismatch);
@@ -29,24 +29,22 @@ pub(super) fn prepare_plan(
         .map(PreparationInput::Spec)
         .collect();
     Ok(prepare_inputs(
+        engine,
         project,
         plan.revision(),
         items,
         Vec::new(),
         policy,
-        max_batch_bytes,
-        max_capture_attempts,
         None,
     ))
 }
 
 pub(super) fn prepare_preview(
+    engine: &StartupContext,
     project: &ActiveProject,
     plan_revision: u64,
     preview: &StartupSelectionPreview,
     policy: StartupFailurePolicy,
-    max_batch_bytes: u64,
-    max_capture_attempts: usize,
 ) -> Result<StartupPreparationOutcome, super::types::StartupContextError> {
     if preview.project_key() != project.key() {
         return Err(super::types::StartupContextError::SelectionProjectMismatch);
@@ -62,25 +60,23 @@ pub(super) fn prepare_preview(
         })
         .collect();
     Ok(prepare_inputs(
+        engine,
         project,
         plan_revision,
         items,
         preview.batch_issues().to_vec(),
         policy,
-        max_batch_bytes,
-        max_capture_attempts,
         None,
     ))
 }
 
 #[cfg(test)]
 pub(super) fn prepare_preview_with_hook(
+    engine: &StartupContext,
     project: &ActiveProject,
     plan_revision: u64,
     preview: &StartupSelectionPreview,
     policy: StartupFailurePolicy,
-    max_batch_bytes: u64,
-    max_capture_attempts: usize,
     hook: &dyn Fn(&Path, usize),
 ) -> Result<StartupPreparationOutcome, super::types::StartupContextError> {
     if preview.project_key() != project.key() {
@@ -97,13 +93,12 @@ pub(super) fn prepare_preview_with_hook(
         })
         .collect();
     Ok(prepare_inputs(
+        engine,
         project,
         plan_revision,
         items,
         preview.batch_issues().to_vec(),
         policy,
-        max_batch_bytes,
-        max_capture_attempts,
         Some(hook),
     ))
 }
@@ -118,17 +113,16 @@ enum PreparedCandidate {
     Issue(StartupFileIssue),
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prepare_inputs(
+    engine: &StartupContext,
     project: &ActiveProject,
     plan_revision: u64,
     inputs: Vec<PreparationInput>,
     mut batch_issues: Vec<StartupFileIssue>,
     policy: StartupFailurePolicy,
-    max_batch_bytes: u64,
-    max_capture_attempts: usize,
     hook: CaptureHook<'_>,
 ) -> StartupPreparationOutcome {
+    let max_batch_bytes = engine.max_batch_bytes;
     let mut candidates = Vec::with_capacity(inputs.len());
     let mut preflight_bytes = 0u64;
     for input in inputs {
@@ -184,34 +178,30 @@ fn prepare_inputs(
     for candidate in candidates {
         match candidate {
             PreparedCandidate::Issue(issue) => entries.push(PreparedStartupEntry::Issue(issue)),
-            PreparedCandidate::Target(target) => match capture_stable_file(
-                project,
-                target,
-                max_batch_bytes,
-                max_capture_attempts,
-                hook,
-            ) {
-                Ok(file) => {
-                    let next_bytes = captured_bytes.saturating_add(file.bytes());
-                    if next_bytes > max_batch_bytes {
-                        entries.push(PreparedStartupEntry::Issue(
-                            StartupFileIssue::for_input(
-                                entries.len(),
-                                file.logical_path(),
-                                StartupFileIssueKind::BatchTooLarge {
-                                    bytes: next_bytes,
-                                    limit: max_batch_bytes,
-                                },
-                            )
-                            .with_spec_id(file.spec_id().clone()),
-                        ));
-                    } else {
-                        captured_bytes = next_bytes;
-                        entries.push(PreparedStartupEntry::Captured(file));
+            PreparedCandidate::Target(target) => {
+                match capture_stable_file(engine, project, target, hook) {
+                    Ok(file) => {
+                        let next_bytes = captured_bytes.saturating_add(file.bytes());
+                        if next_bytes > max_batch_bytes {
+                            entries.push(PreparedStartupEntry::Issue(
+                                StartupFileIssue::for_input(
+                                    entries.len(),
+                                    file.logical_path(),
+                                    StartupFileIssueKind::BatchTooLarge {
+                                        bytes: next_bytes,
+                                        limit: max_batch_bytes,
+                                    },
+                                )
+                                .with_spec_id(file.spec_id().clone()),
+                            ));
+                        } else {
+                            captured_bytes = next_bytes;
+                            entries.push(PreparedStartupEntry::Captured(file));
+                        }
                     }
+                    Err(issue) => entries.push(PreparedStartupEntry::Issue(issue)),
                 }
-                Err(issue) => entries.push(PreparedStartupEntry::Issue(issue)),
-            },
+            }
         }
     }
 
@@ -222,17 +212,18 @@ fn prepare_inputs(
 }
 
 pub(super) fn capture_stable_file(
+    engine: &StartupContext,
     project: &ActiveProject,
     initial_target: ResolvedStartupTarget,
-    max_bytes: u64,
-    max_capture_attempts: usize,
     hook: CaptureHook<'_>,
 ) -> Result<CapturedStartupFile, StartupFileIssue> {
+    let max_bytes = engine.max_batch_bytes;
+    let max_capture_attempts = engine.max_capture_attempts;
     let spec = initial_target.spec.clone();
     let mut target = initial_target;
     let attempts = max_capture_attempts.max(1);
     for attempt in 0..attempts {
-        match capture_attempt(&target, max_bytes, attempt, hook) {
+        match capture_attempt(engine, &target, attempt, hook) {
             Ok(file) => return Ok(file),
             Err(issue)
                 if matches!(issue.kind(), StartupFileIssueKind::ChangedDuringCapture)
@@ -247,11 +238,26 @@ pub(super) fn capture_stable_file(
 }
 
 fn capture_attempt(
+    engine: &StartupContext,
     target: &ResolvedStartupTarget,
-    max_bytes: u64,
     attempt: usize,
     hook: CaptureHook<'_>,
 ) -> Result<CapturedStartupFile, StartupFileIssue> {
+    let max_bytes = engine.max_batch_bytes;
+    let workspace = crate::workspace::WorkspaceService::new(&engine.durable_state);
+    let _source_use = workspace
+        .acquire_location_use(
+            None,
+            &[target.logical_path.clone(), target.resolved_path.clone()],
+        )
+        .map_err(|error| {
+            StartupFileIssue::for_spec(
+                &target.spec,
+                StartupFileIssueKind::Unreadable {
+                    detail: error.to_string(),
+                },
+            )
+        })?;
     let mut file = File::open(&target.logical_path).map_err(|error| {
         StartupFileIssue::for_spec(
             &target.spec,

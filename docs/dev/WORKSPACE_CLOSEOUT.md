@@ -229,6 +229,34 @@ new transfers, while admitted readers finish normally. Source trust remains
 operation/stage-bound and separate from these lifetime leases. No checkout
 is removed or existing reader cancelled just to make a clone proceed.
 
+## Specialized source readers
+
+Startup Context capture and receipt observation retain their original facade's
+durable-state namespace. Each stable-file attempt holds location use for the
+logical and resolved source through its complete read and validation. Closing
+is an unreadable-source/blocking outcome through the existing startup owner,
+not permission to rewrite or recapture an earlier authoritative snapshot.
+Saved selections and custom selections use that same boundary.
+
+Delegation guards the host-resolved catalog/creation cwd and uses its retained
+Startup Context owner. An ancestor cwd is not made into a recursive discovery
+target merely to inspect a catalog. Gmail draft/send guards its documented
+absolute attachment paths, including aliases, before any external request.
+Neither guard grants a new read permission or changes child authority.
+
+Managed instruction and external AGENTS body reads retain source-namespace
+identity. Managed discovery holds one permit through the complete source-tree
+read. A Closing scope remains an explicit resolution error, including when
+optional project-addendum applicability cannot be read. It is not an empty
+catalog or permission to omit project guidance from an explicit global agent.
+Independent explicit global resources remain readable. Direct repository file
+reads and existing repository mutation/setup/
+draft-operation leases participate in checkout use. Previously frozen Session
+instructions remain unchanged; failed source reads use the existing diagnostic
+and invalid-candidate mechanisms instead of silently activating another source.
+These are specific native owner boundaries, not an OS sandbox or a claim that
+arbitrary shell, browser, computer, MCP or third-party reads are contained.
+
 ## Journaled removal and retained history
 
 `finish_closeout` consumes an existing current authorization, not a force flag.

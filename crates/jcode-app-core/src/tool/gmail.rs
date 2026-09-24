@@ -8,12 +8,14 @@ use crate::gmail::{self, GmailClient, MessageFormat};
 
 pub struct GmailTool {
     client: GmailClient,
+    workspace: crate::workspace::WorkspaceService,
 }
 
 impl GmailTool {
     pub fn new() -> Self {
         Self {
             client: GmailClient::new(),
+            workspace: crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir()),
         }
     }
 }
@@ -99,6 +101,22 @@ impl Tool for GmailTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: GmailInput = serde_json::from_value(input)?;
+        let _attachment_use = if matches!(params.action.as_str(), "draft" | "send") {
+            let paths = params
+                .attachments
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                paths.iter().all(|path| path.is_absolute()),
+                "Attachment paths must be absolute"
+            );
+            Some(self.workspace.acquire_location_use(None, &paths)?)
+        } else {
+            None
+        };
         let max = params.max_results.unwrap_or(10).min(50);
 
         // The connect action sets up the Composio managed backend by opening a
@@ -583,6 +601,47 @@ mod tests {
     use super::*;
     use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
     use std::sync::Arc;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn closeout_source_gate_blocks_attachment_aliases_before_external_messaging() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let state = crate::storage::durable_state_dir();
+        let root = home.root().join("checkout");
+        crate::workspace::test_support::closing_checkout(&state, home.root(), &root).await;
+        let alias = home.root().join("attachment-link");
+        std::os::unix::fs::symlink(root.join("payload.md"), &alias).unwrap();
+        let tool = GmailTool::new();
+        for path in [root.join("payload.md"), alias] {
+            let ctx = ToolContext {
+                session_id: "fixture".into(),
+                message_id: "fixture".into(),
+                tool_call_id: "fixture".into(),
+                working_dir: Some(home.root().to_path_buf()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+                invocation: Default::default(),
+            };
+            // Deliberately omit a recipient too: even a broken gate cannot
+            // create a real message while this negative fixture is running.
+            let error = tool
+                .execute(json!({"action":"draft","attachments":[path]}), ctx)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<crate::workspace::Issue>()
+                    .unwrap()
+                    .code,
+                crate::workspace::IssueCode::LiveWork
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("payload.md")).unwrap(),
+            "retained synthetic data"
+        );
+    }
 
     #[tokio::test]
     async fn full_received_thread_and_prior_acquisitions_survive_summary_rendering() -> Result<()> {

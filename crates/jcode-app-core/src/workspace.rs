@@ -3,6 +3,8 @@
 pub use jcode_base::workspace::*;
 mod clone_runner;
 mod closeout_runner;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod test_support;
 mod startup_copy;
 
 pub(crate) async fn dispatch(

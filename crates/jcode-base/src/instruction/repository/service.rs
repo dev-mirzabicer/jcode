@@ -127,6 +127,7 @@ impl InstructionRepositoryService {
     ) -> InstructionRepositoryResult<InstructionSources> {
         let global = self.global_repository()?;
         let mut sources = InstructionSources::new(global.root);
+        sources.workspace_state = self.roots()?.durable_state.clone();
         if let Some(project) = project {
             sources = sources.with_project_root(project.root.clone());
         }
@@ -745,6 +746,21 @@ impl InstructionRepositoryService {
         policy: InstructionReadPolicy,
     ) -> InstructionRepositoryResult<InstructionFileContent> {
         let relative_path = relative_path.as_ref();
+        validate_relative_path(relative_path)?;
+        let workspace = crate::workspace::WorkspaceService::new(&self.roots()?.durable_state);
+        let _source_use = workspace
+            .acquire_location_use(
+                Some(&repository.root),
+                &[repository.root.join(relative_path)],
+            )
+            .map_err(|error| {
+                InstructionRepositoryError::new(
+                    InstructionRepositoryErrorKind::RepositoryUnavailable,
+                    "read instruction source",
+                    error.to_string(),
+                )
+                .repository(repository)
+            })?;
         if let Some(content) = read_working_utf8(repository, relative_path)? {
             return Ok(InstructionFileContent {
                 relative_path: relative_path.to_path_buf(),

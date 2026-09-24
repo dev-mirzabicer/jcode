@@ -281,6 +281,7 @@ pub struct ExternalAgentsInstruction {
 
 #[derive(Clone, Debug)]
 pub struct InstructionSources {
+    pub(crate) workspace_state: PathBuf,
     pub global_root: PathBuf,
     pub project_root: Option<PathBuf>,
     pub global_agents_md: Option<PathBuf>,
@@ -291,6 +292,7 @@ impl InstructionSources {
     pub fn new(global_root: impl Into<PathBuf>) -> Self {
         Self {
             global_root: global_root.into(),
+            workspace_state: crate::storage::durable_state_dir(),
             project_root: None,
             global_agents_md: None,
             project_agents_md: None,
@@ -300,6 +302,14 @@ impl InstructionSources {
     pub fn with_project_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.project_root = Some(root.into());
         self
+    }
+
+    fn read_source(&self, path: &std::path::Path) -> std::io::Result<String> {
+        let workspace = crate::workspace::WorkspaceService::new(&self.workspace_state);
+        let _source_use = workspace
+            .acquire_location_use(None, &[path.to_path_buf()])
+            .map_err(std::io::Error::other)?;
+        std::fs::read_to_string(path)
     }
 
     pub fn with_global_agents_md(mut self, path: impl Into<PathBuf>) -> Self {

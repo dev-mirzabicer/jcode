@@ -43,6 +43,8 @@ pub use startup_copy::StartupCopyIntent;
 mod storage;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) mod test_support;
 pub use storage::{CatalogLease, RootLease};
 
 pub type Result<T> = std::result::Result<T, Issue>;

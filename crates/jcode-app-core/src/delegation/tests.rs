@@ -714,3 +714,71 @@ async fn human_child_context_rejects_busy_without_borrowing_parent_or_dispatchin
         std::panic::resume_unwind(error);
     }
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closeout_source_gate_covers_resolved_child_cwd_and_custom_startup_without_launching() {
+    let f = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let root = Path::new(f.parent.working_dir.as_ref().unwrap()).join("closing");
+        crate::workspace::test_support::closing_checkout(
+            &crate::storage::durable_state_dir(),
+            f.home.root(),
+            &root,
+        )
+        .await;
+        let before = serde_json::to_value(Session::load(&f.parent.id).unwrap().messages).unwrap();
+        assert!(
+            f.host
+                .catalog(json!({}), f.ctx("ancestor-catalog"))
+                .await
+                .is_ok()
+        );
+        let error = f
+            .host
+            .catalog(json!({"working_dir":"closing"}), f.ctx("closing-catalog"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::workspace::Issue>()
+                .unwrap()
+                .code,
+            crate::workspace::IssueCode::LiveWork
+        );
+        for startup in [false, true] {
+            let id = if startup {
+                "closing-startup"
+            } else {
+                "closing-cwd"
+            };
+            let mut input = f.create();
+            if startup {
+                input
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("disable_startup_context");
+                input["startup_files"] = json!(["closing/payload.md"]);
+            } else {
+                input["working_dir"] = json!("closing");
+            }
+            assert!(f.call(id, input).await.is_err());
+            assert!(!crate::session::session_exists(&f.child_id(id)));
+            assert!(f.terminal(id).await.unwrap().state.terminal());
+        }
+        assert_eq!(
+            serde_json::to_value(Session::load(&f.parent.id).unwrap().messages).unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("payload.md")).unwrap(),
+            "retained synthetic data"
+        );
+    })
+    .catch_unwind()
+    .await;
+    f.cleanup().await;
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}

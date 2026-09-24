@@ -1121,12 +1121,11 @@ fn changed_during_capture_retries_once_then_succeeds_when_source_stabilizes() {
     };
 
     let outcome = capture::prepare_preview_with_hook(
+        &context,
         &project,
         0,
         &preview,
         StartupFailurePolicy::Block,
-        DEFAULT_MAX_STARTUP_BATCH_BYTES,
-        2,
         &hook,
     )
     .expect("prepare changing file");
@@ -1159,12 +1158,11 @@ fn repeated_mutation_returns_changed_during_capture_without_claiming_a_read() {
     };
 
     let outcome = capture::prepare_preview_with_hook(
+        &context,
         &project,
         0,
         &preview,
         StartupFailurePolicy::Block,
-        DEFAULT_MAX_STARTUP_BATCH_BYTES,
-        2,
         &hook,
     )
     .expect("prepare unstable file");
@@ -1175,4 +1173,87 @@ fn repeated_mutation_returns_changed_during_capture_without_claiming_a_read() {
         StartupFileIssueKind::ChangedDuringCapture
     ));
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closeout_source_gate_blocks_saved_and_custom_capture_without_changing_snapshots() {
+    use crate::workspace::{
+        Issue, IssueCode, RequestId, WorkspaceClientAuthority, WorkspaceService, test_support,
+    };
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("source");
+    init_git(&root);
+    let file = root.join("context.md");
+    write_file(&file, "complete synthetic startup content");
+    let workspace = WorkspaceService::new(&temp.path().join("state"));
+    let location = test_support::register_checkout(&workspace, &root);
+    let context = context(&temp);
+    let consumer = resolve_non_git(&context, &temp.path().join("consumer"));
+    let alias = consumer.active_root().join("selected.md");
+    std::os::unix::fs::symlink(&file, &alias).unwrap();
+    let preview = context.preview_selection(
+        &consumer,
+        [StartupSelectionInput::new(&alias).with_external_approval(file.canonicalize().unwrap())],
+    );
+    let plan = context.save_project_plan(&consumer, 0, &preview).unwrap();
+    let hook = |_: &Path, _: usize| {
+        assert!(matches!(
+            workspace.acquire_root(location),
+            Err(Issue {
+                code: IssueCode::Busy,
+                ..
+            })
+        ));
+    };
+    let first = capture::prepare_preview_with_hook(
+        &context,
+        &consumer,
+        plan.revision(),
+        &preview,
+        StartupFailurePolicy::Block,
+        &hook,
+    )
+    .unwrap();
+    assert!(matches!(first, StartupPreparationOutcome::Ready(_)));
+    let snapshot = first.preparation().captured_files().next().unwrap().clone();
+    let record = test_support::fence(&workspace, location).await;
+    for outcome in [
+        context
+            .prepare_selection(
+                &consumer,
+                plan.revision(),
+                &preview,
+                StartupFailurePolicy::Block,
+            )
+            .unwrap(),
+        context
+            .prepare_project_plan(&consumer, &plan, StartupFailurePolicy::Block)
+            .unwrap(),
+    ] {
+        assert!(matches!(outcome, StartupPreparationOutcome::Blocked(_)));
+        assert_eq!(outcome.preparation().captured_files().count(), 0);
+        assert!(
+            outcome
+                .preparation()
+                .issues()
+                .any(|issue| matches!(issue.kind(), StartupFileIssueKind::Unreadable { .. }))
+        );
+    }
+    assert_eq!(snapshot.text(), "complete synthetic startup content");
+    assert_eq!(fs::read_to_string(&file).unwrap(), snapshot.text());
+    workspace
+        .revoke_closeout(
+            &WorkspaceClientAuthority::authenticated("fixture-human").unwrap(),
+            RequestId::new(),
+            record.operation,
+            record.revision,
+        )
+        .unwrap();
+    assert!(matches!(
+        context
+            .prepare_project_plan(&consumer, &plan, StartupFailurePolicy::Block)
+            .unwrap(),
+        StartupPreparationOutcome::Ready(_)
+    ));
 }

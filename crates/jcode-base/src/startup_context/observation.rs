@@ -8,11 +8,11 @@ use jcode_session_types::{
 use std::path::PathBuf;
 
 pub(super) fn observe_receipt_file(
+    engine: &super::StartupContext,
     project: &ActiveProject,
     file: &StoredStartupFileReceipt,
-    max_bytes: u64,
-    max_capture_attempts: usize,
 ) -> StartupObservedState {
+    let max_bytes = engine.max_batch_bytes;
     let logical_path = PathBuf::from(&file.logical_path);
     let selected_path = if logical_path.is_absolute() {
         StoredStartupSelectedPath::ExternalAbsolute {
@@ -42,7 +42,7 @@ pub(super) fn observe_receipt_file(
         Ok(target) => target,
         Err(issue) => return issue_state(issue.kind()),
     };
-    match capture_stable_file(project, target, max_bytes, max_capture_attempts, None) {
+    match capture_stable_file(engine, project, target, None) {
         Ok(captured) if captured.sha256() == file.sha256 => StartupObservedState::Current,
         Ok(captured) => StartupObservedState::Changed {
             sha256: captured.sha256().to_string(),
