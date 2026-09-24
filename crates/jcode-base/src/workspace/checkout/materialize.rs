@@ -165,11 +165,37 @@ impl WorkspaceService {
                     "Submodule path escaped or repeated a repository",
                 ));
             }
-            let sources = submodule_sources(project_root, &parent)?;
-            self.record_clone_sources(request, &sources)?;
+            let sources = submodule_reads(project_root, &parent)?;
+            self.record_clone_sources(
+                request,
+                &sources
+                    .iter()
+                    .map(|source| source.trust.clone())
+                    .collect::<Vec<_>>(),
+            )?;
             for source in sources {
-                let relative = source.path;
-                let url = source.url;
+                let relative = source.trust.path;
+                let url = source.effective;
+                let needs_transport = submodule_needs_transport(&parent, &relative)?;
+                let _source_use = if needs_transport {
+                    self.acquire_transport_source(&source.cwd, &url)?
+                } else {
+                    None
+                };
+                self.checkpoint("clone_submodule_source_admitted")?;
+                self.git_step(
+                    request,
+                    &parent,
+                    [
+                        OsStr::new("--literal-pathspecs"),
+                        OsStr::new("submodule"),
+                        OsStr::new("init"),
+                        OsStr::new("--"),
+                        relative.as_os_str(),
+                    ],
+                    capture,
+                )
+                .await?;
                 let candidate = parent.join(&relative);
                 if !candidate.starts_with(project_root) {
                     return Err(issue(
@@ -195,12 +221,21 @@ impl WorkspaceService {
                         OsStr::new("update"),
                         OsStr::new("--init"),
                         OsStr::new("--checkout"),
-                        OsStr::new("--"),
-                        relative.as_os_str(),
-                    ],
+                    ]
+                    .into_iter()
+                    .chain((!needs_transport).then_some(OsStr::new("--no-fetch")))
+                    .chain([OsStr::new("--"), relative.as_os_str()]),
                     false,
                 )?;
-                command.env("GIT_PROTOCOL_FROM_USER", "0");
+                git::command_config(
+                    &mut command,
+                    &format!("submodule.{}.url", source.name),
+                    &url,
+                )?;
+                command
+                    .env("GIT_PROTOCOL_FROM_USER", "0")
+                    .env("GIT_LITERAL_PATHSPECS", "1");
+
                 git::run(self, request, command, capture).await?;
                 let actual = candidate.canonicalize().map_err(io)?;
                 if !actual.starts_with(&parent) || !actual.starts_with(project_root) {
@@ -210,6 +245,7 @@ impl WorkspaceService {
                     ));
                 }
                 git::detach_borrowed_objects(project_root, &actual)?;
+                self.checkpoint("clone_submodule_materialized")?;
                 pending.push(actual);
             }
         }
@@ -239,6 +275,14 @@ impl WorkspaceService {
                 self.record_clone_sources(request, &[source])?;
             }
             if !lfs_inventory(&parent)?.is_empty() {
+                let endpoint = lfs_endpoint(&parent)?;
+                let cached = lfs_cache_complete(project_root, &parent)?;
+                let _source_use = if cached {
+                    Vec::new()
+                } else {
+                    self.acquire_lfs_source(&parent, &endpoint)?
+                };
+                self.checkpoint("clone_lfs_source_admitted")?;
                 self.git_step(
                     request,
                     &parent,
@@ -252,18 +296,21 @@ impl WorkspaceService {
                 )
                 .await?;
                 let head = checked_git(&parent, [OsStr::new("rev-parse"), OsStr::new("HEAD")])?;
-                self.lfs_step(
-                    request,
-                    &parent,
-                    [
-                        OsStr::new("lfs"),
-                        OsStr::new("fetch"),
-                        OsStr::new("origin"),
-                        OsStr::new(head.trim()),
-                    ],
-                    capture,
-                )
-                .await?;
+                if !cached {
+                    self.lfs_step(
+                        request,
+                        &parent,
+                        [
+                            OsStr::new("lfs"),
+                            OsStr::new("fetch"),
+                            OsStr::new("origin"),
+                            OsStr::new(head.trim()),
+                        ],
+                        capture,
+                    )
+                    .await?;
+                }
+                self.checkpoint("clone_lfs_fetched")?;
                 self.lfs_step(
                     request,
                     &parent,
@@ -391,6 +438,75 @@ impl WorkspaceService {
     }
 }
 
+fn submodule_needs_transport(parent: &Path, relative: &Path) -> Result<bool> {
+    let child = parent.join(relative);
+    match std::fs::symlink_metadata(child.join(".git")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(io(error)),
+        Ok(_) => {}
+    }
+    let entry = checked_git(
+        parent,
+        [
+            OsStr::new("--literal-pathspecs"),
+            OsStr::new("ls-files"),
+            OsStr::new("--stage"),
+            OsStr::new("-z"),
+            OsStr::new("--"),
+            relative.as_os_str(),
+        ],
+    )?;
+    let header = entry
+        .split_once('\t')
+        .ok_or_else(|| corrupt("Submodule index entry missing"))?
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if header.len() != 3 || header[0] != "160000" || header[2] != "0" {
+        return Err(corrupt("Submodule index entry is not one resolved gitlink"));
+    }
+    let oid = format!("{}^{{commit}}", header[1]);
+    let output = git::git(Some(&child), ["cat-file", "-e", &oid])
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .output()
+        .map_err(io)?;
+    Ok(!output.status.success())
+}
+
+fn lfs_cache_complete(stage: &Path, repository: &Path) -> Result<bool> {
+    let media =
+        crate::location::native_files::resolve_target(&local_lfs_media_directory(repository)?)
+            .map_err(io)?;
+    if !media.starts_with(stage) {
+        return Err(issue(
+            IssueCode::ReplacedRoot,
+            "Clone LFS storage left the owned stage",
+        ));
+    }
+    for file in lfs_inventory(repository)? {
+        let oid = file
+            .get("oid")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| corrupt("LFS object ID missing"))?
+            .trim_start_matches("sha256:");
+        if oid.len() != 64 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(corrupt("Invalid LFS object ID"));
+        }
+        let path = media.join(&oid[..2]).join(&oid[2..4]).join(oid);
+        let mut source = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io(error)),
+        };
+        let mut hash = Sha256::new();
+        std::io::copy(&mut source, &mut hash).map_err(io)?;
+        if format!("{:x}", hash.finalize()) != oid {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(super) fn verify_clean_tree(root: &Path, spec: &CloneSpec) -> Result<()> {
     let mut status_args = Vec::new();
     if spec.lfs {
@@ -503,41 +619,163 @@ fn submodules(root: &Path) -> Result<Vec<(String, PathBuf)>> {
 /// Discover the exact URLs Git would read from this checked-out manifest.
 /// These facts are retained before contacting a submodule transport.
 pub(super) fn submodule_sources(stage: &Path, repository: &Path) -> Result<Vec<CloneTrustSource>> {
+    Ok(submodule_reads(stage, repository)?
+        .into_iter()
+        .map(|source| source.trust)
+        .collect())
+}
+
+struct SubmoduleRead {
+    trust: CloneTrustSource,
+    name: String,
+    effective: String,
+    cwd: PathBuf,
+}
+
+fn submodule_reads(stage: &Path, repository: &Path) -> Result<Vec<SubmoduleRead>> {
     let relative = repository.strip_prefix(stage).map_err(io)?.to_path_buf();
     let mut sources = Vec::new();
     for (name, path) in submodules(repository)? {
-        let output = git::git(
-            Some(repository),
-            [
-                OsStr::new("config"),
-                OsStr::new("-z"),
-                OsStr::new("--file"),
-                OsStr::new(".gitmodules"),
-                OsStr::new("--get"),
-                OsStr::new(&format!("submodule.{name}.url")),
-            ],
-        )
-        .output()
-        .map_err(io)?;
-        if !output.status.success() || output.stdout.last() != Some(&0) {
-            return Err(issue(
-                IssueCode::InvalidInput,
-                "Submodule has no valid transport URL",
-            ));
+        let key = format!("submodule.{name}.url");
+        let declared = config_value(repository, &["--file", ".gitmodules"], &key)?
+            .ok_or_else(|| issue(IssueCode::InvalidInput, "Submodule has no transport URL"))?;
+        trust::validate_submodule_url(&declared)?;
+        let expected = if declared.starts_with("../") || declared.starts_with("./") {
+            resolve_relative_submodule(repository, &name, &path)?
+        } else {
+            declared.clone()
+        };
+        let mut effective =
+            config_value(repository, &["--local"], &key)?.unwrap_or_else(|| expected.clone());
+        let child = repository.join(&path);
+        let mut cwd = repository.to_path_buf();
+        // An initialized submodule fetches from its own origin, not the
+        // parent's URL setting. Observe that actual reader before admission.
+        match std::fs::symlink_metadata(child.join(".git")) {
+            Ok(_) => {
+                effective = checked_git(&child, ["remote", "get-url", "origin"])?
+                    .strip_suffix('\n')
+                    .ok_or_else(|| corrupt("Submodule origin lacks terminator"))?
+                    .to_owned();
+                cwd = child;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io(error)),
         }
-        let url =
-            String::from_utf8(output.stdout[..output.stdout.len() - 1].to_vec()).map_err(io)?;
-        trust::validate_submodule_url(&url)?;
-        sources.push(CloneTrustSource {
-            kind: CloneTrustKind::Submodule,
-            repository: relative.clone(),
-            path,
-            url,
+        trust::validate_submodule_url(&effective)?;
+        // Preserve prior review identity for the ordinary Git-derived URL.
+        // A local override is a different discovered source, not implicit trust.
+        let url = if effective == expected {
+            declared
+        } else {
+            effective.clone()
+        };
+        sources.push(SubmoduleRead {
+            trust: CloneTrustSource {
+                kind: CloneTrustKind::Submodule,
+                repository: relative.clone(),
+                path,
+                url,
+            },
+            name,
+            effective,
+            cwd,
         });
     }
-    sources.sort();
-    sources.dedup();
+    sources.sort_by(|left, right| left.trust.cmp(&right.trust));
     Ok(sources)
+}
+
+fn config_value(root: &Path, source: &[&str], key: &str) -> Result<Option<String>> {
+    let mut args = vec!["config", "-z"];
+    args.extend_from_slice(source);
+    args.extend(["--get", key]);
+    let output = git::git(Some(root), args).output().map_err(io)?;
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    if !output.status.success() || output.stdout.last() != Some(&0) {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Cannot inspect effective submodule source",
+        ));
+    }
+    String::from_utf8(output.stdout[..output.stdout.len() - 1].to_vec())
+        .map(Some)
+        .map_err(io)
+}
+
+fn resolve_relative_submodule(repository: &Path, name: &str, path: &Path) -> Result<String> {
+    // Ask Git to resolve its own relative-URL policy in a private empty index.
+    // Never initialize or rewrite the caller's config during trust inspection.
+    let branch = git::git(
+        Some(repository),
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )
+    .output()
+    .map_err(io)?;
+    let remote = if branch.status.success() {
+        let branch = std::str::from_utf8(&branch.stdout)
+            .map_err(io)?
+            .strip_suffix('\n')
+            .ok_or_else(|| corrupt("Git branch lacks terminator"))?;
+        config_value(repository, &["--local"], &format!("branch.{branch}.remote"))?
+            .unwrap_or_else(|| "origin".into())
+    } else if branch.status.code() == Some(1) {
+        "origin".into()
+    } else {
+        return Err(issue(
+            IssueCode::RecoveryRequired,
+            "Cannot inspect Git default remote",
+        ));
+    };
+    if remote != "origin" {
+        return Err(issue(
+            IssueCode::Conflict,
+            "Acquired stage changed its default remote; relative source trust remains bound to the reviewed acquisition origin",
+        ));
+    }
+    let origin = checked_git(repository, ["remote", "get-url", &remote])?
+        .strip_suffix('\n')
+        .ok_or_else(|| corrupt("Git remote lacks terminator"))?
+        .to_owned();
+    let scratch = tempfile::tempdir().map_err(io)?;
+    checked_git(scratch.path(), ["init", "--quiet"])?;
+    checked_git(scratch.path(), ["remote", "add", "origin", &origin])?;
+    std::fs::copy(
+        repository.join(".gitmodules"),
+        scratch.path().join(".gitmodules"),
+    )
+    .map_err(io)?;
+    // Init needs only a gitlink in the index. The sentinel is never fetched,
+    // committed or used as content; actual gitlinks remain verified by Git.
+    let sentinel = "a".repeat(40);
+    checked_git(
+        scratch.path(),
+        [
+            OsStr::new("update-index"),
+            OsStr::new("--add"),
+            OsStr::new("--cacheinfo"),
+            OsStr::new("160000"),
+            OsStr::new(&sentinel),
+            path.as_os_str(),
+        ],
+    )?;
+    checked_git(
+        scratch.path(),
+        [
+            OsStr::new("submodule"),
+            OsStr::new("init"),
+            OsStr::new("--"),
+            path.as_os_str(),
+        ],
+    )?;
+    config_value(
+        scratch.path(),
+        &["--local"],
+        &format!("submodule.{name}.url"),
+    )?
+    .ok_or_else(|| corrupt("Git did not resolve the relative submodule URL"))
 }
 
 pub(super) fn lfs_source(stage: &Path, repository: &Path) -> Result<Option<CloneTrustSource>> {
@@ -659,7 +897,7 @@ fn local_lfs_value(repository: &Path, key: &str) -> Result<Option<String>> {
     ))
 }
 
-fn lfs_endpoint(repository: &Path) -> Result<String> {
+fn lfs_environment(repository: &Path) -> Result<String> {
     let output = git::git_lfs(Some(repository), ["lfs", "env"])
         .output()
         .map_err(io)?;
@@ -669,7 +907,25 @@ fn lfs_endpoint(repository: &Path) -> Result<String> {
             "Git LFS cannot report its effective endpoint before transfer",
         ));
     }
-    let text = std::str::from_utf8(&output.stdout).map_err(io)?;
+    String::from_utf8(output.stdout).map_err(io)
+}
+
+pub(super) fn local_lfs_media_directory(repository: &Path) -> Result<PathBuf> {
+    let text = lfs_environment(repository)?;
+    let mut media = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("LocalMediaDir="));
+    let directory = media
+        .next()
+        .ok_or_else(|| corrupt("Git LFS did not identify local media storage"))?;
+    if media.next().is_some() || !Path::new(directory).is_absolute() {
+        return Err(corrupt("Git LFS media storage is ambiguous"));
+    }
+    Ok(directory.into())
+}
+
+fn lfs_endpoint(repository: &Path) -> Result<String> {
+    let text = lfs_environment(repository)?;
     let mut endpoints = text
         .lines()
         .filter_map(|line| line.strip_prefix("Endpoint="));

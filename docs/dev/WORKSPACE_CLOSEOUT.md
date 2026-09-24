@@ -221,6 +221,14 @@ admission and retains physical source use while Git reads it. Parent creation
 and publication retain shared parent ownership with exclusive child creation
 and no-replacement publication, allowing ordinary parent readers.
 
+The same read-lifetime owner covers local submodule and LFS materialization.
+Git resolves relative submodule URLs without changing source configuration;
+the admitted endpoint, not merely its relative spelling, selects physical
+ownership. LFS's reported local media tree is protected too. Closing blocks
+new transfers, while admitted readers finish normally. Source trust remains
+operation/stage-bound and separate from these lifetime leases. No checkout
+is removed or existing reader cancelled just to make a clone proceed.
+
 ## Journaled removal and retained history
 
 `finish_closeout` consumes an existing current authorization, not a force flag.

@@ -63,6 +63,24 @@ human-facing clone form.
    become terminal and continues that stage without reacquiring Git. A
    nested submodule or LFS manifest can require another review round.
    No unreviewed transport is contacted or checkout marked Ready.
+
+   Local acquisition, submodule transports and local LFS transfers also obey
+   checkout Closing admission. Their physical read leases last until the
+   corresponding Git operation finishes. LFS's own environment identifies
+   its media directory, including storage outside the source repository.
+   A blocked source leaves the operation/stage recoverable, not Ready.
+   Relative submodule URLs are resolved by Git in a private metadata-only
+   repository. Inspection does not initialize or rewrite the source config.
+   The ordinary relative URL retains its reviewed identity; a configured
+   redirection or an initialized submodule's changed origin is a new source
+   requiring the same exact trust review. An unexpected default remote in
+   an acquired stage blocks rather than silently changing the reviewed base.
+   Recovery checks already acquired submodule commits and hashes the local LFS
+   cache. When those objects are complete, it uses a no-fetch submodule update
+   or local LFS checkout without reopening the old source. A disappeared source
+   is not a new dependency of independently retained data. Destination LFS
+   storage must stay within the owned stage; an external cache cannot establish
+   an independent Ready checkout.
    The service materializes and verifies requested submodules at recorded gitlinks
    and LFS bytes, and installs only reviewed resulting remotes. Readiness
    requires an exact HEAD, branch/remotes, clean tree, fsck, stage witness and

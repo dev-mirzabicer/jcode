@@ -14,6 +14,7 @@ mod materialize;
 #[cfg(test)]
 mod recovery_tests;
 mod remotes;
+mod source_use;
 mod trust;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -642,15 +643,7 @@ impl WorkspaceService {
                 };
                 let _source_use = local_source
                     .as_deref()
-                    .map(|path| self.acquire_location_use(Some(path), &[]))
-                    .transpose()?;
-                let source_binding = local_source
-                    .as_deref()
-                    .map(|path| self.resolver.bind_directory(path).map_err(io))
-                    .transpose()?;
-                let _source_root = source_binding
-                    .as_ref()
-                    .map(|binding| self.acquire_mutation_binding(binding))
+                    .map(|path| self.acquire_source_path(path))
                     .transpose()?;
                 self.checkpoint("clone_source_admitted")?;
                 self.verify_source(&operation)?;

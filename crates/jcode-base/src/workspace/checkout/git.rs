@@ -39,6 +39,35 @@ fn reference(base: &CloneBase) -> Result<String> {
     }
 }
 
+pub(super) fn command_config(
+    command: &mut std::process::Command,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let count = command
+        .get_envs()
+        .find(|(name, _)| *name == OsStr::new("GIT_CONFIG_COUNT"))
+        .and_then(|(_, value)| value)
+        .map(|value| {
+            value
+                .to_str()
+                .ok_or_else(|| corrupt("Invalid Git command configuration count"))
+        })
+        .transpose()?
+        .map(str::parse::<usize>)
+        .transpose()
+        .map_err(io)?
+        .unwrap_or(0);
+    let next = count
+        .checked_add(1)
+        .ok_or_else(|| corrupt("Git command configuration count overflow"))?;
+    command
+        .env(format!("GIT_CONFIG_KEY_{count}"), key)
+        .env(format!("GIT_CONFIG_VALUE_{count}"), value)
+        .env("GIT_CONFIG_COUNT", next.to_string());
+    Ok(())
+}
+
 pub(super) fn validate_branch(name: &str) -> Result<()> {
     let _ = reference(&CloneBase::Branch {
         name: name.to_owned(),

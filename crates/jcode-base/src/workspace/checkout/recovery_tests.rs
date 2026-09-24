@@ -1,4 +1,5 @@
 use super::lfs_test_server::LfsTestServer;
+mod source_lifetime;
 use super::*;
 use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, StorageConfig};
 use std::sync::{
