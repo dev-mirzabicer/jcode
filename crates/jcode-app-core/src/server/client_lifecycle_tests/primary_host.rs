@@ -1,21 +1,15 @@
 use super::*;
 
 #[test]
+#[cfg(unix)]
 fn runtime_shutdown_fence_retains_input_and_allows_only_admitted_work() -> Result<()> {
-    use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+    use crate::runtime_lifecycle::admission::RuntimeAdmission;
     use crate::workspace::runtime::*;
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();
     crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
     tokio::runtime::Runtime::new()?.block_on(async {
         let root = crate::storage::jcode_dir()?;
-        let owner = RuntimeStopStore::new(
-            &crate::storage::durable_state_dir(),
-            &root.join("shutdown-fixture.sock"),
-        )?
-        .claim()?;
-        let registration = RuntimeAdmission::register(&root, owner.identity())?;
-        let gate = registration.admission();
         let recorder = Arc::new(DurableInputProvider::default());
         let provider: Arc<dyn Provider> = recorder.clone();
         let registry = Registry::new(provider.clone()).await;
@@ -27,6 +21,21 @@ fn runtime_shutdown_fence_retains_input_and_allows_only_admitted_work() -> Resul
             agent.clone(),
         )])));
         let status = status_fixture(&session);
+        let lifecycle = crate::server::shutdown::RuntimeLifecycle::new(
+            &root,
+            &root.join("shutdown-fixture.sock"),
+            host.clone(),
+            crate::background::global().clone(),
+        )
+        .await?;
+        let gate = RuntimeAdmission::for_root(&root)?.context("Runtime gate missing")?;
+        // Keep one genuinely admitted preparation outstanding while the first
+        // primary finishes, so Cancel is still the valid human action.
+        let held = gate.independent(
+            RuntimeWorkKind::Preparation,
+            "fixture-preparation".into(),
+            None,
+        )?;
         let initial = jcode_session_types::PrimaryInputEnvelope {
             id: crate::workspace::RequestId::new(),
             session: session.clone(),
@@ -43,21 +52,27 @@ fn runtime_shutdown_fence_retains_input_and_allows_only_admitted_work() -> Resul
             client_request_digest: None,
         };
         let admission = host.admit(&session, 99, agent.clone())?;
-        let review = gate.review(
-            &owner,
-            ShutdownOptions {
-                strategy: StopStrategy::FinishCurrent,
-                independent: IndependentTasks::Stop,
-                quiescence_timeout_seconds: 10,
-            },
-            Vec::new(),
-        )?;
-        let op = gate.begin(
-            &owner,
-            crate::workspace::RequestId::new(),
-            review.id,
-            Vec::new(),
-        )?;
+        let RuntimeResponse::Review(review) = lifecycle
+            .request(RuntimeRequest::Review {
+                options: ShutdownOptions {
+                    strategy: StopStrategy::FinishCurrent,
+                    independent: IndependentTasks::Stop,
+                    quiescence_timeout_seconds: 10,
+                },
+            })
+            .await?
+        else {
+            panic!("review");
+        };
+        let RuntimeResponse::Operation(op) = lifecycle
+            .request(RuntimeRequest::Begin {
+                request: crate::workspace::RequestId::new(),
+                review: review.id,
+            })
+            .await?
+        else {
+            panic!("operation");
+        };
         let mut later = initial.clone();
         later.id = crate::workspace::RequestId::new();
         later.content = "deferred input".into();
@@ -123,8 +138,36 @@ fn runtime_shutdown_fence_retains_input_and_allows_only_admitted_work() -> Resul
                 .state,
             jcode_session_types::PrimaryInputState::Accepted
         );
-        gate.cancel_wait(&owner, op.id, op.revision)?;
-        crate::server::live_turn::ensure_primary_input_delivery(&host, &session, status);
+        let current = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let RuntimeResponse::Operation(current) = lifecycle
+                    .request(RuntimeRequest::Inspect { operation: op.id })
+                    .await?
+                    && current
+                        .remaining
+                        .iter()
+                        .all(|work| work.kind == RuntimeWorkKind::Preparation)
+                {
+                    return Ok::<_, anyhow::Error>(current);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let mut retiring = host
+            .input_drain(&session)
+            .context("Fixture drain already occupied")?;
+        retiring.defer_for_runtime();
+        lifecycle
+            .request(RuntimeRequest::CancelWait {
+                operation: current.id,
+                expected_revision: current.revision,
+            })
+            .await?;
+        drop(held);
+        // Cancel saw the old registration; only its proper retirement can kick
+        // this pending input. No direct delivery call repairs the test.
+        drop(retiring);
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 if crate::primary_input::PrimaryInputStore::current()

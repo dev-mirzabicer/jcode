@@ -1,6 +1,29 @@
 use super::*;
 use std::sync::{Arc, Barrier};
 
+#[test]
+fn stopped_confirmation_is_same_owner_and_does_not_rewrite_history() -> Result<()> {
+    let (_root, store) = fixture()?;
+    let owner = store.claim()?;
+    let review = owner.review(
+        options(StopStrategy::Interrupt, IndependentTasks::Stop),
+        Vec::new(),
+    )?;
+    let operation = owner.begin(RequestId::new(), review.id, Vec::new())?;
+    assert!(owner.confirm_stopped(operation.id).is_err());
+    let completed = owner.complete(operation.id, operation.revision)?;
+    let bytes = std::fs::read(store.directory.join("journal.json"))?;
+    owner.confirm_stopped(operation.id)?;
+    owner.confirm_stopped(operation.id)?;
+    assert_eq!(owner.inspect(operation.id)?, completed);
+    assert_eq!(std::fs::read(store.directory.join("journal.json"))?, bytes);
+    drop(owner);
+    store.authorize_start()?;
+    let replacement = store.claim()?;
+    assert!(replacement.confirm_stopped(operation.id).is_err());
+    Ok(())
+}
+
 fn fixture() -> Result<(tempfile::TempDir, RuntimeStopStore)> {
     let root = tempfile::tempdir()?;
     let store = RuntimeStopStore::new(root.path(), &root.path().join("runtime.sock"))?;

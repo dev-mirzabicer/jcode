@@ -1,6 +1,6 @@
 use super::*;
 use crate::execution::command_handoff::CommandRequest;
-use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+use crate::runtime_lifecycle::RuntimeStopStore;
 use crate::workspace::{RequestId, runtime::*};
 use jcode_tool_core::{CaptureMode, ExecutionPolicy, InvocationContext, ToolExecutionMode};
 use std::process::{Child, Command, Stdio};
@@ -54,10 +54,13 @@ async fn parent_fixture() -> Result<()> {
     };
     let root = crate::storage::jcode_dir()?;
     let work = PathBuf::from(std::env::var("JCODE_WP08_NATIVE_CWD")?);
-    let store = stop_store(&root)?;
-    let owner = store.claim()?;
-    let registration = RuntimeAdmission::register(&root, owner.identity())?;
-    let owned = OwnedExecutions::bind(&root, &owner).await?;
+    let lifecycle = crate::server::shutdown::RuntimeLifecycle::new(
+        &root,
+        &root.join("shutdown-fixture.sock"),
+        Arc::new(crate::primary::PrimaryHost::default()),
+        crate::background::global().clone(),
+    )
+    .await?;
     let ctx = context(&work, mode == "background");
     let command = "printf x >> effects; printf before; printf ready > ready; while [ ! -f release ]; do sleep 0.05; done; printf after".to_owned();
     let invocation = invocation(&ctx, "bash", serde_json::json!({"command":command}));
@@ -83,46 +86,53 @@ async fn parent_fixture() -> Result<()> {
         Box::new(move |ctx| Box::pin(command_worker::launch(request, ctx))),
     ));
     wait_path(&work.join("ready")).await?;
-    let review = registration.admission().review(
-        &owner,
-        ShutdownOptions {
-            strategy: StopStrategy::Interrupt,
-            independent: IndependentTasks::KeepSupported,
-            quiescence_timeout_seconds: 10,
-        },
-        owned.inventory().await?,
-    )?;
-    let operation = registration.admission().begin(
-        &owner,
-        RequestId::new(),
-        review.id,
-        owned.inventory().await?,
-    )?;
-    let preserved = owned
-        .preserve(&id, Duration::from_secs(10))
+    let RuntimeResponse::Review(review) = lifecycle
+        .request(RuntimeRequest::Review {
+            options: ShutdownOptions {
+                strategy: StopStrategy::Interrupt,
+                independent: IndependentTasks::KeepSupported,
+                quiescence_timeout_seconds: 10,
+            },
+        })
         .await?
-        .context("Command completed instead of surviving")?;
+    else {
+        panic!("review");
+    };
+    let RuntimeResponse::Operation(operation) = lifecycle
+        .request(RuntimeRequest::Begin {
+            request: RequestId::new(),
+            review: review.id,
+        })
+        .await?
+    else {
+        panic!("operation");
+    };
     let output = task.await??;
     ensure!(
         matches!(output.source, OutputSource::Acceptance(_)),
         "Original waiter did not receive its same-run acceptance"
     );
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !registration.admission().work()?.is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await??;
-    let operation = owner.observe(
-        operation.id,
-        operation.revision,
-        Vec::new(),
-        vec![preserved],
-        Vec::new(),
-    )?;
-    owner.complete(operation.id, operation.revision)?;
-    std::fs::write(work.join("parent-owner"), &owned.runtime.endpoint.id)?;
+    let mut stopped = lifecycle.stopped();
+    tokio::time::timeout(Duration::from_secs(12), stopped.wait_for(|id| id.is_some())).await??;
+    let RuntimeResponse::Operation(completed) = lifecycle
+        .request(RuntimeRequest::Inspect {
+            operation: operation.id,
+        })
+        .await?
+    else {
+        panic!("operation");
+    };
+    ensure!(
+        completed.phase == ShutdownPhase::Stopped
+            && completed.preserved.iter().any(|work| work.id == id),
+        "Coordinator lost the surviving command"
+    );
+    let store = ExecutionStore::open(&root)?;
+    let parent = store
+        .command_ownership(&id)?
+        .context("Native transfer missing")?
+        .parent;
+    std::fs::write(work.join("parent-owner"), parent)?;
     std::fs::write(work.join("parent-done"), b"verified-handoff")?;
     // Exiting only this isolated fixture proves all its in-process ownership
     // (including BackgroundManager controls) is gone, not just a closed socket.

@@ -13,6 +13,7 @@ use tokio::task::{AbortHandle, JoinSet};
 mod launch;
 mod location;
 mod new_context;
+mod shutdown;
 pub use new_context::{
     prepare_local_clear_session, prepare_split_session, prepare_transfer_session,
 };
@@ -40,6 +41,7 @@ pub struct PrimaryHost {
     input_events: StdMutex<Option<crate::server::LiveTurnSwarmContext>>,
     stdin: StdMutex<HashMap<String, Arc<crate::server::primary_stdin::PrimaryStdin>>>,
     presentations: StdMutex<HashMap<String, Arc<presentation::Presentation>>>,
+    checkpoint: StdMutex<Option<shutdown::Checkpoint>>,
 }
 
 #[derive(Clone)]
@@ -143,6 +145,7 @@ impl PrimaryHost {
             input_events: StdMutex::new(None),
             stdin: StdMutex::new(HashMap::new()),
             presentations: StdMutex::new(HashMap::new()),
+            checkpoint: StdMutex::new(None),
         }
     }
 
@@ -377,6 +380,7 @@ impl PrimaryHost {
                 host: Arc::downgrade(self),
                 session: session.into(),
                 finished: false,
+                runtime_deferred: false,
             })
     }
 
@@ -458,6 +462,7 @@ impl PrimaryHost {
             "Primary runtime is stopping"
         );
         ensure!(!turns.contains_key(session), "Already processing a message");
+        *self.checkpoint.lock().expect("runtime checkpoint") = None;
         let mut agent = agent
             .try_lock_owned()
             .map_err(|_| anyhow::anyhow!("Primary is busy"))?;
@@ -568,6 +573,15 @@ impl PrimaryHost {
     }
 
     pub(crate) async fn stop(&self, session: &str) -> Result<bool> {
+        self.stop_with_cause(session, jcode_tool_types::StopCause::HumanCancellation)
+            .await
+    }
+
+    async fn stop_with_cause(
+        &self,
+        session: &str,
+        cause: jcode_tool_types::StopCause,
+    ) -> Result<bool> {
         let control = self
             .turns
             .lock()
@@ -579,7 +593,7 @@ impl PrimaryHost {
         };
         let mut finished = control.finished.subscribe();
         control.stopping.store(true, Ordering::Release);
-        control.cancel.fire();
+        control.cancel.fire_with_cause(cause);
         if tokio::time::timeout(
             std::time::Duration::from_millis(500),
             finished.wait_for(|done| *done),
@@ -643,8 +657,12 @@ pub(crate) struct PrimaryInputDrain {
     host: std::sync::Weak<PrimaryHost>,
     session: String,
     finished: bool,
+    runtime_deferred: bool,
 }
 impl PrimaryInputDrain {
+    pub(crate) fn defer_for_runtime(&mut self) {
+        self.runtime_deferred = true;
+    }
     /// Admission persists before checking this same gate. Recheck durable
     /// emptiness while retiring the worker so a concurrent acceptance cannot
     /// mistake a departing worker for an active delivery owner.
@@ -673,6 +691,15 @@ impl Drop for PrimaryInputDrain {
                 .lock()
                 .expect("primary input drains")
                 .remove(&self.session);
+            // Cancel can race a drain that already observed the fence. If its
+            // old registration made Cancel's kick a no-op, restart only this
+            // explicitly deferred drain after retiring that registration.
+            if self.runtime_deferred
+                && host.accepts_input()
+                && let Ok(context) = host.input_delivery_context()
+            {
+                crate::server::ensure_primary_input_delivery(&host, &self.session, context);
+            }
         }
     }
 }

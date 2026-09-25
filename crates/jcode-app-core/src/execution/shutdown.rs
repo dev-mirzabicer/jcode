@@ -17,6 +17,9 @@ pub struct OwnedExecutions {
 mod tests;
 
 impl OwnedExecutions {
+    pub fn is_background(&self, id: &str) -> Result<bool> {
+        Ok(self.owned(id)?.0.background)
+    }
     pub async fn bind(root: &std::path::Path, lifecycle: &RuntimeStopOwner) -> Result<Self> {
         let root = root.to_path_buf();
         let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;

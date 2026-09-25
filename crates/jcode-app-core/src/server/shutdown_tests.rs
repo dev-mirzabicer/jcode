@@ -1,0 +1,256 @@
+use super::*;
+use crate::workspace::RequestId;
+
+#[test]
+fn replay_recovers_stopped_publication_without_reexecuting_the_operation() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let review = lifecycle.registration.admission().review(
+            &lifecycle.owner,
+            ShutdownOptions {
+                strategy: StopStrategy::Interrupt,
+                independent: IndependentTasks::Stop,
+                quiescence_timeout_seconds: 2,
+            },
+            Vec::new(),
+        )?;
+        let request = RequestId::new();
+        let operation = lifecycle.registration.admission().begin(
+            &lifecycle.owner,
+            request,
+            review.id,
+            Vec::new(),
+        )?;
+        let completed = lifecycle.owner.complete(operation.id, operation.revision)?;
+        // The durable boundary succeeded, but delivery of the exit signal did
+        // not. Retry enters through the actual coordinator request method.
+        ensure!(
+            lifecycle.stopped().borrow().is_none(),
+            "Fixture already signalled exit"
+        );
+        lifecycle
+            .request(RuntimeRequest::Begin {
+                request,
+                review: review.id,
+            })
+            .await?;
+        let mut stopped = lifecycle.stopped();
+        tokio::time::timeout(Duration::from_secs(3), stopped.wait_for(|id| id.is_some())).await??;
+        ensure!(
+            lifecycle.owner.inspect(operation.id)? == completed,
+            "Replay rewrote the original completed operation"
+        );
+        Ok(())
+    })
+}
+
+async fn fixture(root: &Path) -> Result<Arc<RuntimeLifecycle>> {
+    RuntimeLifecycle::new(
+        root,
+        &root.join("runtime.sock"),
+        Arc::new(PrimaryHost::default()),
+        BackgroundTaskManager::with_output_dir(root.join("background")),
+    )
+    .await
+}
+async fn begin(
+    lifecycle: &RuntimeLifecycle,
+    strategy: StopStrategy,
+    seconds: u32,
+) -> Result<ShutdownOperation> {
+    let RuntimeResponse::Review(review) = lifecycle
+        .request(RuntimeRequest::Review {
+            options: ShutdownOptions {
+                strategy,
+                independent: IndependentTasks::Stop,
+                quiescence_timeout_seconds: seconds,
+            },
+        })
+        .await?
+    else {
+        panic!("review");
+    };
+    let RuntimeResponse::Operation(operation) = lifecycle
+        .request(RuntimeRequest::Begin {
+            request: RequestId::new(),
+            review: review.id,
+        })
+        .await?
+    else {
+        panic!("operation");
+    };
+    Ok(operation)
+}
+async fn phase(
+    lifecycle: &RuntimeLifecycle,
+    id: OperationId,
+    phase: ShutdownPhase,
+) -> Result<ShutdownOperation> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let RuntimeResponse::Operation(operation) = lifecycle
+                .request(RuntimeRequest::Inspect { operation: id })
+                .await?
+            else {
+                panic!("operation");
+            };
+            if operation.phase == phase {
+                return Ok::<_, anyhow::Error>(operation);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("Runtime did not reach the expected phase")?
+}
+
+#[test]
+fn idle_shutdown_is_runtime_driven_and_not_just_begin_acknowledgement() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let operation = begin(&lifecycle, StopStrategy::FinishCurrent, 3).await?;
+        ensure!(
+            operation.phase == ShutdownPhase::WaitingForCurrent,
+            "Begin pretended to be terminal"
+        );
+        let complete = phase(&lifecycle, operation.id, ShutdownPhase::Stopped).await?;
+        ensure!(
+            *lifecycle.stopped().borrow() == Some(complete.id),
+            "No runtime-owned exit signal"
+        );
+        ensure!(
+            lifecycle
+                .request(RuntimeRequest::CancelWait {
+                    operation: complete.id,
+                    expected_revision: complete.revision
+                })
+                .await
+                .is_err(),
+            "Cancel crossed the stopping boundary"
+        );
+        ensure!(
+            lifecycle.owner.status()?.desired_stopped,
+            "Shutdown did not retain desired-stop"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn finish_has_no_deadline_cancel_restores_admission_and_next_operation_is_not_lost() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let gate = lifecycle.registration.admission();
+        let held = gate.independent(RuntimeWorkKind::Preparation, "first".into(), None)?;
+        let operation = begin(&lifecycle, StopStrategy::FinishCurrent, 1).await?;
+        ensure!(
+            lifecycle
+                .request(RuntimeRequest::Force {
+                    operation: operation.id,
+                    expected_revision: operation.revision
+                })
+                .await
+                .is_err(),
+            "Force implicitly changed Finish intent"
+        );
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let current = phase(&lifecycle, operation.id, ShutdownPhase::WaitingForCurrent).await?;
+        ensure!(
+            current.revision == operation.revision && !current.force_requested,
+            "Stationary work churned revisions or escalated"
+        );
+        ensure!(
+            gate.independent(RuntimeWorkKind::Preparation, "not-admitted".into(), None)
+                .is_err(),
+            "New independent work entered drain"
+        );
+        lifecycle
+            .request(RuntimeRequest::CancelWait {
+                operation: current.id,
+                expected_revision: current.revision,
+            })
+            .await?;
+        let second = gate.independent(RuntimeWorkKind::Preparation, "second".into(), None)?;
+        drop(held);
+        drop(second);
+        let operation = begin(&lifecycle, StopStrategy::FinishCurrent, 3).await?;
+        phase(&lifecycle, operation.id, ShutdownPhase::Stopped).await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn incomplete_owner_blocks_timeout_without_force_and_explicit_retry_verifies_it() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let held = lifecycle.registration.admission().independent(
+            RuntimeWorkKind::Preparation,
+            "retained-control".into(),
+            None,
+        )?;
+        let operation = begin(&lifecycle, StopStrategy::Interrupt, 1).await?;
+        let blocked = phase(&lifecycle, operation.id, ShutdownPhase::Blocked).await?;
+        ensure!(
+            !blocked.force_requested && !blocked.issues.is_empty() && blocked.remaining.len() == 1,
+            "Timeout lost actual outstanding work"
+        );
+        ensure!(
+            lifecycle.stopped().borrow().is_none(),
+            "Timeout signalled daemon exit"
+        );
+        drop(held);
+        lifecycle
+            .request(RuntimeRequest::Retry {
+                operation: blocked.id,
+                expected_revision: blocked.revision,
+            })
+            .await?;
+        phase(&lifecycle, operation.id, ShutdownPhase::Stopped).await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn legacy_background_owner_is_joined_and_its_partial_output_survives_interrupt() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let (ready, entered) = tokio::sync::oneshot::channel();
+        let task = lifecycle
+            .background
+            .spawn_with_notify(
+                "fixture",
+                None,
+                "fixture-session",
+                false,
+                false,
+                move |output| async move {
+                    tokio::fs::write(&output, b"retained original bytes").await?;
+                    let _ = ready.send(());
+                    std::future::pending::<Result<crate::background::TaskResult>>().await
+                },
+            )
+            .await;
+        entered.await?;
+        let operation = begin(&lifecycle, StopStrategy::Interrupt, 5).await?;
+        phase(&lifecycle, operation.id, ShutdownPhase::Stopped).await?;
+        ensure!(
+            lifecycle
+                .background
+                .runtime_owned_work(lifecycle.owner.identity())
+                .await
+                .is_empty(),
+            "Legacy owner was abandoned"
+        );
+        ensure!(
+            tokio::fs::read(lifecycle.background.output_path_for(&task.task_id)).await?
+                == b"retained original bytes",
+            "Legacy output was lost"
+        );
+        Ok(())
+    })
+}

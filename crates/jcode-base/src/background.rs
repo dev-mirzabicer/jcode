@@ -58,6 +58,7 @@ impl Drop for AbortAdoptedOnDrop {
 type ManagedControls =
     Arc<RwLock<HashMap<(PathBuf, String), Arc<dyn jcode_tool_core::OwnedExecutionControl>>>>;
 
+#[derive(Clone)]
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
     output_dir: PathBuf,
@@ -65,6 +66,64 @@ pub struct BackgroundTaskManager {
 }
 
 impl BackgroundTaskManager {
+    /// Only retained in-process legacy owners. Managed/native records are
+    /// inspected by their execution namespace owner, never counted twice here.
+    pub async fn runtime_owned_work(
+        &self,
+        runtime: &str,
+    ) -> Vec<jcode_workspace_types::runtime::RuntimeWork> {
+        use jcode_workspace_types::runtime::{RuntimeWork, RuntimeWorkKind};
+        let tasks = self
+            .tasks
+            .read()
+            .await
+            .values()
+            .map(|task| {
+                (
+                    task.task_id.clone(),
+                    task.status_path.clone(),
+                    task.handle.as_ref().is_some_and(JoinHandle::is_finished),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut work = Vec::new();
+        for (id, path, finished) in tasks {
+            let status = self.read_status_file(&path).await;
+            if finished
+                && status.as_ref().is_some_and(|status| {
+                    status.task_id == id && status.status != BackgroundTaskStatus::Running
+                })
+            {
+                continue;
+            }
+            work.push(RuntimeWork {
+                id: format!("background:{id}"),
+                owner: runtime.into(),
+                session: status.map(|status| status.session_id),
+                kind: RuntimeWorkKind::BackgroundTask,
+                supported_survivor: false,
+            });
+        }
+        work
+    }
+
+    pub async fn stop_runtime_owned(&self, id: &str) -> Result<()> {
+        // This never falls through to detached files or an unowned numeric PID.
+        if self.tasks.read().await.contains_key(id) {
+            self.stop_live_task(id, jcode_tool_types::StopCause::RuntimeShutdown)
+                .await?;
+        }
+        let status = self
+            .read_status_file(&self.status_path_for(id))
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Runtime task {id} lacks its terminal receipt"))?;
+        anyhow::ensure!(
+            status.task_id == id && status.status != BackgroundTaskStatus::Running,
+            "Runtime task {id} is not quiescent"
+        );
+        Ok(())
+    }
+
     /// Create a manager rooted at a specific output directory.
     ///
     /// Primarily for tests; production code should use [`global`].

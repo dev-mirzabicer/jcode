@@ -278,6 +278,32 @@ impl Transaction {
 }
 
 impl RuntimeStopOwner {
+    /// Confirm a stopped checkpoint whose publication may have outlived its
+    /// caller's acknowledgement. This never reexecutes shutdown work or changes
+    /// the operation revision. The live owner must independently check work.
+    pub fn confirm_stopped(&self, id: OperationId) -> Result<()> {
+        let tx = self.store.transaction()?;
+        let op = tx
+            .journal
+            .operations
+            .iter()
+            .find(|op| op.id == id)
+            .context("Unknown runtime operation")?;
+        ensure!(
+            tx.journal.current == Some(id)
+                && tx.journal.desired_stopped
+                && op.review.runtime == self.identity
+                && op.phase == ShutdownPhase::Stopped
+                && op.remaining.is_empty()
+                && op.issues.is_empty(),
+            "Runtime has no matching stopped checkpoint"
+        );
+        open_file(&self.store.directory.join("journal.json"), false, true)?.sync_all()?;
+        tx.lease.sync_all()?;
+        File::open(&self.store.directory)?.sync_all()?;
+        Ok(())
+    }
+
     /// Keep namespace provenance across intentional Stop/Start. Session IDs,
     /// process names and a shared output directory do not establish ownership.
     pub fn bind_execution_owner(

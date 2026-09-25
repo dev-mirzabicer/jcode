@@ -379,7 +379,7 @@ pub(super) fn cancel_client_inputs(
     crate::primary_input::PrimaryInputStore::current().cancel_client_inputs(session, inputs)
 }
 
-pub(super) fn ensure_primary_input_delivery(
+pub(crate) fn ensure_primary_input_delivery(
     sessions: &SessionAgents,
     session: &str,
     swarm: LiveTurnSwarmContext,
@@ -394,7 +394,11 @@ pub(super) fn ensure_primary_input_delivery(
             let Some(host) = weak.upgrade() else {
                 return;
             };
-            if !host.accepts_input() || host.wait_idle(&session).await.is_err() {
+            if !host.accepts_input() {
+                drain.defer_for_runtime();
+                return;
+            }
+            if host.wait_idle(&session).await.is_err() {
                 return;
             }
             let Some(agent) = host.read().await.get(&session).cloned() else {

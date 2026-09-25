@@ -40,7 +40,7 @@ mod headless;
 mod jade_relay;
 mod lifecycle;
 mod live_turn;
-pub(crate) use live_turn::LiveTurnSwarmContext;
+pub(crate) use live_turn::{LiveTurnSwarmContext, ensure_primary_input_delivery};
 mod notification;
 mod primary_output;
 pub(crate) mod primary_stdin;
@@ -50,6 +50,8 @@ mod reload_recovery;
 mod reload_state;
 mod reload_trace;
 mod runtime;
+#[cfg(unix)]
+pub mod shutdown;
 mod socket;
 pub(crate) mod startup_context;
 mod swarm;
