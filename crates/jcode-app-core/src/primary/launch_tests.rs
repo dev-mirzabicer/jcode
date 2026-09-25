@@ -91,6 +91,18 @@ fn primary_location_idle_notice_prefix_and_missing_cwd_repair() -> Result<()> {
         let launch = launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput { placement:PrimaryPlacement::Existing { placement:Placement::Standalone(roots[0].0) }, cwd:Some(PrimaryCwd::Existing { path:roots[0].1.clone() }), agent:None,model:None,selfdev:false },StartupContextCaller::HarnessApi).await?;
         let before = Session::load(&launch.session)?;
         let request = LocationChangeRequest { request:RequestId::new(), session:launch.session.clone(), expected_session_revision:1, expected_catalog_revision:service.status()?.revision, placement:Placement::Standalone(roots[1].0), cwd:roots[1].1.clone() };
+        use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+        use crate::workspace::runtime::*;
+        let owner = RuntimeStopStore::new(&crate::storage::durable_state_dir(), &temp.path().join("location-runtime.sock"))?.claim()?;
+        let registration = RuntimeAdmission::register(&crate::storage::jcode_dir()?, owner.identity())?;
+        let pending = service.request_location_change(request.clone())?;
+        let review = registration.admission().review(&owner, ShutdownOptions { strategy: StopStrategy::FinishCurrent, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 5 }, Vec::new())?;
+        let stop = registration.admission().begin(&owner, RequestId::new(), review.id, Vec::new())?;
+        assert!(matches!(host.request_location(PrimaryLocationCommand::Change { request: request.clone() }).await, PrimaryLocationResponse::Rejected { .. }));
+        assert!(matches!(host.request_location(PrimaryLocationCommand::Inspect { operation: pending.operation }).await, PrimaryLocationResponse::State { record } if record.state == LocationChangeState::Pending));
+        assert!(host.read().await[&launch.session].lock().await.apply_primary_location_changes().await.is_err());
+        assert_eq!(serde_json::to_vec(&Session::load(&launch.session)?.messages)?, serde_json::to_vec(&before.messages)?);
+        registration.admission().cancel_wait(&owner, stop.id, stop.revision)?;
         let result = host.request_location(PrimaryLocationCommand::Change { request:request.clone() }).await;
         let PrimaryLocationResponse::State { record } = result else { anyhow::bail!("move failed: {result:?}"); };
         assert_eq!(record.state,LocationChangeState::Complete);

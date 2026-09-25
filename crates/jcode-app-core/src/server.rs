@@ -93,7 +93,7 @@ use self::swarm_persistence::{
     persist_swarm_state as persist_swarm_state_snapshot, remove_swarm_state_if_version,
     swarm_operation_lock,
 };
-use self::util::get_shared_mcp_pool;
+pub(crate) use self::util::get_shared_mcp_pool;
 use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::bus::{Bus, BusEvent};
@@ -815,6 +815,11 @@ impl Server {
         server
             .sessions
             .configure_startup_context(server.startup_context.clone());
+        server.sessions.configure_input_restore(
+            server.provider.clone(),
+            server.mcp_pool.clone(),
+            server.instruction_repositories.clone(),
+        );
         server
             .sessions
             .configure_input_delivery(LiveTurnSwarmContext::new(

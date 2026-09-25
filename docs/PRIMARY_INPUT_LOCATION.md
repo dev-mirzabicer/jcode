@@ -80,6 +80,17 @@ messages and completed tools are never replayed to repair a lost reply.
 Unavailable physical roots or damaged state preserve the envelope for repair.
 This is not the later configurable crash-inference recovery policy.
 
+Typed intake validates publication and holds exclusive Session ownership before
+persisting, but does not require an Agent or provider to be resident. During a
+registered shutdown fence, a cold recipient's input can remain `accepted` without
+constructing a provider or starting inference. Cancel restarts delivery for this
+host's claimed recipients. The retained delivery worker restores exact saved
+resources only after admission allows it. A blocked resource restore keeps the
+envelope accepted and adds an inspectable receipt issue; a successful later
+commit clears that diagnostic. An exact pending retry after repair uses the same
+UUID. Acceptance, restoration, dispatch and completion remain separate facts.
+The configurable runtime command surface remains staged with daemon integration.
+
 ## Public clients
 
 Harness API v1.8 advertises `primary_control_v1`. Both SDKs negotiate the actual

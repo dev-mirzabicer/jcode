@@ -316,6 +316,23 @@ impl PrimaryInputStore {
         lease.save()
     }
 
+    /// Preparation may be blocked before a turn starts. The accepted envelope
+    /// remains eligible for an explicit retry after repair, not a failed effect.
+    pub fn defer(&self, session: &str, id: RequestId, issue: Option<String>) -> Result<()> {
+        let mut lease = self.lock(session)?;
+        let record = lease
+            .inbox
+            .records
+            .iter_mut()
+            .find(|record| record.input.id == id)
+            .context("Accepted input is missing")?;
+        if record.receipt.state == PrimaryInputState::Accepted && record.receipt.issue != issue {
+            record.receipt.issue = issue;
+            lease.save()?;
+        }
+        Ok(())
+    }
+
     pub fn cancel_pending_interrupts(&self, session: &str) -> Result<()> {
         let mut lease = self.lock(session)?;
         lease.reconcile(&crate::session::Session::load_startup_stub(session)?)?;
@@ -454,9 +471,11 @@ impl InputLease {
                 }
                 if record.receipt.state != PrimaryInputState::Committed
                     || record.receipt.messages != committed.messages
+                    || record.receipt.issue.is_some()
                 {
                     record.receipt.state = PrimaryInputState::Committed;
                     record.receipt.messages = committed.messages.clone();
+                    record.receipt.issue = None;
                     changed = true;
                 }
             }
@@ -547,6 +566,17 @@ mod tests {
         conflict.content.push('!');
         assert!(store.accept(conflict).is_err());
         assert_eq!(store.pending(&session.id)?, vec![input.clone()]);
+        store.defer(
+            &session.id,
+            input.id,
+            Some("synthetic resource unavailable".into()),
+        )?;
+        assert_eq!(
+            store.inspect(&session.id, input.id)?.state,
+            PrimaryInputState::Accepted
+        );
+        assert!(store.inspect(&session.id, input.id)?.issue.is_some());
+        assert_eq!(store.original(&session.id, input.id)?, Some(input.clone()));
         // Crash before Session checkpoint leaves the complete original pending.
         let start = session.messages.len();
         session.add_message(
@@ -566,6 +596,7 @@ mod tests {
         // repaired from its structural receipt, not a string search.
         let committed = store.inspect(&session.id, input.id)?;
         assert_eq!(committed.state, PrimaryInputState::Committed);
+        assert!(committed.issue.is_none());
         assert_eq!(committed.messages, vec![session.messages[start].id.clone()]);
         assert!(store.pending(&session.id)?.is_empty());
         assert_eq!(store.accept(input.clone())?, committed);

@@ -1220,6 +1220,7 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
         request: serde_json::Value,
     ) -> Vec<ServerEvent> {
         let id = request["id"].as_u64().unwrap();
+        let history_request = request["type"] == "get_history";
         write
             .write_all((request.to_string() + "\n").as_bytes())
             .await
@@ -1236,7 +1237,9 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
             let terminal = matches!(&event,
                 ServerEvent::Done { id: event_id }
                 | ServerEvent::Error { id: event_id, .. }
-                | ServerEvent::StartupContextFailed { id: event_id, .. } if *event_id == id);
+                | ServerEvent::StartupContextFailed { id: event_id, .. } if *event_id == id)
+                || (history_request
+                    && matches!(&event, ServerEvent::History { id: event_id, .. } if *event_id == id));
             events.push(event);
             if terminal {
                 return events;
@@ -1623,6 +1626,37 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
     ));
     assert_eq!(sessions.read().await.len(), count);
     assert_eq!(artifacts(), before_stop);
+    let rejected = exchange(
+        &mut read,
+        &mut write,
+        serde_json::json!({"type":"rename_session", "id":7, "title":"not admitted"}),
+    )
+    .await;
+    assert!(matches!(
+        rejected.last(),
+        Some(ServerEvent::Error { id: 7, .. })
+    ));
+    let rejected = exchange(
+        &mut read,
+        &mut write,
+        serde_json::json!({"type":"set_agent", "id":8, "agent":"global:jcode", "replace":true}),
+    )
+    .await;
+    assert!(matches!(
+        rejected.last(),
+        Some(ServerEvent::Error { id: 8, .. })
+    ));
+    let history = exchange(
+        &mut read,
+        &mut write,
+        serde_json::json!({"type":"get_history", "id":9}),
+    )
+    .await;
+    assert!(
+        history
+            .iter()
+            .any(|event| matches!(event, ServerEvent::History { id: 9, .. }))
+    );
     registration
         .admission()
         .cancel_wait(&owner, operation.id, operation.revision)

@@ -2,6 +2,255 @@ use super::*;
 
 #[test]
 #[cfg(unix)]
+fn cold_primary_input_is_durable_while_fenced_and_restored_once_after_cancel() -> Result<()> {
+    use crate::runtime_lifecycle::admission::RuntimeAdmission;
+    use crate::workspace::runtime::*;
+    use jcode_session_types::{PrimaryInputDelivery, PrimaryInputEnvelope, PrimaryInputState};
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let root = crate::storage::jcode_dir()?;
+        let recorder = Arc::new(DurableInputProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let (mut agent, _) = Agent::new_with_startup_context(
+            provider.clone(),
+            registry,
+            None,
+            crate::agent::StartupContextActivation::primary(
+                crate::agent::StartupContextCaller::HarnessApi,
+            ),
+        )?;
+        agent.startup_context_session_mut().save()?;
+        let session = agent.session_id().to_owned();
+        let source = serde_json::to_vec(agent.messages())?;
+        let system = agent.startup_context_session().system_prompt.clone();
+        drop(agent);
+        let host = Arc::new(crate::primary::PrimaryHost::default());
+        let pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+        let repositories = Arc::new(crate::instruction::InstructionRepositoryService::new());
+        host.configure_input_restore(
+            provider.clone(),
+            Arc::new(tokio::sync::OnceCell::new_with(Some(pool.clone()))),
+            repositories.clone(),
+        );
+        let lifecycle = crate::server::shutdown::RuntimeLifecycle::new(
+            &root,
+            &root.join("cold-input.sock"),
+            host.clone(),
+            crate::background::global().clone(),
+        )
+        .await?;
+        let gate = RuntimeAdmission::for_root(&root)?.context("runtime gate")?;
+        let held = gate.independent(RuntimeWorkKind::Preparation, "held-fixture".into(), None)?;
+        let RuntimeResponse::Review(review) = lifecycle
+            .request(RuntimeRequest::Review {
+                options: ShutdownOptions {
+                    strategy: StopStrategy::FinishCurrent,
+                    independent: IndependentTasks::Stop,
+                    quiescence_timeout_seconds: 5,
+                },
+            })
+            .await?
+        else {
+            panic!()
+        };
+        let RuntimeResponse::Operation(operation) = lifecycle
+            .request(RuntimeRequest::Begin {
+                request: crate::workspace::RequestId::new(),
+                review: review.id,
+            })
+            .await?
+        else {
+            panic!()
+        };
+        let plain = PrimaryInputEnvelope {
+            id: crate::workspace::RequestId::new(),
+            session: session.clone(),
+            delivery: PrimaryInputDelivery::NextTurn,
+            content: "cold plain input".into(),
+            images: vec![],
+            display_role: None,
+            origin: Some(jcode_session_types::StoredMessageOrigin::Human),
+            system_reminder: None,
+            unattended_context: None,
+            urgent: false,
+            activate_skill: None,
+            observe_startup_context: None,
+            client_request_digest: None,
+        };
+        let status = status_fixture(&session);
+        let (server_stream, client_stream) = crate::transport::stream_pair()?;
+        let (global_tx, _) = broadcast::channel(8);
+        let (debug_tx, _) = broadcast::channel(8);
+        let (swarm_tx, _) = broadcast::channel(8);
+        let server = tokio::spawn(handle_client(
+            server_stream,
+            host.clone(),
+            global_tx,
+            provider.clone(),
+            Arc::new(crate::context::ContextTransactionService::new()),
+            crate::server::startup_context::test_coordinator(),
+            Arc::new(RwLock::new(false)),
+            Arc::new(RwLock::new(String::new())),
+            Arc::new(RwLock::new(1)),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            FileTouchService::new(),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(ClientDebugState::default())),
+            debug_tx,
+            Arc::new(RwLock::new(std::collections::VecDeque::new())),
+            Arc::new(AtomicU64::new(0)),
+            swarm_tx,
+            "cold-input".into(),
+            String::new(),
+            pool.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            AwaitMembersRuntime::default(),
+            SwarmMutationRuntime::default(),
+        ));
+        let (read, mut write) = client_stream.into_split();
+        let mut read = BufReader::new(read);
+        async fn accept_socket(
+            read: &mut BufReader<crate::transport::ReadHalf>,
+            write: &mut crate::transport::WriteHalf,
+            request: Request,
+        ) -> Result<jcode_session_types::PrimaryInputReceipt> {
+            let id = request.id();
+            write
+                .write_all((serde_json::to_string(&request)? + "\n").as_bytes())
+                .await?;
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(10), read.read_line(&mut line)).await??;
+            match serde_json::from_str::<ServerEvent>(&line)? {
+                ServerEvent::PrimaryInputReceipt { id: reply, receipt } if reply == id => {
+                    Ok(receipt)
+                }
+                other => anyhow::bail!("Unexpected pre-Subscribe reply: {other:?}"),
+            }
+        }
+        let receipt = accept_socket(
+            &mut read,
+            &mut write,
+            Request::PrimaryInput {
+                id: 1,
+                input: Box::new(plain.clone()),
+            },
+        )
+        .await?;
+        assert_eq!(receipt.state, PrimaryInputState::Accepted);
+        let mut client_input = plain.clone();
+        client_input.id = crate::workspace::RequestId::new();
+        client_input.content = "cold client input".into();
+        let client = crate::protocol::PrimaryClientInput {
+            input: client_input.clone(),
+            queued_messages: None,
+            retry_of: None,
+            is_system: false,
+            retry_attempts: 0,
+            auto_retry: false,
+        };
+        let receipt = accept_socket(
+            &mut read,
+            &mut write,
+            Request::PrimaryClientInput {
+                id: 2,
+                request: Box::new(client.clone()),
+            },
+        )
+        .await?;
+        assert_eq!(receipt.state, PrimaryInputState::Accepted);
+        drop(write);
+        server.await??;
+        assert!(host.read().await.is_empty());
+        assert!(
+            host.restore(&session, &provider, &pool, &repositories)
+                .await
+                .is_err()
+        );
+        assert!(recorder.snapshots.lock().unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_vec(&Session::load(&session)?.messages)?,
+            source
+        );
+        assert_eq!(
+            crate::primary_input::PrimaryInputStore::current().original(&session, plain.id)?,
+            Some(plain.clone())
+        );
+        let RuntimeResponse::Operation(current) = lifecycle
+            .request(RuntimeRequest::Inspect {
+                operation: operation.id,
+            })
+            .await?
+        else {
+            panic!()
+        };
+        lifecycle
+            .request(RuntimeRequest::CancelWait {
+                operation: current.id,
+                expected_revision: current.revision,
+            })
+            .await?;
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let store = crate::primary_input::PrimaryInputStore::current();
+                if [plain.id, client_input.id].iter().all(|id| {
+                    store
+                        .inspect(&session, *id)
+                        .is_ok_and(|r| r.state == PrimaryInputState::Committed)
+                }) && host.processing(&session).is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), 2);
+        let mut after_system = Session::load(&session)?.system_prompt;
+        assert!(
+            after_system
+                .as_ref()
+                .and_then(|value| value.first_provider_dispatch_at)
+                .is_some()
+        );
+        assert!(
+            system
+                .as_ref()
+                .and_then(|value| value.first_provider_dispatch_at)
+                .is_none()
+        );
+        after_system.as_mut().unwrap().first_provider_dispatch_at = None;
+        assert_eq!(after_system, system);
+        assert_eq!(
+            crate::server::live_turn::submit_primary_input(&host, plain, status.clone())
+                .await?
+                .state,
+            PrimaryInputState::Committed
+        );
+        assert_eq!(
+            crate::server::live_turn::submit_client_input(&host, client, status)
+                .await?
+                .state,
+            PrimaryInputState::Committed
+        );
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), 2);
+        host.shutdown().await?;
+        Ok(())
+    })
+}
+
+#[test]
+#[cfg(unix)]
 fn runtime_shutdown_fence_retains_input_and_allows_only_admitted_work() -> Result<()> {
     use crate::runtime_lifecycle::admission::RuntimeAdmission;
     use crate::workspace::runtime::*;

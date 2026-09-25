@@ -32,7 +32,8 @@ impl PrimaryHost {
     }
 
     pub(crate) async fn resume_deferred_inputs(self: &Arc<Self>) -> Result<()> {
-        let sessions = self.read().await.keys().cloned().collect::<Vec<_>>();
+        let mut sessions = self.read().await.keys().cloned().collect::<HashSet<_>>();
+        sessions.extend(self.owners.lock().expect("primary owners").keys().cloned());
         if sessions.is_empty() {
             return Ok(());
         }

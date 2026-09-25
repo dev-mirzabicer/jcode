@@ -258,6 +258,9 @@ impl EnvGuard {
         if !all_keys.contains(&"JCODE_HOME") {
             all_keys.push("JCODE_HOME");
         }
+        if !all_keys.contains(&"JCODE_RUNTIME_DIR") {
+            all_keys.push("JCODE_RUNTIME_DIR");
+        }
         let saved = all_keys
             .iter()
             .map(|key| (*key, std::env::var(key).ok()))
@@ -267,6 +270,10 @@ impl EnvGuard {
         }
         let temp_home = tempfile::tempdir().expect("create temp JCODE_HOME");
         crate::env::set_var("JCODE_HOME", temp_home.path());
+        // Instruction initialization receipts live under durable_state_dir,
+        // whose explicit runtime override must follow this scenario's home.
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp_home.path().join("runtime"));
+        crate::config::invalidate_config_cache();
         Self {
             saved,
             _temp_home: temp_home,
@@ -284,6 +291,7 @@ impl Drop for EnvGuard {
                 crate::env::remove_var(key);
             }
         }
+        crate::config::invalidate_config_cache();
     }
 }
 

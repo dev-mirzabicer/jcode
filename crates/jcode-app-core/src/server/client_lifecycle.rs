@@ -542,6 +542,11 @@ pub(super) async fn handle_client_with_instruction_repositories(
     await_members_runtime: AwaitMembersRuntime,
     swarm_mutation_runtime: SwarmMutationRuntime,
 ) -> Result<()> {
+    sessions.configure_input_restore(
+        provider_template.clone(),
+        Arc::new(tokio::sync::OnceCell::new_with(Some(mcp_pool.clone()))),
+        instruction_repositories.clone(),
+    );
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
@@ -613,14 +618,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
                 if let Request::PrimaryClientInput { id, request } = &request {
                     let result = async {
-                        sessions
-                            .restore(
-                                &request.input.session,
-                                &provider_template,
-                                &mcp_pool,
-                                &instruction_repositories,
-                            )
-                            .await?;
                         super::live_turn::submit_client_input(
                             &sessions,
                             *request.clone(),
@@ -649,14 +646,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 }
                 if let Request::PrimaryInput { id, input } = &request {
                     let result = async {
-                        sessions
-                            .restore(
-                                &input.session,
-                                &provider_template,
-                                &mcp_pool,
-                                &instruction_repositories,
-                            )
-                            .await?;
                         super::live_turn::submit_primary_input(
                             &sessions,
                             *input.clone(),
@@ -1704,6 +1693,20 @@ pub(super) async fn handle_client_with_instruction_repositories(
             ),
             request => (request, None),
         };
+        let _inline_preparation = if matches!(&request,
+            Request::ActivateSkill { .. } | Request::SetAgent { .. } |
+            Request::Rewind { .. } | Request::RewindUndo { .. } |
+            Request::RenameSession { .. } | Request::SetFeature { .. } |
+            Request::Message { no_reply: true, .. }
+        ) {
+            match crate::runtime_lifecycle::admission::preparation("client-mutation", Some(client_session_id.clone())) {
+                Ok(permit) => permit,
+                Err(error) => {
+                    let _ = client_event_tx.send(ServerEvent::Error { id: request.id(), message: format!("Runtime did not admit this mutation: {error:#}"), retry_after_secs: None });
+                    continue;
+                }
+            }
+        } else { None };
         match request {
             Request::ScopedContext { .. } => unreachable!("Scoped context was normalized before dispatch"),
             Request::PrimaryControlProbe { .. } | Request::PrimaryInputRead { .. } => {
@@ -3699,7 +3702,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 let session = request.input.session.clone();
                 let input = request.input.id;
                 let result = async {
-                    Box::pin(sessions.restore(&request.input.session,&provider_template,&mcp_pool,&instruction_repositories)).await?;
                     super::live_turn::submit_client_input(&sessions,*request,super::live_turn::LiveTurnSwarmContext::new(&swarm_members,&swarms_by_id,&event_history,&event_counter,&swarm_event_tx)).await
                 }.await;
                 let event = match result { Ok(receipt)=>ServerEvent::PrimaryInputReceipt{id,receipt}, Err(error)=>ServerEvent::PrimaryClientInputRejected{id,session,input,message:format!("{error:#}")} };
@@ -3707,7 +3709,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
             Request::PrimaryInput { id, input } => {
                 let result = async {
-                    Box::pin(sessions.restore(&input.session, &provider_template, &mcp_pool, &instruction_repositories)).await?;
                     super::live_turn::submit_primary_input(&sessions, *input, super::live_turn::LiveTurnSwarmContext::new(&swarm_members, &swarms_by_id, &event_history, &event_counter, &swarm_event_tx)).await
                 }.await;
                 let event = match result {

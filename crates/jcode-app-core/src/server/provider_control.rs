@@ -10,6 +10,83 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::Mutex;
+
+async fn lock_provider_control<'a>(
+    agent: &'a Arc<Mutex<Agent>>,
+    id: u64,
+    events: &crate::client_delivery::ClientEventSender,
+) -> Option<tokio::sync::MutexGuard<'a, Agent>> {
+    match crate::runtime_lifecycle::admission::prepare(
+        crate::runtime_lifecycle::admission::current_scope(),
+        async { Ok(agent.lock().await) },
+    )
+    .await
+    {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            let _ = events.send(ServerEvent::Error {
+                id,
+                message: format!("Provider control interrupted before mutation: {error:#}"),
+                retry_after_secs: None,
+            });
+            None
+        }
+    }
+}
+
+async fn await_catalog_work(providers: &[Arc<dyn Provider>]) {
+    if crate::runtime_lifecycle::admission::current_scope().is_some() {
+        // The UI's settling deadline is not proof that provider-owned work ended.
+        while providers
+            .iter()
+            .any(|provider| provider.auth_model_refresh_pending())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+}
+
+async fn with_runtime_admission(
+    id: u64,
+    label: &str,
+    agent: &Arc<Mutex<Agent>>,
+    events: &crate::client_delivery::ClientEventSender,
+    work: impl std::future::Future<Output = ()>,
+) {
+    let session = agent
+        .try_lock()
+        .ok()
+        .map(|agent| agent.session_id().to_owned());
+    match crate::runtime_lifecycle::admission::preparation(label, session) {
+        Ok(permit) => crate::runtime_lifecycle::admission::scope(permit, work).await,
+        Err(error) => {
+            let _ = events.send(ServerEvent::Error {
+                id,
+                message: format!("Provider control was not admitted: {error:#}"),
+                retry_after_secs: None,
+            });
+        }
+    }
+}
+
+struct CatalogWork(Vec<Arc<dyn Provider>>);
+
+impl Drop for CatalogWork {
+    fn drop(&mut self) {
+        if crate::runtime_lifecycle::admission::current_scope().is_some()
+            && self
+                .0
+                .iter()
+                .any(|provider| provider.auth_model_refresh_pending())
+        {
+            let providers = std::mem::take(&mut self.0);
+            crate::runtime_lifecycle::admission::spawn(async move {
+                await_catalog_work(&providers).await;
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 use tokio::sync::mpsc;
 
@@ -170,8 +247,11 @@ fn spawn_deferred_agent_mutation<F>(
     F: FnOnce(&mut Agent, &crate::client_delivery::ClientEventSender) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
-    tokio::spawn(async move {
-        let mut agent_guard = agent.lock().await;
+    crate::runtime_lifecycle::admission::spawn(async move {
+        let Some(mut agent_guard) = lock_provider_control(&agent, id, &client_event_tx).await
+        else {
+            return;
+        };
         log_provider_control_lock_acquired(operation, id, queued_at);
         apply(&mut agent_guard, &client_event_tx);
         log_provider_control_completed(operation, id, queued_at);
@@ -188,9 +268,12 @@ fn spawn_deferred_provider_operation<F>(
     F: FnOnce(Arc<dyn Provider>, &crate::client_delivery::ClientEventSender) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
-    tokio::spawn(async move {
+    crate::runtime_lifecycle::admission::spawn(async move {
         let provider = {
-            let agent_guard = agent.lock().await;
+            let Some(agent_guard) = lock_provider_control(&agent, id, &client_event_tx).await
+            else {
+                return;
+            };
             log_provider_control_lock_acquired(operation, id, queued_at);
             agent_guard.provider_handle()
         };
@@ -257,13 +340,15 @@ async fn auth_refresh_targets(
 
 fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
     for agent in agents {
-        tokio::spawn(async move {
+        crate::runtime_lifecycle::admission::spawn(async move {
             let provider = {
                 let agent_guard = agent.lock().await;
                 agent_guard.provider_handle()
             };
+            let _catalog_work = CatalogWork(vec![provider.clone()]);
             provider.on_auth_changed_preserve_current_provider();
             crate::bus::Bus::global().publish_models_updated();
+            await_catalog_work(&[provider]).await;
         });
     }
 }
@@ -476,32 +561,35 @@ pub(super) async fn handle_cycle_model(
     context_transactions: &Arc<crate::context::ContextTransactionService>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_cycle_model(
-            id,
-            direction,
-            &mut agent_guard,
-            context_transactions.as_ref(),
-            client_event_tx,
-        );
-    } else {
-        let context_transactions = Arc::clone(context_transactions);
-        spawn_deferred_agent_mutation(
-            "cycle_model",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            move |agent_guard, client_event_tx| {
-                apply_cycle_model(
-                    id,
-                    direction,
-                    agent_guard,
-                    context_transactions.as_ref(),
-                    client_event_tx,
-                );
-            },
-        );
-    }
+    with_runtime_admission(id, "handle_cycle_model", agent, client_event_tx, async {
+        if let Ok(mut agent_guard) = agent.try_lock() {
+            apply_cycle_model(
+                id,
+                direction,
+                &mut agent_guard,
+                context_transactions.as_ref(),
+                client_event_tx,
+            );
+        } else {
+            let context_transactions = Arc::clone(context_transactions);
+            spawn_deferred_agent_mutation(
+                "cycle_model",
+                id,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+                move |agent_guard, client_event_tx| {
+                    apply_cycle_model(
+                        id,
+                        direction,
+                        agent_guard,
+                        context_transactions.as_ref(),
+                        client_event_tx,
+                    );
+                },
+            );
+        }
+    })
+    .await;
 }
 
 fn premium_mode_label(mode: crate::provider::copilot::PremiumMode) -> &'static str {
@@ -535,26 +623,41 @@ pub(super) async fn handle_set_premium_mode(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    use crate::provider::copilot::PremiumMode;
+    with_runtime_admission(
+        id,
+        "handle_set_premium_mode",
+        agent,
+        client_event_tx,
+        async {
+            use crate::provider::copilot::PremiumMode;
 
-    let premium_mode = match mode {
-        2 => PremiumMode::Zero,
-        1 => PremiumMode::OnePerSession,
-        _ => PremiumMode::Normal,
-    };
-    if let Ok(agent_guard) = agent.try_lock() {
-        apply_set_premium_mode(id, mode, premium_mode, &agent_guard, client_event_tx);
-    } else {
-        spawn_deferred_agent_mutation(
-            "set_premium_mode",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            move |agent_guard, client_event_tx| {
-                apply_set_premium_mode(id, mode, premium_mode, agent_guard, client_event_tx);
-            },
-        );
-    }
+            let premium_mode = match mode {
+                2 => PremiumMode::Zero,
+                1 => PremiumMode::OnePerSession,
+                _ => PremiumMode::Normal,
+            };
+            if let Ok(agent_guard) = agent.try_lock() {
+                apply_set_premium_mode(id, mode, premium_mode, &agent_guard, client_event_tx);
+            } else {
+                spawn_deferred_agent_mutation(
+                    "set_premium_mode",
+                    id,
+                    Arc::clone(agent),
+                    client_event_tx.clone(),
+                    move |agent_guard, client_event_tx| {
+                        apply_set_premium_mode(
+                            id,
+                            mode,
+                            premium_mode,
+                            agent_guard,
+                            client_event_tx,
+                        );
+                    },
+                );
+            }
+        },
+    )
+    .await;
 }
 
 fn apply_set_model(
@@ -655,32 +758,35 @@ pub(super) async fn handle_set_model(
     context_transactions: &Arc<crate::context::ContextTransactionService>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_model(
-            id,
-            model,
-            &mut agent_guard,
-            context_transactions.as_ref(),
-            client_event_tx,
-        );
-    } else {
-        let context_transactions = Arc::clone(context_transactions);
-        spawn_deferred_agent_mutation(
-            "set_model",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            move |agent_guard, client_event_tx| {
-                apply_set_model(
-                    id,
-                    model,
-                    agent_guard,
-                    context_transactions.as_ref(),
-                    client_event_tx,
-                );
-            },
-        );
-    }
+    with_runtime_admission(id, "handle_set_model", agent, client_event_tx, async {
+        if let Ok(mut agent_guard) = agent.try_lock() {
+            apply_set_model(
+                id,
+                model,
+                &mut agent_guard,
+                context_transactions.as_ref(),
+                client_event_tx,
+            );
+        } else {
+            let context_transactions = Arc::clone(context_transactions);
+            spawn_deferred_agent_mutation(
+                "set_model",
+                id,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+                move |agent_guard, client_event_tx| {
+                    apply_set_model(
+                        id,
+                        model,
+                        agent_guard,
+                        context_transactions.as_ref(),
+                        client_event_tx,
+                    );
+                },
+            );
+        }
+    })
+    .await;
 }
 
 pub(super) async fn handle_set_route(
@@ -690,32 +796,35 @@ pub(super) async fn handle_set_route(
     context_transactions: &Arc<crate::context::ContextTransactionService>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_route(
-            id,
-            selection,
-            &mut agent_guard,
-            context_transactions.as_ref(),
-            client_event_tx,
-        );
-    } else {
-        let context_transactions = Arc::clone(context_transactions);
-        spawn_deferred_agent_mutation(
-            "set_route",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            move |agent_guard, client_event_tx| {
-                apply_set_route(
-                    id,
-                    selection,
-                    agent_guard,
-                    context_transactions.as_ref(),
-                    client_event_tx,
-                );
-            },
-        );
-    }
+    with_runtime_admission(id, "handle_set_route", agent, client_event_tx, async {
+        if let Ok(mut agent_guard) = agent.try_lock() {
+            apply_set_route(
+                id,
+                selection,
+                &mut agent_guard,
+                context_transactions.as_ref(),
+                client_event_tx,
+            );
+        } else {
+            let context_transactions = Arc::clone(context_transactions);
+            spawn_deferred_agent_mutation(
+                "set_route",
+                id,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+                move |agent_guard, client_event_tx| {
+                    apply_set_route(
+                        id,
+                        selection,
+                        agent_guard,
+                        context_transactions.as_ref(),
+                        client_event_tx,
+                    );
+                },
+            );
+        }
+    })
+    .await;
 }
 
 pub(super) async fn handle_refresh_models(
@@ -724,78 +833,84 @@ pub(super) async fn handle_refresh_models(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    let provider_clone = provider.clone();
-    let agent_clone = agent.clone();
-    let client_event_tx_clone = client_event_tx.clone();
-    tokio::spawn(async move {
-        send_catalog_activity(
-            &client_event_tx_clone,
-            &crate::message::format_model_refresh_progress_markdown(
-                "Starting provider model catalog refresh",
-                Some(5),
-            ),
-        );
+    with_runtime_admission(id, "handle_refresh_models", agent, client_event_tx, async {
+        let provider_clone = provider.clone();
+        let agent_clone = agent.clone();
+        let client_event_tx_clone = client_event_tx.clone();
+        crate::runtime_lifecycle::admission::spawn(async move {
+            send_catalog_activity(
+                &client_event_tx_clone,
+                &crate::message::format_model_refresh_progress_markdown(
+                    "Starting provider model catalog refresh",
+                    Some(5),
+                ),
+            );
 
-        let refresh_started = Instant::now();
-        let refresh_future = provider_clone.refresh_model_catalog();
-        tokio::pin!(refresh_future);
-        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let refresh_started = Instant::now();
+            let refresh_future = crate::runtime_lifecycle::admission::prepare(
+                crate::runtime_lifecycle::admission::current_scope(),
+                provider_clone.refresh_model_catalog(),
+            );
+            tokio::pin!(refresh_future);
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        let result = loop {
-            tokio::select! {
-                result = &mut refresh_future => break result,
-                _ = heartbeat.tick() => {
-                    let elapsed_secs = refresh_started.elapsed().as_secs();
-                    if elapsed_secs > 0 {
-                        send_catalog_activity(
-                            &client_event_tx_clone,
-                            &crate::message::format_model_refresh_progress_markdown(
-                                &format!("Waiting on provider APIs ({elapsed_secs}s elapsed)"),
-                                None,
-                            ),
-                        );
+            let result = loop {
+                tokio::select! {
+                    result = &mut refresh_future => break result,
+                    _ = heartbeat.tick() => {
+                        let elapsed_secs = refresh_started.elapsed().as_secs();
+                        if elapsed_secs > 0 {
+                            send_catalog_activity(
+                                &client_event_tx_clone,
+                                &crate::message::format_model_refresh_progress_markdown(
+                                    &format!("Waiting on provider APIs ({elapsed_secs}s elapsed)"),
+                                    None,
+                                ),
+                            );
+                        }
                     }
                 }
+            };
+            match result {
+                Ok(_) => {
+                    send_catalog_activity(
+                        &client_event_tx_clone,
+                        &crate::message::format_model_refresh_progress_markdown(
+                            "Updating model picker",
+                            Some(95),
+                        ),
+                    );
+                    crate::bus::Bus::global().publish_models_updated();
+                    let event = available_models_updated_event(&agent_clone).await;
+                    let _ = client_event_tx_clone.send(event);
+                    send_catalog_activity(
+                        &client_event_tx_clone,
+                        &crate::message::format_model_refresh_progress_markdown(
+                            "Model list refresh complete",
+                            Some(100),
+                        ),
+                    );
+                }
+                Err(err) => {
+                    send_catalog_activity(
+                        &client_event_tx_clone,
+                        &crate::message::format_model_refresh_progress_markdown(
+                            "Model list refresh failed",
+                            None,
+                        ),
+                    );
+                    let _ = client_event_tx_clone.send(ServerEvent::Error {
+                        id,
+                        message: format!("Failed to refresh models: {}", err),
+                        retry_after_secs: None,
+                    });
+                }
             }
-        };
-        match result {
-            Ok(_) => {
-                send_catalog_activity(
-                    &client_event_tx_clone,
-                    &crate::message::format_model_refresh_progress_markdown(
-                        "Updating model picker",
-                        Some(95),
-                    ),
-                );
-                crate::bus::Bus::global().publish_models_updated();
-                let event = available_models_updated_event(&agent_clone).await;
-                let _ = client_event_tx_clone.send(event);
-                send_catalog_activity(
-                    &client_event_tx_clone,
-                    &crate::message::format_model_refresh_progress_markdown(
-                        "Model list refresh complete",
-                        Some(100),
-                    ),
-                );
-            }
-            Err(err) => {
-                send_catalog_activity(
-                    &client_event_tx_clone,
-                    &crate::message::format_model_refresh_progress_markdown(
-                        "Model list refresh failed",
-                        None,
-                    ),
-                );
-                let _ = client_event_tx_clone.send(ServerEvent::Error {
-                    id,
-                    message: format!("Failed to refresh models: {}", err),
-                    retry_after_secs: None,
-                });
-            }
-        }
-    });
-    let _ = client_event_tx.send(ServerEvent::Done { id });
+        });
+        let _ = client_event_tx.send(ServerEvent::Done { id });
+    })
+    .await;
 }
 
 fn send_catalog_activity(
@@ -820,19 +935,28 @@ pub(super) async fn handle_set_reasoning_effort(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    let result = if let Ok(mut agent_guard) = agent.try_lock() {
-        agent_guard.set_reasoning_effort(&effort)
-    } else {
-        spawn_deferred_reasoning_effort_change(
-            id,
-            effort,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-        );
-        return;
-    };
+    with_runtime_admission(
+        id,
+        "handle_set_reasoning_effort",
+        agent,
+        client_event_tx,
+        async {
+            let result = if let Ok(mut agent_guard) = agent.try_lock() {
+                agent_guard.set_reasoning_effort(&effort)
+            } else {
+                spawn_deferred_reasoning_effort_change(
+                    id,
+                    effort,
+                    Arc::clone(agent),
+                    client_event_tx.clone(),
+                );
+                return;
+            };
 
-    send_reasoning_effort_result(id, result, client_event_tx);
+            send_reasoning_effort_result(id, result, client_event_tx);
+        },
+    )
+    .await;
 }
 
 fn send_reasoning_effort_result(
@@ -865,8 +989,11 @@ fn spawn_deferred_reasoning_effort_change(
     client_event_tx: crate::client_delivery::ClientEventSender,
 ) {
     let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
-    tokio::spawn(async move {
-        let mut agent_guard = agent.lock().await;
+    crate::runtime_lifecycle::admission::spawn(async move {
+        let Some(mut agent_guard) = lock_provider_control(&agent, id, &client_event_tx).await
+        else {
+            return;
+        };
         log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
         let result = agent_guard.set_reasoning_effort(&effort);
         crate::logging::info(&format!(
@@ -886,37 +1013,47 @@ pub(super) async fn handle_set_service_tier(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    let apply = move |provider: Arc<dyn Provider>,
+    with_runtime_admission(
+        id,
+        "handle_set_service_tier",
+        agent,
+        client_event_tx,
+        async {
+            let apply =
+                move |provider: Arc<dyn Provider>,
                       client_event_tx: &crate::client_delivery::ClientEventSender| {
-        match provider.set_service_tier(&service_tier) {
-            Ok(()) => {
-                let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
-                    id,
-                    service_tier: provider.service_tier(),
-                    error: None,
-                });
-            }
-            Err(e) => {
-                let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
-                    id,
-                    service_tier: None,
-                    error: Some(e.to_string()),
-                });
-            }
-        }
-    };
+                    match provider.set_service_tier(&service_tier) {
+                        Ok(()) => {
+                            let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+                                id,
+                                service_tier: provider.service_tier(),
+                                error: None,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+                                id,
+                                service_tier: None,
+                                error: Some(e.to_string()),
+                            });
+                        }
+                    }
+                };
 
-    if let Ok(agent_guard) = agent.try_lock() {
-        apply(agent_guard.provider_handle(), client_event_tx);
-    } else {
-        spawn_deferred_provider_operation(
-            "set_service_tier",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            apply,
-        );
-    }
+            if let Ok(agent_guard) = agent.try_lock() {
+                apply(agent_guard.provider_handle(), client_event_tx);
+            } else {
+                spawn_deferred_provider_operation(
+                    "set_service_tier",
+                    id,
+                    Arc::clone(agent),
+                    client_event_tx.clone(),
+                    apply,
+                );
+            }
+        },
+    )
+    .await;
 }
 
 pub(super) async fn handle_set_transport(
@@ -925,37 +1062,41 @@ pub(super) async fn handle_set_transport(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    let apply = move |provider: Arc<dyn Provider>,
-                      client_event_tx: &crate::client_delivery::ClientEventSender| {
-        match provider.set_transport(&transport) {
-            Ok(()) => {
-                let _ = client_event_tx.send(ServerEvent::TransportChanged {
-                    id,
-                    transport: provider.transport(),
-                    error: None,
-                });
-            }
-            Err(e) => {
-                let _ = client_event_tx.send(ServerEvent::TransportChanged {
-                    id,
-                    transport: None,
-                    error: Some(e.to_string()),
-                });
-            }
-        }
-    };
+    with_runtime_admission(id, "handle_set_transport", agent, client_event_tx, async {
+        let apply =
+            move |provider: Arc<dyn Provider>,
+                  client_event_tx: &crate::client_delivery::ClientEventSender| {
+                match provider.set_transport(&transport) {
+                    Ok(()) => {
+                        let _ = client_event_tx.send(ServerEvent::TransportChanged {
+                            id,
+                            transport: provider.transport(),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = client_event_tx.send(ServerEvent::TransportChanged {
+                            id,
+                            transport: None,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            };
 
-    if let Ok(agent_guard) = agent.try_lock() {
-        apply(agent_guard.provider_handle(), client_event_tx);
-    } else {
-        spawn_deferred_provider_operation(
-            "set_transport",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            apply,
-        );
-    }
+        if let Ok(agent_guard) = agent.try_lock() {
+            apply(agent_guard.provider_handle(), client_event_tx);
+        } else {
+            spawn_deferred_provider_operation(
+                "set_transport",
+                id,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+                apply,
+            );
+        }
+    })
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -971,6 +1112,7 @@ pub(super) async fn handle_notify_auth_changed(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
+    with_runtime_admission(id, "handle_notify_auth_changed", agent, client_event_tx, async {
     let refresh_started = Instant::now();
     crate::auth::AuthStatus::invalidate_cache();
     let (session_id, before_snapshot) = if let Ok(agent_guard) = agent.try_lock() {
@@ -1006,7 +1148,7 @@ pub(super) async fn handle_notify_auth_changed(
     let targets = auth_refresh_targets(provider_template, provider, agent, sessions).await;
     let client_event_tx_clone = client_event_tx.clone();
     let agent_clone = agent.clone();
-    tokio::spawn(async move {
+    crate::runtime_lifecycle::admission::spawn(async move {
         if !auth_refresh_is_current(&session_id, auth_refresh_generation) {
             return;
         }
@@ -1033,6 +1175,7 @@ pub(super) async fn handle_notify_auth_changed(
                 refresh_providers.push(Arc::clone(candidate));
             }
         }
+        let _catalog_work = CatalogWork(refresh_providers.clone());
         for provider in providers {
             provider.on_auth_changed();
         }
@@ -1215,8 +1358,10 @@ pub(super) async fn handle_notify_auth_changed(
         );
         send_catalog_activity(&client_event_tx_clone, &catalog_message);
         finish_auth_refresh(&session_id, auth_refresh_generation);
+        await_catalog_work(&refresh_providers).await;
     });
     let _ = client_event_tx.send(ServerEvent::Done { id });
+    }).await;
 }
 
 #[cfg(test)]
@@ -1229,24 +1374,33 @@ pub(super) async fn handle_switch_anthropic_account(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    match crate::auth::claude::set_active_account(&label) {
-        Ok(()) => {
-            crate::auth::AuthStatus::invalidate_cache();
-            spawn_account_switch_refresh(
-                id,
-                "anthropic",
-                Arc::clone(agent),
-                client_event_tx.clone(),
-            );
-        }
-        Err(e) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!("Failed to switch Anthropic account: {}", e),
-                retry_after_secs: None,
-            });
-        }
-    }
+    with_runtime_admission(
+        id,
+        "handle_switch_anthropic_account",
+        agent,
+        client_event_tx,
+        async {
+            match crate::auth::claude::set_active_account(&label) {
+                Ok(()) => {
+                    crate::auth::AuthStatus::invalidate_cache();
+                    spawn_account_switch_refresh(
+                        id,
+                        "anthropic",
+                        Arc::clone(agent),
+                        client_event_tx.clone(),
+                    );
+                }
+                Err(e) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!("Failed to switch Anthropic account: {}", e),
+                        retry_after_secs: None,
+                    });
+                }
+            }
+        },
+    )
+    .await;
 }
 
 pub(super) async fn handle_switch_openai_account(
@@ -1255,19 +1409,33 @@ pub(super) async fn handle_switch_openai_account(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
-    match crate::auth::codex::set_active_account(&label) {
-        Ok(()) => {
-            crate::auth::AuthStatus::invalidate_cache();
-            spawn_account_switch_refresh(id, "openai", Arc::clone(agent), client_event_tx.clone());
-        }
-        Err(e) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!("Failed to switch OpenAI account: {}", e),
-                retry_after_secs: None,
-            });
-        }
-    }
+    with_runtime_admission(
+        id,
+        "handle_switch_openai_account",
+        agent,
+        client_event_tx,
+        async {
+            match crate::auth::codex::set_active_account(&label) {
+                Ok(()) => {
+                    crate::auth::AuthStatus::invalidate_cache();
+                    spawn_account_switch_refresh(
+                        id,
+                        "openai",
+                        Arc::clone(agent),
+                        client_event_tx.clone(),
+                    );
+                }
+                Err(e) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!("Failed to switch OpenAI account: {}", e),
+                        retry_after_secs: None,
+                    });
+                }
+            }
+        },
+    )
+    .await;
 }
 
 fn spawn_account_switch_refresh(
@@ -1276,7 +1444,7 @@ fn spawn_account_switch_refresh(
     agent: Arc<Mutex<Agent>>,
     client_event_tx: crate::client_delivery::ClientEventSender,
 ) {
-    tokio::spawn(async move {
+    crate::runtime_lifecycle::admission::spawn(async move {
         let started = Instant::now();
         crate::logging::event_info(
             "SERVER_PROVIDER_CONTROL_ACCOUNT_SWITCH",
@@ -1299,6 +1467,7 @@ fn spawn_account_switch_refresh(
             log_provider_control_completed("account_switch_refresh", id, queued_at);
             provider
         };
+        let _catalog_work = CatalogWork(vec![provider.clone()]);
         provider.invalidate_credentials().await;
 
         crate::provider::clear_all_provider_unavailability_for_account();
@@ -1306,12 +1475,12 @@ fn spawn_account_switch_refresh(
 
         match provider_kind {
             "anthropic" => {
-                tokio::spawn(async {
+                crate::runtime_lifecycle::admission::spawn(async {
                     let _ = crate::usage::get().await;
                 });
             }
             "openai" => {
-                tokio::spawn(async {
+                crate::runtime_lifecycle::admission::spawn(async {
                     let _ = crate::usage::get_openai_usage().await;
                 });
             }
@@ -1373,6 +1542,7 @@ mod tests {
 
     #[derive(Default)]
     struct TestEffortProvider {
+        pending: std::sync::atomic::AtomicBool,
         model: StdMutex<Option<String>>,
         effort: StdMutex<Option<String>>,
         service_tier: StdMutex<Option<String>>,
@@ -1393,6 +1563,10 @@ mod tests {
 
         fn name(&self) -> &str {
             "test-effort"
+        }
+
+        fn auth_model_refresh_pending(&self) -> bool {
+            self.pending.load(std::sync::atomic::Ordering::SeqCst)
         }
 
         fn model(&self) -> String {
@@ -1441,12 +1615,119 @@ mod tests {
 
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(Self {
+                pending: std::sync::atomic::AtomicBool::new(false),
                 model: StdMutex::new(Some(self.model())),
                 effort: StdMutex::new(self.reasoning_effort()),
                 service_tier: StdMutex::new(self.service_tier()),
                 transport: StdMutex::new(self.transport()),
             })
         }
+    }
+
+    #[test]
+    fn runtime_owns_deferred_provider_controls_and_late_catalog_work() -> anyhow::Result<()> {
+        use crate::runtime_lifecycle::{
+            RuntimeStopStore,
+            admission::{RuntimeAdmission, scope},
+        };
+        use crate::workspace::{RequestId, runtime::*};
+        for strategy in [StopStrategy::FinishCurrent, StopStrategy::Interrupt] {
+            let home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+            tokio::runtime::Runtime::new()?.block_on(async {
+                let (provider, agent, events, mut replies) = test_agent("runtime-provider").await;
+                let owner = RuntimeStopStore::new(
+                    &crate::storage::durable_state_dir(),
+                    &home.root().join("provider.sock"),
+                )?
+                .claim()?;
+                let registration = RuntimeAdmission::register(home.root(), owner.identity())?;
+                let gate = registration.admission();
+                let busy = agent.lock().await;
+                handle_set_service_tier(70, "priority".into(), &agent, &events).await;
+                assert_eq!(
+                    gate.work()?.len(),
+                    1,
+                    "Deferred worker must retain its actual owner"
+                );
+                let review = gate.review(
+                    &owner,
+                    ShutdownOptions {
+                        strategy,
+                        independent: IndependentTasks::Stop,
+                        quiescence_timeout_seconds: 5,
+                    },
+                    Vec::new(),
+                )?;
+                gate.begin(&owner, RequestId::new(), review.id, Vec::new())?;
+                if strategy == StopStrategy::Interrupt {
+                    gate.interrupt_preparations()?;
+                    let reply =
+                        tokio::time::timeout(Duration::from_secs(5), replies.recv()).await?;
+                    assert!(matches!(reply, Some(ServerEvent::Error { id: 70, .. })));
+                    assert_eq!(provider.service_tier(), None);
+                    drop(busy);
+                } else {
+                    drop(busy);
+                    let reply =
+                        tokio::time::timeout(Duration::from_secs(5), replies.recv()).await?;
+                    assert!(matches!(
+                        reply,
+                        Some(ServerEvent::ServiceTierChanged {
+                            id: 70,
+                            error: None,
+                            ..
+                        })
+                    ));
+                    assert_eq!(provider.service_tier().as_deref(), Some("priority"));
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !gate.work().unwrap().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await?;
+                handle_set_service_tier(71, "different".into(), &agent, &events).await;
+                assert!(matches!(
+                    replies.recv().await,
+                    Some(ServerEvent::Error { id: 71, .. })
+                ));
+                Ok::<_, anyhow::Error>(())
+            })?;
+        }
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        tokio::runtime::Runtime::new()?.block_on(async {
+            let (provider, _, _, _) = test_agent("pending-catalog").await;
+            provider
+                .pending
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let owner = RuntimeStopStore::new(
+                &crate::storage::durable_state_dir(),
+                &home.root().join("catalog.sock"),
+            )?
+            .claim()?;
+            let registration = RuntimeAdmission::register(home.root(), owner.identity())?;
+            let gate = registration.admission();
+            let permit = gate.independent(RuntimeWorkKind::Preparation, "catalog".into(), None)?;
+            scope(Some(permit), async {
+                let _actual_owner = CatalogWork(vec![provider.clone()]);
+            })
+            .await;
+            assert_eq!(
+                gate.work()?.len(),
+                1,
+                "An early UI result is not catalog quiescence"
+            );
+            provider
+                .pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !gate.work().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            Ok(())
+        })
     }
 
     async fn test_agent(

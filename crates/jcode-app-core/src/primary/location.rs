@@ -86,6 +86,29 @@ impl PrimaryHost {
         self: &Arc<Self>,
         command: PrimaryLocationCommand,
     ) -> Result<LocationChangeRecord> {
+        let permit = match &command {
+            PrimaryLocationCommand::Change { request } => {
+                crate::runtime_lifecycle::admission::preparation(
+                    "primary-location",
+                    Some(request.session.clone()),
+                )?
+            }
+            PrimaryLocationCommand::AdoptLegacy { request } => {
+                crate::runtime_lifecycle::admission::preparation(
+                    "primary-adoption",
+                    Some(request.session.clone()),
+                )?
+            }
+            _ => None,
+        };
+        crate::runtime_lifecycle::admission::scope(permit, self.location_command_admitted(command))
+            .await
+    }
+
+    async fn location_command_admitted(
+        self: &Arc<Self>,
+        command: PrimaryLocationCommand,
+    ) -> Result<LocationChangeRecord> {
         let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
         match command {
             PrimaryLocationCommand::Inspect { operation } => {
@@ -94,11 +117,14 @@ impl PrimaryHost {
             PrimaryLocationCommand::Cancel { operation } => {
                 let record = workspace.inspect_location_change(operation)?;
                 let _owner = self.claim(&record.input.session)?;
-                Ok(workspace.cancel_location_change(operation)?)
+                crate::runtime_lifecycle::admission::control(|| {
+                    workspace.cancel_location_change(operation)
+                })?
+                .map_err(Into::into)
             }
             command @ (PrimaryLocationCommand::Change { .. }
             | PrimaryLocationCommand::AdoptLegacy { .. }) => {
-                ensure!(self.accepts_input(), "Primary runtime is stopping");
+                ensure!(self.accepts_prepared_work(), "Primary runtime is stopping");
                 let session = match &command {
                     PrimaryLocationCommand::Change { request } => request.session.clone(),
                     PrimaryLocationCommand::AdoptLegacy { request } => request.session.clone(),
@@ -129,20 +155,26 @@ impl PrimaryHost {
                     // A failed provider turn may never reach B/D. The runtime
                     // retains this idle reconciliation independently of clients.
                     let weak = Arc::downgrade(self);
-                    self.retain_delivery(async move {
-                        let Some(host) = weak.upgrade() else {
-                            return;
-                        };
-                        if host.wait_idle(&session).await.is_err() {
-                            return;
-                        }
-                        let mut guard = agent.lock().await;
-                        if let Err(error) = guard.apply_primary_location_changes().await {
-                            crate::logging::warn(&format!(
-                                "Primary location remains pending for {session}: {error:#}"
-                            ));
-                        }
-                    });
+                    self.retain_delivery(crate::runtime_lifecycle::admission::scope(
+                        crate::runtime_lifecycle::admission::current_scope(),
+                        async move {
+                            let Some(host) = weak.upgrade() else {
+                                return;
+                            };
+                            if host.wait_idle(&session).await.is_err() {
+                                return;
+                            }
+                            if !host.accepts_prepared_work() {
+                                return;
+                            }
+                            let mut guard = agent.lock().await;
+                            if let Err(error) = guard.apply_primary_location_changes().await {
+                                crate::logging::warn(&format!(
+                                    "Primary location remains pending for {session}: {error:#}"
+                                ));
+                            }
+                        },
+                    ));
                 }
                 Ok(workspace.inspect_location_change(record.operation)?)
             }

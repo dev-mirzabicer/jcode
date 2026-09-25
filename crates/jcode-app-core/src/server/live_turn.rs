@@ -279,29 +279,38 @@ pub(super) async fn run_live_turn_if_idle(
     .await
 }
 
+/// Durable intake does not construct a provider or reopen a cold Session.
+fn validate_input_recipient(sessions: &SessionAgents, session: &str) -> anyhow::Result<()> {
+    crate::primary::PrimaryLease::validate_identity(session)?;
+    let stored = crate::session::Session::load_startup_stub(session)?;
+    anyhow::ensure!(
+        stored.id == session,
+        "Primary recipient identity differs from its saved Session"
+    );
+    anyhow::ensure!(
+        stored.isolated_child.is_none(),
+        "Isolated children cannot receive primary input"
+    );
+    stored.validate_primary_publication(&crate::workspace::WorkspaceService::new(
+        &crate::storage::durable_state_dir(),
+    ))?;
+    let _owner = sessions.claim(session)?;
+    Ok(())
+}
+
 pub(super) async fn submit_primary_input(
     sessions: &SessionAgents,
     input: jcode_session_types::PrimaryInputEnvelope,
     swarm: LiveTurnSwarmContext,
 ) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
     sessions.configure_input_delivery(swarm.clone());
-    let session = input.session.clone();
-    anyhow::ensure!(
-        sessions.read().await.contains_key(&session),
-        "Primary input recipient is not hosted; restore its exact Session first"
-    );
-    let stored = crate::session::Session::load_startup_stub(&session)?;
-    anyhow::ensure!(
-        stored.isolated_child.is_none(),
-        "Isolated children cannot receive primary input"
-    );
-    let _owner = sessions.claim(&session)?;
-    let store = crate::primary_input::PrimaryInputStore::current();
-    store.accept(input.clone())?;
-    let receipt = store.inspect(&session, input.id)?;
+    let receipt = crate::runtime_lifecycle::admission::control(|| {
+        validate_input_recipient(sessions, &input.session)?;
+        crate::primary_input::PrimaryInputStore::current().accept(input)
+    })??;
     if receipt.state == jcode_session_types::PrimaryInputState::Accepted && sessions.accepts_input()
     {
-        ensure_primary_input_delivery(sessions, &session, swarm);
+        ensure_primary_input_delivery(sessions, &receipt.session, swarm);
     }
     Ok(receipt)
 }
@@ -312,41 +321,41 @@ pub(super) async fn submit_client_input(
     swarm: LiveTurnSwarmContext,
 ) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
     use sha2::{Digest, Sha256};
-    anyhow::ensure!(
-        sessions.read().await.contains_key(&request.input.session),
-        "Client input recipient is not hosted"
-    );
-    let session = crate::session::Session::load_startup_stub(&request.input.session)?;
-    anyhow::ensure!(
-        session.isolated_child.is_none(),
-        "Isolated children cannot receive primary client input"
-    );
-    let _owner = sessions.claim(&request.input.session)?;
-    anyhow::ensure!(
-        request.input.client_request_digest.is_none(),
-        "Client cannot supply a prepared input digest"
-    );
-    anyhow::ensure!(
-        request.input.activate_skill.is_none()
-            || request.input.delivery == jcode_session_types::PrimaryInputDelivery::NextTurn,
-        "Skill activation requires a new primary turn"
-    );
-    let source = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
-    let store = crate::primary_input::PrimaryInputStore::current();
-    let input = store.accept_prepared(&request.input.session, request.input.id, &source, || {
-        let mut input = request.input.clone();
-        if let Some(entries) = &request.queued_messages {
-            let session = crate::session::Session::load_startup_stub(&input.session)?;
-            let (content, origin) = crate::todo::render_queued_messages(
-                entries,
-                session.working_dir.as_deref().map(std::path::Path::new),
-            )?;
-            input.content = content;
-            input.origin = Some(origin);
-        }
-        Ok(input)
-    })?;
-    submit_primary_input(sessions, input, swarm).await
+    sessions.configure_input_delivery(swarm.clone());
+    let receipt = crate::runtime_lifecycle::admission::control(|| -> anyhow::Result<_> {
+        validate_input_recipient(sessions, &request.input.session)?;
+        anyhow::ensure!(
+            request.input.client_request_digest.is_none(),
+            "Client cannot supply a prepared input digest"
+        );
+        anyhow::ensure!(
+            request.input.activate_skill.is_none()
+                || request.input.delivery == jcode_session_types::PrimaryInputDelivery::NextTurn,
+            "Skill activation requires a new primary turn"
+        );
+        let source = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
+        let store = crate::primary_input::PrimaryInputStore::current();
+        let input =
+            store.accept_prepared(&request.input.session, request.input.id, &source, || {
+                let mut input = request.input.clone();
+                if let Some(entries) = &request.queued_messages {
+                    let session = crate::session::Session::load_startup_stub(&input.session)?;
+                    let (content, origin) = crate::todo::render_queued_messages(
+                        entries,
+                        session.working_dir.as_deref().map(std::path::Path::new),
+                    )?;
+                    input.content = content;
+                    input.origin = Some(origin);
+                }
+                Ok(input)
+            })?;
+        store.inspect(&input.session, input.id)
+    })??;
+    if receipt.state == jcode_session_types::PrimaryInputState::Accepted && sessions.accepts_input()
+    {
+        ensure_primary_input_delivery(sessions, &receipt.session, swarm);
+    }
+    Ok(receipt)
 }
 
 pub(super) fn cancel_client_inputs(
@@ -354,8 +363,23 @@ pub(super) fn cancel_client_inputs(
     session: &str,
     requests: Vec<crate::protocol::PrimaryClientInput>,
 ) -> anyhow::Result<Vec<jcode_session_types::PrimaryInputReceipt>> {
+    crate::runtime_lifecycle::admission::control(|| {
+        cancel_client_inputs_owned(sessions, session, requests)
+    })?
+}
+
+fn cancel_client_inputs_owned(
+    sessions: &SessionAgents,
+    session: &str,
+    requests: Vec<crate::protocol::PrimaryClientInput>,
+) -> anyhow::Result<Vec<jcode_session_types::PrimaryInputReceipt>> {
     use sha2::{Digest, Sha256};
+    crate::primary::PrimaryLease::validate_identity(session)?;
     let source = crate::session::Session::load_startup_stub(session)?;
+    anyhow::ensure!(
+        source.id == session,
+        "Primary cancellation identity differs from its saved Session"
+    );
     anyhow::ensure!(
         source.isolated_child.is_none(),
         "Isolated children cannot receive primary controls"
@@ -401,8 +425,12 @@ pub(crate) fn ensure_primary_input_delivery(
             if host.wait_idle(&session).await.is_err() {
                 return;
             }
-            let Some(agent) = host.read().await.get(&session).cloned() else {
-                return;
+            let _owner = match host.claim(&session) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    crate::logging::warn(&format!("Pending input remains with its primary owner for {session}: {error:#}"));
+                    return;
+                }
             };
             let store = crate::primary_input::PrimaryInputStore::current();
             let input = match store.pending(&session) {
@@ -419,6 +447,21 @@ pub(crate) fn ensure_primary_input_delivery(
                     ));
                     return;
                 }
+            };
+            if let Err(error) = host.restore_input_recipient(&session).await {
+                if !host.accepts_input() {
+                    drain.defer_for_runtime();
+                }
+                crate::logging::warn(&format!(
+                    "Accepted primary input for {session} awaits resource recovery: {error:#}"
+                ));
+                if let Err(persistence) = store.defer(&session, input.id, Some(format!("Delivery awaits primary resource recovery: {error:#}"))) {
+                    crate::logging::warn(&format!("Could not persist deferred-input diagnostics for {session}: {persistence:#}"));
+                }
+                return;
+            }
+            let Some(agent) = host.read().await.get(&session).cloned() else {
+                return;
             };
             // Metadata locks are short and are not a reason to lose input.
             drop(agent.lock().await);

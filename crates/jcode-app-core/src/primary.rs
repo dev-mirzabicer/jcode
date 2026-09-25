@@ -25,6 +25,7 @@ pub use launch::{PrimaryLauncher, PrimaryRegistryMode};
 type Agents = HashMap<String, Arc<Mutex<Agent>>>;
 
 pub struct PrimaryHost {
+    input_restore: std::sync::OnceLock<InputRestore>,
     startup_context:
         std::sync::OnceLock<Arc<crate::server::startup_context::StartupContextCoordinator>>,
     ownership_id: u64,
@@ -42,6 +43,12 @@ pub struct PrimaryHost {
     stdin: StdMutex<HashMap<String, Arc<crate::server::primary_stdin::PrimaryStdin>>>,
     presentations: StdMutex<HashMap<String, Arc<presentation::Presentation>>>,
     checkpoint: StdMutex<Option<shutdown::Checkpoint>>,
+}
+
+struct InputRestore {
+    provider: Arc<dyn crate::provider::Provider>,
+    pool: Arc<tokio::sync::OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
+    repositories: Arc<crate::instruction::InstructionRepositoryService>,
 }
 
 #[derive(Clone)]
@@ -130,6 +137,7 @@ impl PrimaryHost {
             })
             .collect();
         Self {
+            input_restore: std::sync::OnceLock::new(),
             startup_context: std::sync::OnceLock::new(),
             ownership_id: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
             agents: RwLock::new(agents),
@@ -257,6 +265,33 @@ impl PrimaryHost {
             .await
     }
 
+    pub(crate) fn configure_input_restore(
+        &self,
+        provider: Arc<dyn crate::provider::Provider>,
+        pool: Arc<tokio::sync::OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
+        repositories: Arc<crate::instruction::InstructionRepositoryService>,
+    ) {
+        self.input_restore.get_or_init(|| InputRestore {
+            provider,
+            pool,
+            repositories,
+        });
+    }
+
+    pub(crate) async fn restore_input_recipient(&self, session: &str) -> Result<()> {
+        if self.read().await.contains_key(session) {
+            return Ok(());
+        }
+        let context = self
+            .input_restore
+            .get()
+            .context("Cold primary input needs the runtime restore factory")?;
+        let pool = crate::server::get_shared_mcp_pool(&context.pool).await;
+        self.restore(session, &context.provider, &pool, &context.repositories)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn restore_for_location_repair(
         &self,
         session: &str,
@@ -287,8 +322,12 @@ impl PrimaryHost {
         if self.read().await.contains_key(session) {
             return Ok(None);
         }
+        let permit = crate::runtime_lifecycle::admission::preparation(
+            "primary-restore",
+            Some(session.into()),
+        )?;
         let owner = self.claim(session)?;
-        let result: Result<_> = async {
+        let result: Result<_> = crate::runtime_lifecycle::admission::scope(permit.clone(), async {
             let stored = crate::session::Session::load_startup_stub(session)?;
             if location_repair {
                 stored.require_primary_publication()?;
@@ -315,10 +354,18 @@ impl PrimaryHost {
                 Agent::restore_primary(session, provider, registry, repositories.clone(), owner)
             }?;
             Ok((agent, previous))
-        }
+        })
         .await;
         match result {
             Ok((agent, previous)) => {
+                if !crate::runtime_lifecycle::admission::sync_scope(permit.clone(), || {
+                    self.accepts_prepared_work()
+                }) {
+                    self.owners.lock().expect("primary owners").remove(session);
+                    anyhow::bail!(
+                        "Runtime stopped before restored primary publication; saved Session and input remain retained"
+                    );
+                }
                 self.resources
                     .lock()
                     .expect("primary resources")
@@ -719,7 +766,7 @@ pub(crate) struct PrimaryLease {
     _file: File,
 }
 impl PrimaryLease {
-    pub(crate) fn acquire(session: &str) -> Result<Self> {
+    pub(crate) fn validate_identity(session: &str) -> Result<()> {
         ensure!(
             !session.is_empty()
                 && session
@@ -727,6 +774,11 @@ impl PrimaryLease {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
             "Invalid primary Session identity"
         );
+        Ok(())
+    }
+
+    pub(crate) fn acquire(session: &str) -> Result<Self> {
+        Self::validate_identity(session)?;
         let path = crate::session::session_path(session)?;
         let parent = path.parent().context("Session has no storage parent")?;
         crate::storage::ensure_dir(parent)?;

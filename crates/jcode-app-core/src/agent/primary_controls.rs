@@ -204,6 +204,10 @@ impl Agent {
         {
             return Ok(());
         }
+        let _runtime = crate::runtime_lifecycle::admission::preparation(
+            "location-checkpoint",
+            Some(self.session_id().into()),
+        )?;
         let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
         let _control = workspace.primary_control_lease(self.session_id())?;
         for record in workspace.pending_location_changes(self.session_id())? {

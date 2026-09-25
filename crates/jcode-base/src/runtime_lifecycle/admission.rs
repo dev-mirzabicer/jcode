@@ -435,6 +435,14 @@ pub fn sync_scope<T>(permit: Option<WorkPermit>, work: impl FnOnce() -> T) -> T 
     }
 }
 
+pub fn spawn<F>(work: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(scope(current_scope(), work))
+}
+
 /// Dropping the async waiter cannot release a still-running blocking owner.
 pub fn spawn_blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
