@@ -454,6 +454,31 @@ endpoint. The directory must still be owned by the user with no group/other
 permissions. Durable runtime leases, credentials and records remain in the
 original execution namespace. This avoids macOS Unix-socket path overflow.
 
+Control protocol v3 adds the distinct `runtime_shutdown` cancellation cause.
+Existing v1/v2 owners retain ordinary Stop compatibility. The transport adapts
+that cause to their supported human-cancellation representation while the reviewed
+runtime journal retains the shutdown intent. Force still requires v2 or newer.
+
+The runtime-shutdown backend binds each daemon execution endpoint to one durable
+socket namespace through an immutable, owner-only
+`execution/runtimes/<owner>.namespace.json` receipt. Publication is atomic and
+non-replacing. Different namespace claims conflict, and corrupt evidence is not
+silently rewritten. This receipt is the namespace authority, not a second list in
+the shutdown journal. It adds no command content or control credentials and does
+not change execution schema 21, so older independent workers can finish.
+
+`execution::shutdown::OwnedExecutions` inspects only this namespace's original
+owners and verified native handoffs. It preserves a native command by confirming
+its registered worker, committing Background at that owner and releasing only
+the original proxy with the same durable acceptance. The worker keeps its run ID,
+cwd, checkout-use lease, capture and control endpoint. Unsupported or damaged
+handoffs fail without cancellation or command replay. Timeouts remain incomplete
+control attempts, not terminal receipts. Unbound historical owners are not
+silently acquired from a matching Session ID or PID.
+
+This is the C01 shutdown backend boundary. The reviewed daemon operation and its
+ordinary runtime command surface are not yet activated by this internal slice.
+
 Status and control RPCs transfer metadata only. Stop acknowledges a request,
 not actual quiescence. Wait returns a persisted terminal state. Dropping a wait
 releases that subscription without cancelling the work. Completion racing with

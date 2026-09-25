@@ -15,6 +15,8 @@ async fn closed_delivery_channel_still_reads_the_actual_owner_outcome() -> Resul
     drop(sender);
     let control = super::super::BackgroundControl {
         run: Arc::new(LiveRun {
+            native_command: false,
+            release_native: AtomicBool::new(false),
             owns_execution: AtomicBool::new(false),
             store: original.store.clone(),
             runtime: original.runtime.clone(),

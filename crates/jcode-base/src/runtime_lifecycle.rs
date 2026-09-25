@@ -278,6 +278,20 @@ impl Transaction {
 }
 
 impl RuntimeStopOwner {
+    /// Keep namespace provenance across intentional Stop/Start. Session IDs,
+    /// process names and a shared output directory do not establish ownership.
+    pub fn bind_execution_owner(
+        &self,
+        store: &crate::execution::ExecutionStore,
+        id: &str,
+    ) -> Result<()> {
+        store.bind_runtime_namespace(id, &self.store.namespace)
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.store.namespace
+    }
+
     pub fn identity(&self) -> &str {
         &self.identity
     }

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use jcode_tool_types::StopCause;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAX_REQUEST: u64 = 16 * 1024;
 const MAX_REPLY: u64 = 128 * 1024;
 
@@ -61,6 +61,17 @@ pub async fn exchange(
         !matches!(&action, ControlOperation::ForceStop) || endpoint.protocol_version >= 2,
         "This execution owner predates force-stop support. Ordinary Stop remains available."
     );
+    // Old independent workers can outlive an upgrade. Their ordinary Stop has
+    // identical cancellation semantics, but cannot decode the new cause. The
+    // reviewed runtime journal still retains the distinct shutdown intent.
+    let action = match action {
+        ControlOperation::Stop {
+            cause: StopCause::RuntimeShutdown,
+        } if endpoint.protocol_version < 3 => ControlOperation::Stop {
+            cause: StopCause::HumanCancellation,
+        },
+        action => action,
+    };
     let check = endpoint.clone();
     ensure!(
         tokio::task::spawn_blocking(move || check.has_live_lease()).await??,
@@ -180,6 +191,57 @@ pub async fn control_in_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_shutdown_cause_is_negotiated_for_surviving_legacy_workers() -> Result<()> {
+        for version in [1, 2, VERSION] {
+            let directory = tempfile::tempdir()?;
+            let lease_path = directory.path().join("owner.lease");
+            let lease = std::fs::File::create(&lease_path)?;
+            lease.lock()?;
+            let mut endpoint = RuntimeEndpoint::new(
+                "1".repeat(32),
+                directory.path().join("control.sock"),
+                lease_path,
+                "2".repeat(64),
+            );
+            endpoint.protocol_version = version;
+            let listener = tokio::net::UnixListener::bind(&endpoint.endpoint)?;
+            let peer = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await?;
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await?;
+                let request: Request = serde_json::from_str(&line)?;
+                assert_eq!(request.version, version);
+                assert!(
+                    matches!(request.action, ControlOperation::Stop { cause } if cause == if version < 3 { StopCause::HumanCancellation } else { StopCause::RuntimeShutdown })
+                );
+                let reply = Response {
+                    version,
+                    reply: ControlReply::Accepted { changed: true },
+                };
+                write
+                    .write_all(format!("{}\n", serde_json::to_string(&reply)?).as_bytes())
+                    .await?;
+                Ok::<_, anyhow::Error>(())
+            });
+            assert!(matches!(
+                exchange(
+                    &endpoint,
+                    &format!("run-{}", "a".repeat(64)),
+                    ControlOperation::Stop {
+                        cause: StopCause::RuntimeShutdown
+                    }
+                )
+                .await?,
+                ControlReply::Accepted { changed: true }
+            ));
+            peer.await??;
+        }
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]

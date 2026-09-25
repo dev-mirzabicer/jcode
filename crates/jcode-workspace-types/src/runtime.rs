@@ -41,6 +41,8 @@ pub enum RuntimeWorkKind {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeWork {
     pub id: String,
+    /// Originating runtime owner. A verified native worker may own capture now
+    /// without changing the reviewed identity of this same command.
     pub owner: String,
     pub session: Option<String>,
     pub kind: RuntimeWorkKind,

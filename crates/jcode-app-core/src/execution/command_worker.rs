@@ -11,6 +11,35 @@ pub const WORKER_ARGUMENT: &str = "__jcode-command-worker";
 pub const CHILD_ARGUMENT: &str = "__jcode-command-child";
 
 static EXECUTABLE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+struct WorkerReaper(Option<std::process::Child>);
+impl WorkerReaper {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0
+            .as_mut()
+            .expect("worker retained until drop")
+            .try_wait()
+    }
+}
+impl Drop for WorkerReaper {
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            // Reap our child, but never block Tokio shutdown on a deliberately
+            // surviving command and never infer its completion from this task.
+            runtime.spawn(async move {
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) | Err(_) => break,
+                        Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+                    }
+                }
+            });
+        }
+    }
+}
 pub fn register_current_executable() -> Result<()> {
     let executable = std::env::current_exe()?;
     if let Some(existing) = EXECUTABLE.get() {
@@ -83,7 +112,7 @@ pub(crate) async fn launch(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log);
-    let mut child = crate::platform::spawn_detached(&mut program)?;
+    let mut child = WorkerReaper(Some(crate::platform::spawn_detached(&mut program)?));
     let mut stopped = false;
     let mut ready = false;
     let mut last_progress = 0;
@@ -135,6 +164,23 @@ pub(crate) async fn launch(
                 .as_ref()
                 .is_some_and(|path| path.is_file())
         {
+            let release = LIVE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&(store.root().to_path_buf(), id.clone()))
+                .is_some_and(|run| run.release_native.load(Ordering::SeqCst));
+            if release {
+                ensure!(
+                    current.background
+                        && current.stop_cause.is_none()
+                        && store.is_command_handoff(&id, &owner, &current.owner)?,
+                    "Native runtime handoff changed before proxy release"
+                );
+                if let Some(signal) = &ctx.invocation.ready {
+                    signal.mark();
+                }
+                return super::background_handoff(&ctx).await;
+            }
             if !ready {
                 if let Some(signal) = &ctx.invocation.ready {
                     signal.mark();
@@ -266,6 +312,8 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
     let (commands, mut requests) = mpsc::unbounded_channel();
     let (result, result_rx) = watch::channel(None);
     let run = Arc::new(LiveRun {
+        native_command: true,
+        release_native: AtomicBool::new(false),
         owns_execution: AtomicBool::new(true),
         store: store.clone(),
         runtime,

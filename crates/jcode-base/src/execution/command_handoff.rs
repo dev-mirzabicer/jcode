@@ -35,6 +35,14 @@ pub struct ClaimedCommand {
     pub parent: RuntimeEndpoint,
 }
 
+/// Verified transfer metadata, deliberately excluding command text, environment
+/// and transport credentials. A prepared transfer is not a ready survivor.
+pub struct CommandOwnership {
+    pub parent: String,
+    pub worker: Option<String>,
+    pub process: Option<ProcessIdentity>,
+}
+
 fn validate_id(id: &str) -> Result<()> {
     ensure!(
         id.len() == 68
@@ -45,6 +53,27 @@ fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 impl ExecutionStore {
+    pub fn command_ownership(&self, id: &str) -> Result<Option<CommandOwnership>> {
+        use rusqlite::OptionalExtension;
+        let row: Option<(String, Option<String>, Option<String>)> = self.connection()?.query_row(
+            "SELECT parent_owner,worker_owner,process_identity FROM command_handoffs WHERE run_id=?1", [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        let Some((parent, worker, process)) = row else {
+            return Ok(None);
+        };
+        ensure!(
+            self.command_payload(id)?.parent_owner == parent,
+            "Command transfer and payload ownership disagree"
+        );
+        Ok(Some(CommandOwnership {
+            parent,
+            worker,
+            process: process
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?,
+        }))
+    }
     /// Observe the exact prepared cwd even when a legacy invocation omitted
     /// its display cwd. Payload integrity remains owned by this handoff service.
     pub fn command_working_directory(&self, id: &str) -> Result<Option<PathBuf>> {

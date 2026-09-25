@@ -22,6 +22,8 @@ pub(crate) mod helper;
 pub mod history;
 mod provider_ingress;
 pub mod retention;
+#[cfg(unix)]
+pub mod shutdown;
 pub use provider_ingress::ProviderIngress;
 mod provider_capture;
 pub use provider_capture::ProviderCaptureScope;
@@ -50,6 +52,8 @@ impl Drop for AbortProducer {
 }
 
 struct LiveRun {
+    native_command: bool,
+    release_native: AtomicBool,
     owns_execution: AtomicBool,
     store: ExecutionStore,
     runtime: Arc<runtime::RuntimeHandle>,
@@ -172,6 +176,8 @@ pub(crate) async fn execute_at(
             let (commands, receiver) = mpsc::unbounded_channel();
             let (result, subscription) = watch::channel(None);
             let run = Arc::new(LiveRun {
+                native_command: policy.capture == jcode_tool_core::CaptureMode::NativeCommand,
+                release_native: AtomicBool::new(false),
                 owns_execution: AtomicBool::new(false),
                 store: store.clone(),
                 runtime,
