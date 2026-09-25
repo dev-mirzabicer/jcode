@@ -48,6 +48,7 @@ pub enum StopCause {
     ChildPredecessorFailure,
     HumanCancellation,
     ParentForegroundCancellation,
+    RuntimeShutdown,
     ReloadQuiescence,
     OwnerCrash,
 }
@@ -60,6 +61,7 @@ impl StopCause {
             }
             Self::HumanCancellation => "Cancelled by user",
             Self::ParentForegroundCancellation => "Cancelled with parent foreground work",
+            Self::RuntimeShutdown => "Cancelled by reviewed runtime shutdown",
             Self::ReloadQuiescence => {
                 "Interrupted by server reload: owned work did not survive quiescence"
             }

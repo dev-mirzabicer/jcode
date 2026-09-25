@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 const MARKER: &[u8] = b"jcode-runtime-lifecycle-v1\n";
 
+pub mod admission;
+
 #[derive(Clone)]
 pub struct RuntimeStopStore {
     directory: PathBuf,

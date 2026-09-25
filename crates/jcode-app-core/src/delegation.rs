@@ -174,7 +174,24 @@ impl Host {
                 .context("Child queue has no Stop signal")?;
             loop {
                 check_stop(&ctx)?;
-                match store.claim_child_turn(&identity.id, &identity.owner)? {
+                let claim = if let Some(runtime) =
+                    crate::runtime_lifecycle::admission::current_runtime()?
+                {
+                    match runtime
+                        .input_boundary(|| store.claim_child_turn(&identity.id, &identity.owner))
+                    {
+                        Some(claim) => claim?,
+                        None => {
+                            stop.fire_with_cause(StopCause::RuntimeShutdown);
+                            anyhow::bail!(
+                                "Queued child did not start because runtime shutdown fenced its next turn; original input remains retained"
+                            );
+                        }
+                    }
+                } else {
+                    store.claim_child_turn(&identity.id, &identity.owner)?
+                };
+                match claim {
                     ChildTurnClaim::Claimed => break,
                     ChildTurnClaim::CancelledBy(predecessor) => {
                         stop.fire_with_cause(StopCause::ChildPredecessorFailure);

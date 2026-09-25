@@ -75,6 +75,15 @@ impl PrimaryLauncher {
             host.accepting.load(std::sync::atomic::Ordering::Acquire),
             "Primary runtime is stopping"
         );
+        let _preparation = crate::runtime_lifecycle::admission::current_runtime()?
+            .map(|runtime| {
+                runtime.independent(
+                    crate::workspace::runtime::RuntimeWorkKind::Preparation,
+                    format!("launch:{request}"),
+                    None,
+                )
+            })
+            .transpose()?;
         let (agent, record) = self.prepare(request, expected, input, preparation).await?;
         if let PrimaryRegistryMode::Shared(pool) = &self.registry {
             agent

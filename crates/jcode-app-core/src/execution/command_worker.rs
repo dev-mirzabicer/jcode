@@ -363,6 +363,7 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
                 let state = match outcome.stop_cause {
                     Some(
                         StopCause::HumanCancellation
+                        | StopCause::RuntimeShutdown
                         | StopCause::ParentForegroundCancellation
                         | StopCause::ChildPredecessorFailure,
                     ) => RunState::Cancelled,
@@ -392,6 +393,7 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
             {
                 Some(
                     StopCause::HumanCancellation
+                    | StopCause::RuntimeShutdown
                     | StopCause::ParentForegroundCancellation
                     | StopCause::ChildPredecessorFailure,
                 ) => RunState::Cancelled,

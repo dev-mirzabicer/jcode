@@ -1,5 +1,152 @@
 use super::*;
 
+#[test]
+fn runtime_shutdown_fence_retains_input_and_allows_only_admitted_work() -> Result<()> {
+    use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+    use crate::workspace::runtime::*;
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let root = crate::storage::jcode_dir()?;
+        let owner = RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &root.join("shutdown-fixture.sock"),
+        )?
+        .claim()?;
+        let registration = RuntimeAdmission::register(&root, owner.identity())?;
+        let gate = registration.admission();
+        let recorder = Arc::new(DurableInputProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry.clone())));
+        let session = agent.lock().await.session_id().to_owned();
+        agent.lock().await.startup_context_session_mut().save()?;
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let status = status_fixture(&session);
+        let initial = jcode_session_types::PrimaryInputEnvelope {
+            id: crate::workspace::RequestId::new(),
+            session: session.clone(),
+            delivery: jcode_session_types::PrimaryInputDelivery::NextTurn,
+            content: "already admitted input".into(),
+            images: Vec::new(),
+            display_role: None,
+            origin: Some(jcode_session_types::StoredMessageOrigin::Human),
+            system_reminder: None,
+            unattended_context: None,
+            urgent: false,
+            activate_skill: None,
+            observe_startup_context: None,
+            client_request_digest: None,
+        };
+        let admission = host.admit(&session, 99, agent.clone())?;
+        let review = gate.review(
+            &owner,
+            ShutdownOptions {
+                strategy: StopStrategy::FinishCurrent,
+                independent: IndependentTasks::Stop,
+                quiescence_timeout_seconds: 10,
+            },
+            Vec::new(),
+        )?;
+        let op = gate.begin(
+            &owner,
+            crate::workspace::RequestId::new(),
+            review.id,
+            Vec::new(),
+        )?;
+        let mut later = initial.clone();
+        later.id = crate::workspace::RequestId::new();
+        later.content = "deferred input".into();
+        later.delivery = jcode_session_types::PrimaryInputDelivery::SafeBoundary;
+        later.urgent = true;
+        crate::server::live_turn::submit_primary_input(&host, later.clone(), status.clone())
+            .await?;
+        assert!(!host.accepts_input());
+        let workdir = tempfile::tempdir()?;
+        let file = workdir.path().join("admitted-effect.txt");
+        let context = crate::tool::ToolContext {
+            session_id: session.clone(),
+            message_id: "admitted-effect".into(),
+            tool_call_id: "write".into(),
+            working_dir: Some(workdir.path().to_path_buf()),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+            invocation: Default::default(),
+        };
+        // Same Session text does not grant causal authority to another caller.
+        let mut denied = context.clone();
+        denied.tool_call_id = "denied".into();
+        let denied_file = workdir.path().join("not-admitted.txt");
+        assert!(
+            registry
+                .execute(
+                    "write",
+                    serde_json::json!({"file_path":denied_file,"content":"must not exist"}),
+                    denied
+                )
+                .await
+                .is_err()
+        );
+        assert!(!denied_file.exists());
+        let producer_registry = registry.clone();
+        let producer_file = file.clone();
+        let (completed, result) = tokio::sync::oneshot::channel();
+        host.start(
+            admission,
+            move |mut agent| async move {
+                assert!(!agent.has_urgent_interrupt());
+                producer_registry
+                    .execute(
+                        "write",
+                        serde_json::json!({"file_path":producer_file,"content":"one effect"}),
+                        context,
+                    )
+                    .await?;
+                agent.run_primary_input_capture(initial).await.map(Some)
+            },
+            move |outcome| async move {
+                let _ = completed.send(outcome.result);
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(20), result).await???;
+        host.wait_idle(&session).await?;
+        assert_eq!(std::fs::read_to_string(&file)?, "one effect");
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), 1);
+        assert_eq!(
+            crate::primary_input::PrimaryInputStore::current()
+                .inspect(&session, later.id)?
+                .state,
+            jcode_session_types::PrimaryInputState::Accepted
+        );
+        gate.cancel_wait(&owner, op.id, op.revision)?;
+        crate::server::live_turn::ensure_primary_input_delivery(&host, &session, status);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if crate::primary_input::PrimaryInputStore::current()
+                    .inspect(&session, later.id)?
+                    .state
+                    == jcode_session_types::PrimaryInputState::Committed
+                    && host.processing(&session).is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), 2);
+        host.shutdown().await?;
+        assert!(gate.work()?.is_empty());
+        Ok(())
+    })
+}
+
 #[derive(Clone, Default)]
 struct DurableInputProvider {
     snapshots: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,

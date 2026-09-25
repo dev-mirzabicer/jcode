@@ -125,6 +125,17 @@ impl Agent {
     pub(super) fn inject_primary_inputs(
         &mut self,
     ) -> Result<Vec<super::interrupts::InjectedSoftInterrupt>> {
+        if let Some(runtime) = crate::runtime_lifecycle::admission::current_runtime()? {
+            return runtime
+                .input_boundary(|| self.inject_primary_inputs_admitted())
+                .unwrap_or_else(|| Ok(Vec::new()));
+        }
+        self.inject_primary_inputs_admitted()
+    }
+
+    fn inject_primary_inputs_admitted(
+        &mut self,
+    ) -> Result<Vec<super::interrupts::InjectedSoftInterrupt>> {
         if self.session.isolated_child.is_some() {
             return Ok(Vec::new());
         }

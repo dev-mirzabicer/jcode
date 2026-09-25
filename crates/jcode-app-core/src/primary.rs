@@ -87,6 +87,7 @@ struct Reservation {
     host: std::sync::Weak<PrimaryHost>,
     control: Arc<TurnControl>,
     started: bool,
+    permit: Option<crate::runtime_lifecycle::admission::WorkPermit>,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -333,6 +334,8 @@ impl PrimaryHost {
 
     pub(crate) fn accepts_input(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
+            && crate::runtime_lifecycle::admission::current_runtime()
+                .is_ok_and(|runtime| runtime.is_none_or(|runtime| runtime.accepts_input()))
     }
 
     pub(crate) fn configure_startup_context(
@@ -440,6 +443,15 @@ impl PrimaryHost {
         request_id: u64,
         agent: Arc<Mutex<Agent>>,
     ) -> Result<Admission> {
+        let permit = crate::runtime_lifecycle::admission::current_runtime()?
+            .map(|runtime| {
+                runtime.independent(
+                    crate::workspace::runtime::RuntimeWorkKind::PrimaryTurn,
+                    format!("primary:{session}:{}", uuid::Uuid::new_v4()),
+                    Some(session.to_owned()),
+                )
+            })
+            .transpose()?;
         let mut turns = self.turns.lock().expect("primary turns");
         ensure!(
             self.accepting.load(Ordering::Acquire),
@@ -478,6 +490,7 @@ impl PrimaryHost {
                 host: Arc::downgrade(self),
                 control,
                 started: false,
+                permit,
             },
         })
     }
@@ -502,19 +515,24 @@ impl PrimaryHost {
         let session = reservation.session.clone();
         let control = reservation.control.clone();
         let starting = control.clone();
-        let mut task = TurnBody(tokio::spawn(async move {
-            ensure!(
-                !starting.stopping.load(Ordering::Acquire),
-                "Primary stopped before provider dispatch"
-            );
-            body(agent).await
-        }));
+        let permit = reservation.permit.clone();
+        let mut task = TurnBody(tokio::spawn(crate::runtime_lifecycle::admission::scope(
+            permit,
+            async move {
+                ensure!(
+                    !starting.stopping.load(Ordering::Acquire),
+                    "Primary stopped before provider dispatch"
+                );
+                body(agent).await
+            },
+        )));
         *control.abort.lock().expect("primary body") = Some(task.0.abort_handle());
         reservation.started = true;
         let host = Arc::downgrade(self);
         let mut tasks = self.tasks.lock().expect("primary tasks");
         while tasks.try_join_next().is_some() {}
         tasks.spawn(async move {
+            let _reservation = reservation;
             let mut result = match (&mut task.0).await {
                 Ok(result) => result,
                 Err(error) => Err(anyhow::anyhow!("Primary turn ended: {error}")),

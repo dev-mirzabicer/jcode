@@ -151,6 +151,24 @@ pub(crate) async fn execute_at(
             );
             (Arc::clone(run), false)
         } else {
+            let permit = if store.inspect(&key.1)?.is_none() {
+                crate::runtime_lifecycle::admission::RuntimeAdmission::for_root(
+                    store
+                        .root()
+                        .parent()
+                        .context("Execution store has no namespace")?,
+                )?
+                .map(|runtime| {
+                    runtime.causal(
+                        crate::workspace::runtime::RuntimeWorkKind::Execution,
+                        invocation.id(),
+                        Some(invocation.session_id.clone()),
+                    )
+                })
+                .transpose()?
+            } else {
+                None
+            };
             let (commands, receiver) = mpsc::unbounded_channel();
             let (result, subscription) = watch::channel(None);
             let run = Arc::new(LiveRun {
@@ -169,24 +187,27 @@ pub(crate) async fn execute_at(
             live.insert(key.clone(), Arc::clone(&run));
             let owned = Arc::clone(&run);
             let registration = LiveRegistration(key.clone());
-            tokio::spawn(async move {
-                let _registration = registration;
-                let completion =
-                    supervise(store, Arc::clone(&owned), receiver, ctx, target, producer).await;
-                let completion = match completion {
-                    Ok(completion) => completion,
-                    Err(error) => Completion {
-                        output: ToolOutput::new(format!(
-                            "Execution storage/control failed for {}: {error:#}. Do not repeat uncertain effects.",
-                            key.1
-                        )),
-                        failed: true,
-                    },
-                };
-                // Metadata and captured files have their own durable truth even
-                // when the original caller has stopped waiting.
-                result.send_replace(Some(Arc::new(completion)));
-            });
+            tokio::spawn(crate::runtime_lifecycle::admission::scope(
+                permit,
+                async move {
+                    let _registration = registration;
+                    let completion =
+                        supervise(store, Arc::clone(&owned), receiver, ctx, target, producer).await;
+                    let completion = match completion {
+                        Ok(completion) => completion,
+                        Err(error) => Completion {
+                            output: ToolOutput::new(format!(
+                                "Execution storage/control failed for {}: {error:#}. Do not repeat uncertain effects.",
+                                key.1
+                            )),
+                            failed: true,
+                        },
+                    };
+                    // Metadata and captured files have their own durable truth even
+                    // when the original caller has stopped waiting.
+                    result.send_replace(Some(Arc::new(completion)));
+                },
+            ));
             (run, true)
         }
     };
@@ -548,7 +569,10 @@ async fn supervise(
             Some(cause),
         )
     } else {
-        let mut task = tokio::spawn(producer(ctx));
+        let mut task = tokio::spawn(crate::runtime_lifecycle::admission::scope(
+            crate::runtime_lifecycle::admission::current_scope(),
+            producer(ctx),
+        ));
         let _owned_producer = AbortProducer(task.abort_handle());
         let mut stopping = None;
         let mut abort_at = None;
@@ -593,6 +617,7 @@ async fn supervise(
     let state = match stopping {
         Some(
             StopCause::HumanCancellation
+            | StopCause::RuntimeShutdown
             | StopCause::ParentForegroundCancellation
             | StopCause::ChildPredecessorFailure,
         ) => RunState::Cancelled,

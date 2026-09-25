@@ -475,6 +475,20 @@ impl BackgroundTaskManager {
         let status_path = self.output_dir.join(format!("{}.status.json", task_id));
         let started_at_rfc3339 = chrono::Utc::now().to_rfc3339();
 
+        let admission =
+            crate::runtime_lifecycle::admission::current_runtime().and_then(|runtime| {
+                runtime
+                    .map(|runtime| {
+                        runtime.causal(
+                            jcode_workspace_types::runtime::RuntimeWorkKind::BackgroundTask,
+                            format!("background:{task_id}"),
+                            Some(session_id.to_owned()),
+                        )
+                    })
+                    .transpose()
+            });
+        let permit = admission.as_ref().ok().cloned().flatten();
+
         // Write initial status file
         let initial_status = TaskStatusFile {
             task_id: task_id.clone(),
@@ -522,107 +536,113 @@ impl BackgroundTaskManager {
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
         // Spawn the background task
-        let handle = tokio::spawn(async move {
-            let result = execute_fn(output_path_clone.clone()).await;
+        let handle = tokio::spawn(crate::runtime_lifecycle::admission::scope(
+            permit,
+            async move {
+                let result = match admission {
+                    Ok(_permit) => execute_fn(output_path_clone.clone()).await,
+                    Err(error) => Err(error),
+                };
 
-            let duration_secs = started_at.elapsed().as_secs_f64();
-            let (status, exit_code, error) = match &result {
-                Ok(task_result) => {
-                    let status = task_result.status.clone().unwrap_or_else(|| {
-                        if task_result.error.is_some() {
-                            BackgroundTaskStatus::Failed
-                        } else {
-                            BackgroundTaskStatus::Completed
-                        }
-                    });
-                    (status, task_result.exit_code, task_result.error.clone())
-                }
-                Err(e) => (BackgroundTaskStatus::Failed, None, Some(e.to_string())),
-            };
-
-            let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
-            let prior_status = tokio::fs::read_to_string(&status_path_clone)
-                .await
-                .ok()
-                .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
-            let prior_progress = prior_status
-                .as_ref()
-                .and_then(|status| status.progress.clone());
-            let prior_event_history = prior_status
-                .map(|status| status.event_history)
-                .unwrap_or_default();
-
-            // Update status file
-            let mut final_status = TaskStatusFile {
-                task_id: task_id_clone.clone(),
-                tool_name: tool_name_owned.clone(),
-                display_name: display_name_owned.clone(),
-                session_id: session_id_owned.clone(),
-                status: status.clone(),
-                exit_code,
-                error: error.clone(),
-                started_at: started_at_rfc3339_for_task,
-                completed_at: Some(chrono::Utc::now().to_rfc3339()),
-                duration_secs: Some(duration_secs),
-                pid: None,
-                #[cfg(unix)]
-                process_identity: None,
-                owner_pid: Some(std::process::id()),
-                owner_instance: Some(model::process_instance_token().to_string()),
-                detached: false,
-                notify: notify_flag,
-                wake: wake_flag,
-                progress: prior_progress,
-                event_history: prior_event_history,
-            };
-            push_task_event(
-                &mut final_status,
-                terminal_event_record(status.clone(), exit_code, error.as_deref()),
-            );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
-            }
-
-            // Drop this task from the live map now that its terminal status is
-            // persisted. Order matters: pruning only after the status-file
-            // write keeps "in the live map while the status file says Running"
-            // equivalent to "a task future is actually executing", which the
-            // run_plan duplicate-driver guard and self-dev build reconciliation
-            // rely on. Awaiting registration first means a task that finishes
-            // instantly cannot race the insert below and leave a permanent
-            // phantom entry in the map.
-            let _ = registered_rx.await;
-            tasks_for_prune.write().await.remove(&task_id_clone);
-
-            // Read output preview for notification
-            let output_preview = tokio::fs::read_to_string(&output_path_clone)
-                .await
-                .map(|s| {
-                    if s.len() > 500 {
-                        format!("{}...", crate::util::truncate_str(&s, 500))
-                    } else {
-                        s
+                let duration_secs = started_at.elapsed().as_secs_f64();
+                let (status, exit_code, error) = match &result {
+                    Ok(task_result) => {
+                        let status = task_result.status.clone().unwrap_or_else(|| {
+                            if task_result.error.is_some() {
+                                BackgroundTaskStatus::Failed
+                            } else {
+                                BackgroundTaskStatus::Completed
+                            }
+                        });
+                        (status, task_result.exit_code, task_result.error.clone())
                     }
-                })
-                .unwrap_or_default();
+                    Err(e) => (BackgroundTaskStatus::Failed, None, Some(e.to_string())),
+                };
 
-            // Publish completion event to the bus
-            Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
-                task_id: task_id_clone,
-                tool_name: tool_name_owned,
-                display_name: display_name_owned,
-                session_id: session_id_owned,
-                status,
-                exit_code,
-                output_preview,
-                output_file: output_path_clone,
-                duration_secs,
-                notify: notify_flag,
-                wake: wake_flag,
-            }));
+                let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
+                let prior_status = tokio::fs::read_to_string(&status_path_clone)
+                    .await
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
+                let prior_progress = prior_status
+                    .as_ref()
+                    .and_then(|status| status.progress.clone());
+                let prior_event_history = prior_status
+                    .map(|status| status.event_history)
+                    .unwrap_or_default();
 
-            result
-        });
+                // Update status file
+                let mut final_status = TaskStatusFile {
+                    task_id: task_id_clone.clone(),
+                    tool_name: tool_name_owned.clone(),
+                    display_name: display_name_owned.clone(),
+                    session_id: session_id_owned.clone(),
+                    status: status.clone(),
+                    exit_code,
+                    error: error.clone(),
+                    started_at: started_at_rfc3339_for_task,
+                    completed_at: Some(chrono::Utc::now().to_rfc3339()),
+                    duration_secs: Some(duration_secs),
+                    pid: None,
+                    #[cfg(unix)]
+                    process_identity: None,
+                    owner_pid: Some(std::process::id()),
+                    owner_instance: Some(model::process_instance_token().to_string()),
+                    detached: false,
+                    notify: notify_flag,
+                    wake: wake_flag,
+                    progress: prior_progress,
+                    event_history: prior_event_history,
+                };
+                push_task_event(
+                    &mut final_status,
+                    terminal_event_record(status.clone(), exit_code, error.as_deref()),
+                );
+                if let Ok(json) = serde_json::to_string_pretty(&final_status) {
+                    let _ = tokio::fs::write(&status_path_clone, json).await;
+                }
+
+                // Drop this task from the live map now that its terminal status is
+                // persisted. Order matters: pruning only after the status-file
+                // write keeps "in the live map while the status file says Running"
+                // equivalent to "a task future is actually executing", which the
+                // run_plan duplicate-driver guard and self-dev build reconciliation
+                // rely on. Awaiting registration first means a task that finishes
+                // instantly cannot race the insert below and leave a permanent
+                // phantom entry in the map.
+                let _ = registered_rx.await;
+                tasks_for_prune.write().await.remove(&task_id_clone);
+
+                // Read output preview for notification
+                let output_preview = tokio::fs::read_to_string(&output_path_clone)
+                    .await
+                    .map(|s| {
+                        if s.len() > 500 {
+                            format!("{}...", crate::util::truncate_str(&s, 500))
+                        } else {
+                            s
+                        }
+                    })
+                    .unwrap_or_default();
+
+                // Publish completion event to the bus
+                Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+                    task_id: task_id_clone,
+                    tool_name: tool_name_owned,
+                    display_name: display_name_owned,
+                    session_id: session_id_owned,
+                    status,
+                    exit_code,
+                    output_preview,
+                    output_file: output_path_clone,
+                    duration_secs,
+                    notify: notify_flag,
+                    wake: wake_flag,
+                }));
+
+                result
+            },
+        ));
 
         // Track the running task
         let running_task = RunningTask {

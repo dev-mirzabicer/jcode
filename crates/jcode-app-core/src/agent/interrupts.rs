@@ -189,6 +189,9 @@ impl Agent {
 
     /// Check if there are pending soft interrupts
     pub fn has_soft_interrupts(&self) -> bool {
+        if !crate::runtime_lifecycle::admission::input_allowed() {
+            return false;
+        }
         self.soft_interrupt_queue
             .lock()
             .map(|q| !q.is_empty())
@@ -197,6 +200,9 @@ impl Agent {
 
     /// Check if there's an urgent soft interrupt that should skip remaining tools
     pub fn has_urgent_interrupt(&self) -> bool {
+        if !crate::runtime_lifecycle::admission::input_allowed() {
+            return false;
+        }
         crate::primary_input::PrimaryInputStore::current()
             .pending(self.session_id())
             .is_ok_and(|pending| {
@@ -342,6 +348,19 @@ impl Agent {
     /// Differently authorized tasks remain queued for a later provider request so
     /// authority can neither leak across tasks nor be lost by mixed batching.
     pub(super) fn inject_soft_interrupts(&mut self) -> Vec<InjectedSoftInterrupt> {
+        match crate::runtime_lifecycle::admission::current_runtime() {
+            Ok(Some(runtime)) => runtime
+                .input_boundary(|| self.inject_soft_interrupts_admitted())
+                .unwrap_or_default(),
+            Ok(None) => self.inject_soft_interrupts_admitted(),
+            Err(error) => {
+                logging::warn(&format!("Input injection deferred: {error:#}"));
+                Vec::new()
+            }
+        }
+    }
+
+    fn inject_soft_interrupts_admitted(&mut self) -> Vec<InjectedSoftInterrupt> {
         if !self.finish_emergency_retry_audit(
             jcode_session_types::StoredContextEmergencyRetryOutcome::Succeeded,
         ) {
