@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ApiEvent {
+    RuntimeCapabilities {
+        #[serde(default)]
+        version: Option<u32>,
+    },
+    RuntimeControl {
+        response: Box<crate::RuntimeResponse>,
+    },
     CloseoutCapabilities {
         #[serde(default)]
         version: Option<u32>,

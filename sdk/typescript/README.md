@@ -589,3 +589,39 @@ Retain the request UUID and unchanged settings for safe retry. Placement and cwd
 are explicit, and session creation never implicitly provisions a clone. See
 [`docs/SERVER_ARCHITECTURE.md`](../../docs/SERVER_ARCHITECTURE.md) for request
 shape, lifecycle, staging and local versus hosted execution boundaries.
+
+
+### Reviewed runtime control
+
+Harness v1.11 exposes `runtime_lifecycle_v1`. `runtimeControl` separately probes
+native version 1 and validates the typed response kind, review/request IDs and
+operation revision. These administrative calls do not create or attach a Session.
+Connect to the intended existing bridge with `ensureRuntime: false` when inspecting
+or controlling a runtime, so connection setup is not an implicit start request.
+
+```ts
+const client = await JcodeClient.connect({socketPath: apiSocket, ensureRuntime: false});
+const review = await client.runtimeControl({action: "review", options: {
+  strategy: "finish_current", independent: "keep_supported", quiescence_timeout_seconds: 30,
+}});
+// Present the complete review and obtain the user's decision before Begin.
+console.log(review);
+```
+
+`RuntimeControlRequest` also includes `status`, `review_change`, `begin`, `inspect`,
+`cancel_wait`, `retry` and `force`. A `begin` uses the exact reviewed ID plus a
+caller-retained request UUID, not an automatic new UUID on retry. Acceptance is
+not completion: inspect the operation and distinguish Waiting, Stopping, Blocked,
+Stopped and Forced. Typed `kind: "error"` is a domain refusal, not successful
+shutdown. Transport loss remains uncertain; retain IDs and inspect/recover through
+the same owner, including the [offline CLI](../../docs/RUNTIME_CONTROL.md).
+Start and stopped-runtime inspection are CLI/service controls, not a second SDK
+state store. No SDK call autostarts a deliberately stopped runtime to deliver a
+notification. JavaScript rejects revisions outside its exact integer range before
+sending control, and rejects inexact numeric responses rather than rounding.
+
+Rust has equivalent `JcodeClient::runtime_control(RuntimeRequest)` and reexports
+`RuntimeRequest`, `RuntimeResponse`, `ShutdownOptions` and their result types.
+Both SDKs preserve complete review/operation data and share one correlation fixture
+with the native contracts. They do not infer user approval or quiescence from an
+Ack, prose, an absent socket or a successful test.

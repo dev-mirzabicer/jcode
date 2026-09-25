@@ -57,6 +57,10 @@ pub use jcode_harness_api::{
     AgentInfo, ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision,
     SessionInfo, TextMatch, api_socket_path,
 };
+pub use jcode_harness_api::{
+    IndependentTasks, RuntimeRequest, RuntimeResponse, RuntimeStatus, ShutdownOperation,
+    ShutdownOptions, ShutdownPhase, ShutdownReview, StopStrategy,
+};
 
 pub use jcode_harness_api::{
     CommandWorkflow, ReviewWorkflowKind, WorkflowLoopMode, WorkflowPromptRequest, WorkflowTodo,

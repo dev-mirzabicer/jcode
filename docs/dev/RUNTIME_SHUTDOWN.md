@@ -4,9 +4,11 @@ This is the C01 runtime backend. Unix `Server::run` installs its lifecycle befor
 ordinary background dispatch and client acceptance. Native authenticated clients
 can use `runtime_probe` and `runtime_control` without constructing a primary
 Session. The [narrow CLI](../RUNTIME_CONTROL.md) uses this protocol and the same
-durable owner for offline inspection. Harness/SDK adapters and final activated-runtime
-acceptance are still being integrated in WP-08. This document does not claim those clients,
-macOS service supervision, planned restart or crash-inference recovery are ready.
+durable owner for offline inspection. Harness v1.11 and both SDKs expose negotiated
+`runtime_lifecycle_v1` controls with logical reply correlation, without a provisional
+Session. Final activated-runtime and combined acceptance remain pending. This
+document does not claim macOS service supervision, planned restart or
+crash-inference recovery are ready.
 
 ## Ownership and control
 
@@ -70,8 +72,10 @@ replaying work. A new Start cannot use an old receipt to stop its replacement.
 External SIGTERM/temporary-server exits are not this reviewed contract. The Unix
 `server stop --force` process-group termination path is retired with an actionable
 migration refusal; `server stop` now produces a review. External-signal and supervised
-service lifecycle integration remains separately owned, not described as graceful
-quiescence by this backend guide.
+service lifecycle integration belongs to the subsequent WP-09/R34 service adapter,
+including its accepted graceful SIGTERM route. It is not implemented or described
+as graceful quiescence by this WP-08 reviewed-control backend. Bounded temporary
+test-host exits remain distinct from the ordinary persistent-runtime contract.
 Do not activate the complete runtime product before its required command path is
 available and verified.
 

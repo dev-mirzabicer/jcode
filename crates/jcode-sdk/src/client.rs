@@ -693,6 +693,39 @@ impl JcodeClient {
         }
     }
 
+    /// Reviewed runtime administration without creating or attaching a Session.
+    /// Preserve request/review IDs across uncertainty. A receipt is not quiescence.
+    pub fn runtime_control(
+        &self,
+        request: jcode_harness_api::RuntimeRequest,
+    ) -> Result<jcode_harness_api::RuntimeResponse> {
+        self.require_capability(jcode_harness_api::RUNTIME_LIFECYCLE_CAPABILITY)?;
+        if !matches!(
+            self.request_ok(ApiRequest::RuntimeProbe)?.event,
+            ApiEvent::RuntimeCapabilities { version: Some(1) }
+        ) {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Native reviewed runtime control v1 is unavailable",
+            ));
+        }
+        let expected = request.clone();
+        match self
+            .request_ok(ApiRequest::RuntimeControl {
+                request: Box::new(request),
+            })?
+            .event
+        {
+            ApiEvent::RuntimeControl { response } if expected.matches_response(&response) => {
+                Ok(*response)
+            }
+            _ => Err(Error::new(
+                ErrorKind::UnexpectedReply,
+                "Runtime response kind or logical identity mismatch",
+            )),
+        }
+    }
+
     /// Administrative closeout control. Keep caller request IDs across uncertain
     /// replies. An action receipt is not execution or removal completion.
     pub fn closeout(

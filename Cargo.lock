@@ -4618,6 +4618,7 @@ version = "0.1.0"
 dependencies = [
  "jcode-tool-types",
  "serde",
+ "serde_json",
  "uuid",
 ]
 

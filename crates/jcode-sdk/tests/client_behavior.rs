@@ -1348,3 +1348,77 @@ fn scoped_contexts_negotiate_review_and_validate_destination() {
         }
     }
 }
+
+#[test]
+fn runtime_sdk_negotiates_without_attachment_and_matches_every_control() {
+    use jcode_harness_api::{RuntimeRequest, RuntimeResponse};
+    let old = fake_harness_with_capabilities(vec![], |_, _| {
+        panic!("Unsupported runtime control reached transport")
+    });
+    assert_eq!(
+        old.runtime_control(RuntimeRequest::Status {})
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnsupportedCapability
+    );
+    for version in [None, Some(0), Some(2)] {
+        let client = fake_harness_with_capabilities(
+            vec!["runtime_lifecycle_v1".into()],
+            move |frame, writer| {
+                assert!(matches!(frame.request, ApiRequest::RuntimeProbe));
+                reply(frame, ApiEvent::RuntimeCapabilities { version }, writer);
+            },
+        );
+        assert_eq!(
+            client
+                .runtime_control(RuntimeRequest::Status {})
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnsupportedCapability
+        );
+    }
+    let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../jcode-workspace-types/src/runtime_correlation.json"
+    ))
+    .unwrap();
+    for case in cases {
+        // Malformed wire shapes are rejected by Harness deserialization itself.
+        let Ok(response) = serde_json::from_value::<RuntimeResponse>(case["response"].clone())
+        else {
+            continue;
+        };
+        let request: RuntimeRequest = serde_json::from_value(case["request"].clone()).unwrap();
+        let expected = request.clone();
+        let client = fake_harness_with_capabilities(
+            vec!["runtime_lifecycle_v1".into()],
+            move |frame, writer| match &frame.request {
+                ApiRequest::RuntimeProbe => reply(
+                    frame,
+                    ApiEvent::RuntimeCapabilities { version: Some(1) },
+                    writer,
+                ),
+                ApiRequest::RuntimeControl { request } => {
+                    assert_eq!(request.as_ref(), &expected);
+                    reply(
+                        frame,
+                        ApiEvent::RuntimeControl {
+                            response: Box::new(response.clone()),
+                        },
+                        writer,
+                    );
+                }
+                _ => panic!("Runtime controls must not create/attach a Session"),
+            },
+        );
+        let result = client.runtime_control(request);
+        assert_eq!(
+            result.is_ok(),
+            case["accepted"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
+        if let Err(error) = result {
+            assert_eq!(error.kind, ErrorKind::UnexpectedReply);
+        }
+    }
+}

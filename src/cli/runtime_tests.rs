@@ -326,3 +326,76 @@ fn runtime_client_rejects_wrong_namespace_before_sending_mutation() -> Result<()
         Ok(())
     })
 }
+
+#[test]
+fn runtime_client_rejects_foreign_logical_receipt_even_with_matching_transport_id() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let socket = sandbox.root().join("foreign-receipt.sock");
+        let namespace = local_store(&socket)?.namespace().to_owned();
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../crates/jcode-workspace-types/src/runtime_correlation.json"
+        ))?;
+        let case = cases
+            .into_iter()
+            .find(|case| case["name"] == "inspect foreign id")
+            .unwrap();
+        let request: RuntimeRequest = serde_json::from_value(case["request"].clone())?;
+        let listener = crate::transport::Listener::bind(&socket)?;
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (read, mut write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            let mut line = String::new();
+            read.read_line(&mut line).await?;
+            write
+                .write_all(
+                    (serde_json::to_string(&ServerEvent::RuntimeCapabilities {
+                        id: 1,
+                        version: Some(1),
+                    })? + "\n")
+                        .as_bytes(),
+                )
+                .await?;
+            line.clear();
+            read.read_line(&mut line).await?;
+            let status = RuntimeStatus {
+                namespace,
+                runtime: Some("fixture".into()),
+                reload_in_progress: false,
+                desired_stopped: false,
+                revision: 0,
+                operation: None,
+                work: vec![],
+            };
+            write
+                .write_all(
+                    (serde_json::to_string(&ServerEvent::RuntimeResponse {
+                        id: 2,
+                        response: Box::new(RuntimeResponse::Status(status)),
+                    })? + "\n")
+                        .as_bytes(),
+                )
+                .await?;
+            line.clear();
+            read.read_line(&mut line).await?;
+            let Request::RuntimeControl { id, .. } = serde_json::from_str(&line)? else {
+                anyhow::bail!("Expected control");
+            };
+            let response = serde_json::from_value(case["response"].clone())?;
+            write
+                .write_all(
+                    (serde_json::to_string(&ServerEvent::RuntimeResponse {
+                        id,
+                        response: Box::new(response),
+                    })? + "\n")
+                        .as_bytes(),
+                )
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        assert!(control(&socket, request).await.is_err());
+        peer.await??;
+        Ok(())
+    })
+}

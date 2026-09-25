@@ -20,7 +20,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--output-root', required=True, type=Path)
+    parser.add_argument('--sdk-bridge', type=Path)
+    parser.add_argument('--sdk-rust-probe', type=Path)
     args = parser.parse_args()
+    if (args.sdk_bridge is None) != (args.sdk_rust_probe is None):
+        parser.error('Both SDK fixture binaries are required')
     binary = args.binary.resolve(strict=True)
     args.output_root.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix='runtime-cli-', dir=args.output_root)).resolve()
@@ -93,6 +97,11 @@ def main():
         assert restarted['response']['value']['runtime'] != original
         assert not restarted['response']['value']['desired_stopped']
         assert invoke('runtime','inspect',operation,'--json')['response']['value']['phase'] == 'stopped'
+        if args.sdk_bridge:
+            sdk_env = env | {'JCODE_WP08_NATIVE_ROOT':str(root), 'JCODE_WP08_API_SOCKET':str(Path(ipc)/'api.sock'), 'JCODE_WP08_BINARY':str(binary), 'JCODE_WP08_BRIDGE':str(args.sdk_bridge.resolve(strict=True)), 'JCODE_WP08_RUST_PROBE':str(args.sdk_rust_probe.resolve(strict=True))}
+            sdk = subprocess.run(['node',str(Path(__file__).with_name('verify_runtime_sdk.mjs'))], env=sdk_env, cwd=root, capture_output=True, text=True, timeout=180)
+            (root/'sdk.log').write_text(sdk.stdout+sdk.stderr)
+            assert sdk.returncode == 0, (sdk.stdout,sdk.stderr)
         assert not list((home / '.jcode' / 'sessions').glob('*.json')), 'Administrative controls created a Session'
     except Exception as error:
         errors.append(repr(error))

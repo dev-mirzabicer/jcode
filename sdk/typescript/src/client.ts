@@ -8,6 +8,7 @@ import { NdjsonDecoder, encodeFrame } from "./framing.js";
 import { apiSocketPath, transportEndpoint } from "./sockets.js";
 import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
 import { HarnessError } from "./errors.js";
+import {matchesRuntimeResponse, validRuntimeRequest, type RuntimeControlRequest, type RuntimeControlResponse} from "./runtime-control.js";
 import {matchesCloseoutReply, type CloseoutRequest, type CloseoutReply} from "./closeout.js";
 import {
   assertRetryCount,
@@ -476,6 +477,18 @@ export class JcodeClient extends EventEmitter {
     const reply = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
     if (reply.ev !== "primary_control_capabilities" || (location === undefined ? reply.input_version !== 1 : reply.location_version !== 1 || (location && !reply.location_enabled))) throw new HarnessError("unsupported_capability", "Requested primary control is unsupported or staged");
     return reply.legacy_adoption_version ?? 0;
+  }
+
+  /** Reviewed runtime administration, independent of Session attachment. */
+  async runtimeControl(request: RuntimeControlRequest): Promise<RuntimeControlResponse> {
+    const expected = structuredClone(request);
+    if (!validRuntimeRequest(expected)) throw new HarnessError("invalid_request", "Invalid runtime control or inexact numeric revision");
+    if (!this.supports("runtime_lifecycle_v1")) throw new HarnessError("unsupported_capability", "Runtime control requires runtime_lifecycle_v1");
+    const capability = await this.expectReply({req:"runtime_probe"}, "runtime_capabilities");
+    if (capability.version !== 1) throw new HarnessError("unsupported_capability", "Native reviewed runtime control v1 is unavailable");
+    const response = await this.expectReply({req:"runtime_control",request:expected}, "runtime_control");
+    if (!matchesRuntimeResponse(expected,response.response)) throw new HarnessError("unexpected_reply", "Runtime response kind or logical identity mismatch");
+    return response.response;
   }
 
   /** Administrative control without Session creation. Retain request IDs on retry. */

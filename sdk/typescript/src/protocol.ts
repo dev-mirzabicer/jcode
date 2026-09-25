@@ -8,7 +8,9 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 10;
+export const API_VERSION_MINOR = 11;
+import type {RuntimeControlRequest, RuntimeControlResponse} from "./runtime-control.js";
+export type * from "./runtime-control.js";
 import type {CloseoutRequest, CloseoutReply} from "./closeout.js";
 export type * from "./closeout.js";
 
@@ -56,7 +58,7 @@ export interface ExecutionRun {
   state: ExecutionState; owner: string; input_path: string;
   result_path: string | null; output_path: string | null; output_bytes: number;
   complete: boolean; background: boolean; parent_id: string | null;
-  stop_cause: "human_cancellation" | "parent_foreground_cancellation" | "child_predecessor_failure" | "reload_quiescence" | "owner_crash" | null;
+  stop_cause: "human_cancellation" | "parent_foreground_cancellation" | "child_predecessor_failure" | "reload_quiescence" | "owner_crash" | "runtime_shutdown" | null;
   process_exit?: {code: number | null; signal: number | null; timed_out: boolean};
   progress?: {value: Record<string, unknown>; checkpoint: boolean; sequence: number};
 }
@@ -187,6 +189,8 @@ export type WorkflowPromptRequest =
   | { kind: "structured_correction"; schema: string; error_lines: string; previous_response: string };
 
 export type ApiRequest =
+  | {req: "runtime_probe"}
+  | {req: "runtime_control"; request: RuntimeControlRequest}
   | {req: "closeout_probe"}
   | {req: "closeout"; request: CloseoutRequest}
   | {req: "primary_control_probe"}
@@ -253,6 +257,8 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
+  | {ev: "runtime_capabilities"; version:number|null}
+  | {ev: "runtime_control"; response:RuntimeControlResponse}
   | {ev: "closeout_capabilities"; version: number | null}
   | {ev: "closeout"; reply: CloseoutReply}
   | {ev: "grant_carry_review"; review:GrantCarryReview}
@@ -408,6 +414,8 @@ export const KNOWN_EVENT_KINDS = [
   "session_inspection",
   "output_cleanup",
   "execution",
+  "runtime_capabilities",
+  "runtime_control",
   "closeout_capabilities",
   "closeout",
   "primary_control_capabilities",
@@ -465,6 +473,8 @@ export const KNOWN_REQUEST_KINDS = [
   "archive_session",
   "restore_session",
   "set_retention_policy",
+  "runtime_probe",
+  "runtime_control",
   "closeout_probe",
   "closeout",
   "primary_control_probe",

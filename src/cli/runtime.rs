@@ -72,6 +72,7 @@ impl NativeClient {
         })
     }
     async fn request(&mut self, request: RuntimeRequest) -> Result<RuntimeResponse> {
+        let expected = request.clone();
         self.sequence = self
             .sequence
             .checked_add(1)
@@ -84,7 +85,12 @@ impl NativeClient {
             },
         )
         .await?;
-        response(read_event(&mut self.read).await?, self.sequence)
+        let response = response(read_event(&mut self.read).await?, self.sequence)?;
+        ensure!(
+            expected.matches_response(&response),
+            "Runtime reply kind or logical identity does not match the request; inspect before retrying"
+        );
+        Ok(response)
     }
 }
 async fn write_request(write: &mut crate::transport::WriteHalf, request: Request) -> Result<()> {

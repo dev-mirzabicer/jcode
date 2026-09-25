@@ -116,3 +116,14 @@ and temporary-server lifecycle policies are not this reviewed Stop command.
 Final activated-runtime and full C01 client acceptance remain separately recorded.
 See [the backend guide](dev/RUNTIME_SHUTDOWN.md) for ownership, journal, namespace,
 failure and verification details.
+
+## Harness and SDK clients
+
+Harness v1.11 advertises `runtime_lifecycle_v1`. Rust `runtime_control` and
+TypeScript `runtimeControl` probe the native version before sending control and
+validate the returned review/request/operation identities, not just transport IDs.
+They require no Session attachment. Use `ensure_runtime: false` / `ensureRuntime:
+false` to connect for administration without provisioning a private instance.
+Their typed error responses remain domain refusals. Offline inspection and
+explicit Start use the CLI above, not an SDK-owned control-state copy. See the
+[SDK workflow](../sdk/typescript/README.md#reviewed-runtime-control).

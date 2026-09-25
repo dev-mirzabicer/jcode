@@ -40,6 +40,11 @@ pub use jcode_tool_types::inspection::{
     CAPABILITY as INSPECTION_CAPABILITY, CLEANUP_CAPABILITY, InspectionRequest, InspectionResponse,
     TranscriptRange,
 };
+pub use jcode_workspace_types::runtime::{
+    CAPABILITY as RUNTIME_LIFECYCLE_CAPABILITY, IndependentTasks, RuntimeRequest, RuntimeResponse,
+    RuntimeStatus, RuntimeWork, RuntimeWorkKind, ShutdownOperation, ShutdownOptions, ShutdownPhase,
+    ShutdownReview, ShutdownRevision, StopStrategy,
+};
 pub use jcode_workspace_types::{
     CloseoutAction, CloseoutActionRecord, CloseoutActionResult, CloseoutActionSpec,
     CloseoutAuthorization, CloseoutAuthorizationSource, CloseoutDecision, CloseoutDisposition,
@@ -66,7 +71,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 10;
+pub const API_VERSION_MINOR: u32 = 11;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

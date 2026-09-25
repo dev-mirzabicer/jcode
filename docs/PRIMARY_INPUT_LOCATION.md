@@ -90,8 +90,8 @@ envelope accepted and adds an inspectable receipt issue; a successful later
 commit clears that diagnostic. An exact pending retry after repair uses the same
 UUID. Acceptance, restoration, dispatch and completion remain separate facts.
 The native protocol is described in [reviewed runtime shutdown](dev/RUNTIME_SHUTDOWN.md).
-The [runtime CLI](RUNTIME_CONTROL.md) supplies its narrow human controls; SDK
-integration and final activated-runtime acceptance remain staged.
+The [runtime CLI](RUNTIME_CONTROL.md) supplies its narrow human controls; the Harness and both SDKs expose the same negotiated administrative contract.
+Final activated-runtime acceptance remains staged.
 
 ## Public clients
 

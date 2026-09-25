@@ -165,3 +165,96 @@ pub enum RuntimeResponse {
     Operation(ShutdownOperation),
     Error(crate::Issue),
 }
+
+impl RuntimeRequest {
+    /// Correlation only. This never grants authority or infers completion from
+    /// a transport acknowledgement. Begin replay may return later durable state.
+    pub fn matches_response(&self, response: &RuntimeResponse) -> bool {
+        match (self, response) {
+            (_, RuntimeResponse::Error(_)) => true,
+            (Self::Status {}, RuntimeResponse::Status(_)) => true,
+            (Self::Review { options }, RuntimeResponse::Review(review)) => {
+                &review.options == options && review.replaces.is_none()
+            }
+            (
+                Self::ReviewChange {
+                    operation,
+                    expected_revision,
+                    options,
+                },
+                RuntimeResponse::Review(review),
+            ) => {
+                &review.options == options
+                    && review.replaces.as_ref().is_some_and(|prior| {
+                        prior.operation == *operation && prior.revision == *expected_revision
+                    })
+            }
+            (Self::Begin { request, review }, RuntimeResponse::Operation(op)) => {
+                op.request == *request && op.review.id == *review
+            }
+            (Self::Inspect { operation }, RuntimeResponse::Operation(op)) => op.id == *operation,
+            (
+                Self::CancelWait {
+                    operation,
+                    expected_revision,
+                },
+                RuntimeResponse::Operation(op),
+            ) => {
+                op.id == *operation
+                    && expected_revision.checked_add(1) == Some(op.revision)
+                    && op.phase == ShutdownPhase::Cancelled
+            }
+            (
+                Self::Retry {
+                    operation,
+                    expected_revision,
+                },
+                RuntimeResponse::Operation(op),
+            ) => {
+                op.id == *operation
+                    && expected_revision.checked_add(1) == Some(op.revision)
+                    && op.phase == ShutdownPhase::Stopping
+                    && op.cancellation_closed
+            }
+            (
+                Self::Force {
+                    operation,
+                    expected_revision,
+                },
+                RuntimeResponse::Operation(op),
+            ) => {
+                op.id == *operation
+                    && expected_revision.checked_add(1) == Some(op.revision)
+                    && op.phase == ShutdownPhase::Stopping
+                    && op.cancellation_closed
+                    && op.force_requested
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Case {
+        name: String,
+        request: RuntimeRequest,
+        response: serde_json::Value,
+        accepted: bool,
+    }
+
+    #[test]
+    fn shared_runtime_correlation_matrix() {
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("runtime_correlation.json")).unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let accepted = serde_json::from_value::<RuntimeResponse>(case.response)
+                .is_ok_and(|response| case.request.matches_response(&response));
+            assert_eq!(accepted, case.accepted, "{}", case.name);
+        }
+    }
+}

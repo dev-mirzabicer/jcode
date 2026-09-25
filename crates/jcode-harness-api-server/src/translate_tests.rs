@@ -2036,3 +2036,70 @@ fn scoped_context_review_and_creation_keep_authority_and_reply_identity_separate
         );
     }
 }
+
+#[test]
+fn runtime_bridge_preserves_all_typed_controls_and_refuses_foreign_replies() {
+    let cases: Vec<Value> = serde_json::from_str(include_str!(
+        "../../jcode-workspace-types/src/runtime_correlation.json"
+    ))
+    .unwrap();
+    for case in cases {
+        let mut bridge = BridgeState::default();
+        let outbound = bridge.api_request_to_legacy(
+            &json!({"id":51,"req":"runtime_control","request":case["request"]}),
+        );
+        let [Outbound::Legacy(wire)] = outbound.as_slice() else {
+            panic!("{outbound:?}")
+        };
+        assert_eq!(wire["type"], "runtime_control");
+        assert!(bridge.session_id.is_none() && bridge.pending_attach.is_none());
+        assert!(
+            bridge
+                .legacy_event_to_api(&json!({"type":"ack","id":wire["id"]}))
+                .is_empty()
+        );
+        let reply = json!({"type":"runtime_response","id":wire["id"],"response":case["response"]});
+        let mut foreign = reply.clone();
+        foreign["id"] = json!(999999);
+        assert!(bridge.legacy_event_to_api(&foreign).is_empty());
+        let result = bridge.legacy_event_to_api(&reply);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].reply_to, Some(51));
+        assert_eq!(
+            matches!(result[0].event, ApiEvent::RuntimeControl { .. }),
+            case["accepted"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
+        assert!(bridge.legacy_event_to_api(&reply).is_empty());
+    }
+    let mut bridge = BridgeState::default();
+    for version in [Value::Null, json!(1), json!(2), json!("invalid")] {
+        let outbound = bridge.api_request_to_legacy(&json!({"id":52,"req":"runtime_probe"}));
+        let [Outbound::Legacy(wire)] = outbound.as_slice() else {
+            panic!()
+        };
+        assert_eq!(wire["type"], "runtime_probe");
+        let reply = bridge.legacy_event_to_api(
+            &json!({"type":"runtime_capabilities","id":wire["id"],"version":version}),
+        );
+        assert_eq!(reply.len(), 1);
+        assert_eq!(reply[0].reply_to, Some(52));
+        assert_eq!(
+            matches!(reply[0].event, ApiEvent::Error { .. }),
+            version.is_string()
+        );
+    }
+    for request in [
+        json!({"action":"begin","trusted":true}),
+        json!({"action":"status","force":true}),
+        json!({"action":"unknown"}),
+    ] {
+        assert!(
+            bridge
+                .api_request_to_legacy(&json!({"id":53,"req":"runtime_control","request":request}))
+                .iter()
+                .all(|item| !matches!(item, Outbound::Legacy(_)))
+        );
+    }
+}

@@ -152,6 +152,8 @@ struct ArchiveState {
 
 #[derive(Debug, Clone, PartialEq)]
 enum SimpleKind {
+    RuntimeProbe,
+    RuntimeControl(Box<jcode_harness_api::RuntimeRequest>),
     CloseoutProbe,
     Closeout(Box<jcode_harness_api::CloseoutRequest>),
     PrimaryLaunchProbe,
@@ -589,6 +591,35 @@ impl BridgeState {
                 ));
                 vec![Outbound::Legacy(
                     json!({"type":"workspace","id":id,"request":{"action":"permissions","request":{"action":"review_carry","session":session}}}),
+                )]
+            }
+            "runtime_probe" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::RuntimeProbe));
+                vec![Outbound::Legacy(json!({"type":"runtime_probe", "id":id}))]
+            }
+            "runtime_control" => {
+                let command = match serde_json::from_value::<jcode_harness_api::RuntimeRequest>(
+                    request["request"].clone(),
+                ) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid runtime control: {error}"),
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple.push((
+                    id,
+                    api_id,
+                    SimpleKind::RuntimeControl(Box::new(command.clone())),
+                ));
+                vec![Outbound::Legacy(
+                    json!({"type":"runtime_control", "id":id, "request":command}),
                 )]
             }
             "closeout_probe" => {
@@ -1480,6 +1511,56 @@ impl BridgeState {
                         active_skill: event["active_skill"].as_str().map(str::to_string),
                     },
                 )]
+            }
+            "runtime_capabilities" => {
+                let id = event["id"].as_u64().unwrap_or_default();
+                let Some(api_id) = self.take_simple(id, SimpleKind::RuntimeProbe) else {
+                    return vec![];
+                };
+                let reply = match event.get("version") {
+                    None | Some(Value::Null) => ApiEvent::RuntimeCapabilities { version: None },
+                    Some(value) => match value.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                        Some(version) => ApiEvent::RuntimeCapabilities {
+                            version: Some(version),
+                        },
+                        None => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Invalid runtime capability version".into(),
+                        },
+                    },
+                };
+                vec![ServerFrame::reply(api_id, reply)]
+            }
+            "runtime_response" => {
+                let id = event["id"].as_u64().unwrap_or_default();
+                let Some(index) = self.pending_simple.iter().position(|(legacy, _, kind)| {
+                    *legacy == id && matches!(kind, SimpleKind::RuntimeControl(_))
+                }) else {
+                    return vec![];
+                };
+                let (_, api_id, SimpleKind::RuntimeControl(expected)) =
+                    self.pending_simple.remove(index)
+                else {
+                    unreachable!()
+                };
+                let reply = match serde_json::from_value::<jcode_harness_api::RuntimeResponse>(
+                    event["response"].clone(),
+                ) {
+                    Ok(response) if expected.matches_response(&response) => {
+                        ApiEvent::RuntimeControl {
+                            response: Box::new(response),
+                        }
+                    }
+                    Ok(_) => ApiEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: "Runtime response kind or logical identity mismatch".into(),
+                    },
+                    Err(error) => ApiEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("Invalid runtime response: {error}"),
+                    },
+                };
+                vec![ServerFrame::reply(api_id, reply)]
             }
             "workspace_capabilities" => {
                 let id = event["id"].as_u64().unwrap_or_default();

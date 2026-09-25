@@ -35,6 +35,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("create_session", "createSession"),
     cap("launch_primary", "launchPrimary"),
     cap("closeout", "closeout"),
+    cap("runtime_control", "runtimeControl"),
     cap("submit_primary_input", "submitPrimaryInput"),
     cap("inspect_primary_input", "inspectPrimaryInput"),
     cap("read_primary_input", "readPrimaryInput"),
