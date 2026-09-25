@@ -214,6 +214,11 @@ contract; runtime accounting does not create a second draft store or persistence
 guarantee. Public runtime controls remain separately staged with their daemon/client
 integration.
 
+Short apply, revert, reapply, emergency-policy and curator-default mutations also
+retain admission through their existing atomic persistence boundary. A shutdown
+rejection does not consume a ready draft or change authoritative source, projection,
+or frozen instructions. History and draft inspection remain separate read paths.
+
 ### One task per call
 
 Each semantic task is isolated:

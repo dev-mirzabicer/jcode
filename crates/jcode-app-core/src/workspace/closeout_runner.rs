@@ -54,10 +54,12 @@ async fn dispatch_at(
             CloseoutRequest::Execution { request, control } => {
                 execution(service, session_root, request, control).await
             }
-            request => tokio::task::spawn_blocking(move || immediate(&service, &client, request))
-                .await
-                .map_err(problem)
-                .and_then(|value| value),
+            request => crate::runtime_lifecycle::admission::spawn_blocking(move || {
+                immediate(&service, &client, request)
+            })
+            .await
+            .map_err(problem)
+            .and_then(|value| value),
         };
         match result {
             Ok(value) => WorkspaceResponse::Closeout(Box::new(value)),
@@ -72,7 +74,27 @@ fn immediate(
     client: &WorkspaceClientAuthority,
     request: CloseoutRequest,
 ) -> Result<CloseoutResponse> {
+    if matches!(&request, CloseoutRequest::Revoke { .. }) {
+        return crate::runtime_lifecycle::admission::control(|| {
+            immediate_admitted(service, client, request)
+        })
+        .map_err(problem)?;
+    }
+    immediate_admitted(service, client, request)
+}
+
+#[cfg(target_os = "macos")]
+fn immediate_admitted(
+    service: &WorkspaceService,
+    client: &WorkspaceClientAuthority,
+    request: CloseoutRequest,
+) -> Result<CloseoutResponse> {
     use CloseoutResponse as Response;
+    let _permit = if matches!(&request, CloseoutRequest::Begin { .. }) {
+        mutation_permit("closeout-authorization")?
+    } else {
+        None
+    };
     match request {
         CloseoutRequest::Begin {
             request,
@@ -134,11 +156,28 @@ async fn execute(
     request: RequestId,
     spec: CloseoutActionSpec,
 ) -> Result<CloseoutResponse> {
+    let permit = mutation_permit("closeout-action")?;
+    crate::runtime_lifecycle::admission::scope(
+        permit,
+        execute_admitted(service, session_root, client, request, spec),
+    )
+    .await
+}
+
+#[cfg(target_os = "macos")]
+async fn execute_admitted(
+    service: WorkspaceService,
+    session_root: PathBuf,
+    client: WorkspaceClientAuthority,
+    request: RequestId,
+    spec: CloseoutActionSpec,
+) -> Result<CloseoutResponse> {
     let prepare = service.clone();
-    let record =
-        tokio::task::spawn_blocking(move || prepare.admit_closeout_action(&client, request, spec))
-            .await
-            .map_err(problem)??;
+    let record = crate::runtime_lifecycle::admission::spawn_blocking(move || {
+        prepare.admit_closeout_action(&client, request, spec)
+    })
+    .await
+    .map_err(problem)??;
     if record.result.is_some() || record.issue.is_some() {
         return Ok(CloseoutResponse::Action(Box::new(record)));
     }
@@ -173,7 +212,7 @@ async fn execute(
         Box::new(move |context| {
             Box::pin(async move {
                 let handle = tokio::runtime::Handle::current();
-                tokio::task::spawn_blocking(move || -> anyhow::Result<ToolOutput> {
+                crate::runtime_lifecycle::admission::spawn_blocking(move || -> anyhow::Result<ToolOutput> {
                     let capture = context.invocation.capture.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("Closeout producer has no retained capture")
                     })?;
@@ -219,10 +258,12 @@ async fn execute(
             record.run_id
         )));
     }
-    tokio::task::spawn_blocking(move || service.inspect_closeout_action(request))
-        .await
-        .map_err(problem)?
-        .map(|v| CloseoutResponse::Action(Box::new(v)))
+    crate::runtime_lifecycle::admission::spawn_blocking(move || {
+        service.inspect_closeout_action(request)
+    })
+    .await
+    .map_err(problem)?
+    .map(|v| CloseoutResponse::Action(Box::new(v)))
 }
 
 #[cfg(target_os = "macos")]
@@ -237,7 +278,7 @@ async fn execution(
         _ => return Err(Issue {code:IssueCode::UnsupportedCapability, detail:"Closeout supports exact output/status and cooperative Stop, not unscoped listing, force or detached command handoff".into()}),
     };
     let source = root.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    crate::runtime_lifecycle::admission::spawn_blocking(move || -> Result<()> {
         let action = service.inspect_closeout_action(request)?;
         if action.run_id != id {
             return Err(Issue {

@@ -71,6 +71,7 @@ impl ContextTransactionService {
         let mut agent = agent
             .try_lock()
             .map_err(|_| ContextServiceError::SessionBusy)?;
+        let _runtime = super::admit_mutation(Some(agent.session_id().into()))?;
         let previous_state = agent.context_view_state().clone();
         let transaction_index = transaction_index(&previous_state, transaction_id)?;
         if !previous_state.transactions[transaction_index].is_active() {
@@ -114,6 +115,7 @@ impl ContextTransactionService {
         let mut agent = agent
             .try_lock()
             .map_err(|_| ContextServiceError::SessionBusy)?;
+        let _runtime = super::admit_mutation(Some(agent.session_id().into()))?;
         let previous_state = agent.context_view_state().clone();
         let transaction_index = transaction_index(&previous_state, transaction_id)?;
         if previous_state.transactions[transaction_index].is_active() {
@@ -202,6 +204,7 @@ impl ContextTransactionService {
         if processing {
             return Err(ContextServiceError::SessionBusy);
         }
+        let _runtime = super::admit_mutation(Some(session.id.clone()))?;
         let previous_state = session.context_view.clone();
         let previous_provider_session_id = session.provider_session_id.clone();
         let transaction_index = transaction_index(&previous_state, transaction_id)?;

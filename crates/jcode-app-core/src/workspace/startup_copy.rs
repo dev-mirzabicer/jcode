@@ -46,6 +46,7 @@ fn commit(
     client: &str,
     coordinator: &crate::server::startup_context::StartupContextCoordinator,
 ) -> Result<StartupCopyRecord> {
+    let _permit = mutation_permit("startup-copy")?;
     let intent = service.reserve_startup_copy(request, review)?;
     if intent.record.state == StartupCopyState::Complete {
         return service.finish_startup_copy(request);

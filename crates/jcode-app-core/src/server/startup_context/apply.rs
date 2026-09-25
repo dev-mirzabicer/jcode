@@ -151,7 +151,7 @@ impl StartupContextCoordinator {
     ) -> Result<StartupContextSelectionPreview, StartupContextFailure> {
         validate_wire_selection(&selection, StartupContextOperation::PreviewSelection)?;
         let coordinator = self.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::runtime_lifecycle::admission::spawn_blocking(move || {
             let validated = coordinator.validate_apply_selection_sync(
                 &request,
                 &selection,
@@ -176,6 +176,48 @@ impl StartupContextCoordinator {
     }
 
     pub(in crate::server) async fn apply_selection(
+        &self,
+        request: ApplySelectionRequest,
+        agent: Arc<Mutex<Agent>>,
+        busy_hint: bool,
+    ) -> Result<StartupContextApplyStatus, StartupContextFailure> {
+        let permit = match crate::runtime_lifecycle::admission::preparation(
+            "startup-apply",
+            Some(request.lease.owner_session_id.clone()),
+        ) {
+            Ok(permit) => permit,
+            Err(error) => {
+                validate_operation_id(
+                    &request.operation_id,
+                    StartupContextOperation::ApplySelection,
+                )?;
+                let fingerprint = wire_apply_request_fingerprint(
+                    &request.lease.owner_session_id,
+                    request.lease.expected_plan_revision.unwrap_or_default(),
+                    &request.selection,
+                    request.save_project_default,
+                )?;
+                if let Ok(record) = self.load_apply_record(&request.operation_id)
+                    && record.matches_wire_request(&request.lease.owner_session_id, &fingerprint)
+                {
+                    return Ok(record.status());
+                }
+                return Err(failure(
+                    StartupContextOperation::ApplySelection,
+                    StartupContextFailureKind::OperationConflict,
+                    format!("Runtime did not admit Startup Context apply: {error:#}"),
+                    true,
+                ));
+            }
+        };
+        crate::runtime_lifecycle::admission::scope(
+            permit,
+            self.apply_selection_admitted(request, agent, busy_hint),
+        )
+        .await
+    }
+
+    async fn apply_selection_admitted(
         &self,
         request: ApplySelectionRequest,
         agent: Arc<Mutex<Agent>>,
@@ -269,7 +311,7 @@ impl StartupContextCoordinator {
             let selection = request.selection.clone();
             let save_project_default = request.save_project_default;
             Some(
-                tokio::task::spawn_blocking(move || {
+                crate::runtime_lifecycle::admission::spawn_blocking(move || {
                     coordinator.validate_apply_selection_sync(
                         &lease,
                         &selection,
@@ -384,7 +426,7 @@ impl StartupContextCoordinator {
         };
         if record.prepared_session.is_none() {
             let coordinator = self.clone();
-            record = tokio::task::spawn_blocking(move || {
+            record = crate::runtime_lifecycle::admission::spawn_blocking(move || {
                 coordinator.prepare_record_for_session(record, &session_snapshot)
             })
             .await
@@ -419,6 +461,24 @@ impl StartupContextCoordinator {
     }
 
     pub(in crate::server) fn cancel_apply(
+        &self,
+        lease: LeaseRequest,
+        operation_id: &str,
+    ) -> Result<StartupContextApplyStatus, StartupContextFailure> {
+        crate::runtime_lifecycle::admission::control(|| {
+            self.cancel_apply_admitted(lease, operation_id)
+        })
+        .map_err(|error| {
+            failure(
+                StartupContextOperation::CancelApply,
+                StartupContextFailureKind::OperationConflict,
+                error.to_string(),
+                true,
+            )
+        })?
+    }
+
+    fn cancel_apply_admitted(
         &self,
         lease: LeaseRequest,
         operation_id: &str,
@@ -501,6 +561,20 @@ impl StartupContextCoordinator {
         &self,
         agent: &mut Agent,
     ) -> Vec<StartupContextApplyStatus> {
+        let Ok(permit) = crate::runtime_lifecycle::admission::preparation(
+            "startup-drain",
+            Some(agent.session_id().into()),
+        ) else {
+            // Keep the original durable intent for Cancel/Start and its normal
+            // next idle boundary. A deferred apply is not a canceled apply.
+            return Vec::new();
+        };
+        crate::runtime_lifecycle::admission::sync_scope(permit, || {
+            self.drain_pending_admitted(agent)
+        })
+    }
+
+    fn drain_pending_admitted(&self, agent: &mut Agent) -> Vec<StartupContextApplyStatus> {
         let session_id = agent.session_id().to_string();
         let mut results = Vec::new();
         for operation_id in self.pending_operation_ids_for_session(&session_id) {

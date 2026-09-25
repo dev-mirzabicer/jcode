@@ -17,6 +17,7 @@ enum Mode {
     Running,
     Draining,
     Stopping,
+    Sealed,
 }
 
 struct State {
@@ -87,6 +88,51 @@ impl Drop for Permit {
 }
 
 impl RuntimeAdmission {
+    /// Only short existing-work control transactions use this boundary. It is
+    /// not permission to launch a producer while the runtime is draining.
+    pub fn control_boundary<T>(&self, control: impl FnOnce() -> T) -> Result<T> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            state.mode != Mode::Sealed,
+            "Runtime Stop is already committed"
+        );
+        let result = control();
+        drop(state);
+        Ok(result)
+    }
+
+    pub fn complete(
+        &self,
+        owner: &RuntimeStopOwner,
+        operation: OperationId,
+        expected: Revision,
+    ) -> Result<ShutdownOperation> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            state.mode == Mode::Stopping && state.work.is_empty(),
+            "Runtime still has admitted work"
+        );
+        let result = owner.complete(operation, expected);
+        self.reconcile(&mut state, owner)?;
+        result
+    }
+
+    pub fn confirm_stopped(&self, owner: &RuntimeStopOwner, operation: OperationId) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(state.work.is_empty(), "Runtime still has admitted work");
+        let result = owner.confirm_stopped(operation);
+        self.reconcile(&mut state, owner)?;
+        result
+    }
     pub fn register(root: &Path, identity: &str) -> Result<RuntimeRegistration> {
         let root = root.canonicalize()?;
         let mut runtimes = RUNTIMES
@@ -324,6 +370,7 @@ impl RuntimeAdmission {
         );
         state.mode = match status.operation.map(|op| op.phase) {
             Some(ShutdownPhase::WaitingForCurrent) => Mode::Draining,
+            Some(ShutdownPhase::Stopped) => Mode::Sealed,
             _ if !status.desired_stopped => Mode::Running,
             _ => Mode::Stopping,
         };
@@ -372,6 +419,13 @@ pub fn preparation(label: &str, session: Option<String>) -> Result<Option<WorkPe
             )
         })
         .transpose()
+}
+
+pub fn control<T>(work: impl FnOnce() -> T) -> Result<T> {
+    match current_runtime()? {
+        Some(runtime) => runtime.control_boundary(work),
+        None => Ok(work()),
+    }
 }
 
 pub fn sync_scope<T>(permit: Option<WorkPermit>, work: impl FnOnce() -> T) -> T {

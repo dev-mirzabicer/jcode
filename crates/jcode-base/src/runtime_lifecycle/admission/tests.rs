@@ -1,6 +1,42 @@
 use super::*;
 use crate::runtime_lifecycle::RuntimeStopStore;
 
+#[test]
+fn final_stop_serializes_with_control_and_seals_later_writes() -> Result<()> {
+    let (_root, owner, registration) = fixture()?;
+    let gate = registration.admission().clone();
+    let review = gate.review(&owner, options(StopStrategy::Interrupt), Vec::new())?;
+    let operation = gate.begin(&owner, RequestId::new(), review.id, Vec::new())?;
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    std::thread::scope(|threads| -> Result<()> {
+        let control_gate = gate.clone();
+        let control = threads.spawn(move || {
+            control_gate.control_boundary(|| {
+                entered.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            })
+        });
+        ready.recv()?;
+        assert!(gate.state.try_lock().is_err());
+        let complete = threads.spawn(|| gate.complete(&owner, operation.id, operation.revision));
+        assert_eq!(owner.inspect(operation.id)?.phase, ShutdownPhase::Stopping);
+        release.send(())?;
+        control.join().unwrap()?;
+        assert_eq!(complete.join().unwrap()?.phase, ShutdownPhase::Stopped);
+        Ok(())
+    })?;
+    let called = std::sync::atomic::AtomicBool::new(false);
+    assert!(
+        gate.control_boundary(|| called.store(true, std::sync::atomic::Ordering::SeqCst))
+            .is_err()
+    );
+    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    gate.confirm_stopped(&owner, operation.id)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn interrupted_async_preparation_retains_its_actual_blocking_descendant() -> Result<()> {
     let (_root, owner, registration) = fixture()?;

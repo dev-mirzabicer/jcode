@@ -131,6 +131,7 @@ impl ContextTransactionService {
         if session.context_view.emergency_policy == policy {
             return Ok((session_id, policy));
         }
+        let _runtime = super::admit_mutation(Some(session_id.clone()))?;
         let previous_state = session.context_view.clone();
         session.context_view.emergency_policy = policy.clone();
         if let Err(error) = self.direct_session_persistence.persist(session) {
@@ -153,6 +154,7 @@ impl ContextTransactionService {
             return Err(ContextServiceError::EmptyRequest);
         }
         validate_unattended_emergency_transaction(&authorization, &operations, &emergency_audit)?;
+        let _runtime = super::admit_mutation(Some(agent.session_id().into()))?;
         let previous_state = agent.context_view_state().clone();
         let revision = previous_state
             .revision
@@ -205,6 +207,7 @@ impl ContextTransactionService {
         if agent.context_view_state().emergency_policy == policy {
             return Ok((session_id, policy));
         }
+        let _runtime = super::admit_mutation(Some(session_id.clone()))?;
         let previous_state = agent.context_view_state().clone();
         let mut proposed_state = previous_state.clone();
         proposed_state.emergency_policy = policy.clone();
@@ -233,6 +236,7 @@ impl ContextTransactionService {
         let mut agent = agent
             .try_lock()
             .map_err(|_| ContextServiceError::SessionBusy)?;
+        let _runtime = super::admit_mutation(Some(agent.session_id().into()))?;
         let draft = self.reserve_ready_draft(draft_id, agent.session_id())?;
 
         if let Err(error) = agent.validate_active_agent_profile() {
@@ -328,6 +332,7 @@ impl ContextTransactionService {
         if processing {
             return Err(ContextServiceError::SessionBusy);
         }
+        let _runtime = super::admit_mutation(Some(session.id.clone()))?;
         let draft = self.reserve_ready_draft(draft_id, &session.id)?;
         let selected_distillations =
             match selected_distillation_operations(&draft, selected_distillation_ids.as_deref()) {

@@ -1161,6 +1161,17 @@ async fn fresh_shared_subscribe_activates_explicit_agent_before_publication() {
 async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_session() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();
+    use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+    use crate::workspace::{RequestId, runtime::*};
+    let root = crate::storage::jcode_dir().unwrap();
+    let owner = RuntimeStopStore::new(
+        &crate::storage::durable_state_dir(),
+        &root.join("creation.sock"),
+    )
+    .unwrap()
+    .claim()
+    .unwrap();
+    let registration = RuntimeAdmission::register(&root, owner.identity()).unwrap();
     let first_project = tempfile::tempdir().unwrap();
     let second_project = tempfile::tempdir().unwrap();
     let (server_stream, client_stream) = crate::transport::stream_pair().unwrap();
@@ -1582,6 +1593,40 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
         .next()
         .unwrap()
         .session_id = second_id;
+    let before_stop = artifacts();
+    let count = sessions.read().await.len();
+    let review = registration
+        .admission()
+        .review(
+            &owner,
+            ShutdownOptions {
+                strategy: StopStrategy::FinishCurrent,
+                independent: IndependentTasks::Stop,
+                quiescence_timeout_seconds: 5,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+    let operation = registration
+        .admission()
+        .begin(&owner, RequestId::new(), review.id, Vec::new())
+        .unwrap();
+    let fenced = exchange(
+        &mut read,
+        &mut write,
+        create(6, first_project.path(), "global:jcode"),
+    )
+    .await;
+    assert!(matches!(
+        fenced.last(),
+        Some(ServerEvent::Error { id: 6, .. })
+    ));
+    assert_eq!(sessions.read().await.len(), count);
+    assert_eq!(artifacts(), before_stop);
+    registration
+        .admission()
+        .cancel_wait(&owner, operation.id, operation.revision)
+        .unwrap();
     drop(write);
     server.await.unwrap().unwrap();
     assert!(connections.read().await.is_empty());

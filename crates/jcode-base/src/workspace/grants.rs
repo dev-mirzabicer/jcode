@@ -404,6 +404,13 @@ impl WorkspaceService {
         Ok(review)
     }
 
+    pub fn inspect_grant_review(&self, id: ReviewId) -> Result<GrantReview> {
+        let _lease = self.lease(false)?;
+        let connection = self.connection()?;
+        let prepared: PreparedGrant = read_review(&connection, id, "grant")?;
+        Ok(prepared.review)
+    }
+
     pub fn apply_grant_change(
         &self,
         client: &WorkspaceClientAuthority,

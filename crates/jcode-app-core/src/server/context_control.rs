@@ -186,6 +186,7 @@ pub(super) fn handle_save_context_curator_default(
         if processing {
             return Err(ContextServiceError::SessionBusy);
         }
+        let _runtime = crate::context::admit_mutation(None)?;
         crate::context::validate_context_curator_selection(&selection)?;
         let config = crate::config::ContextCuratorConfig {
             provider: selection.provider.clone(),

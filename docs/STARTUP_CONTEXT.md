@@ -245,6 +245,19 @@ Queued, applying, recovery-required, succeeded, failed, and canceled operations 
 inspectable. Closing the visual editor releases its lease but does not cancel a durable
 operation unless the user explicitly requests cancellation while it is still cancelable.
 
+### Runtime shutdown ownership
+
+With registered runtime-shutdown ownership, capture and commit hold their actual
+preparation lifetime, including blocking workers. New apply requests are refused
+while admission is fenced. Exact retries of an accepted operation remain
+inspectable and return its existing status. A queued apply that cannot start keeps
+its durable selection and receipt rather than becoming canceled or capturing
+stale bytes. It can drain at its normal idle boundary after admission returns.
+An already-admitted turn may finish its queued startup work during finish-current
+shutdown. Explicit queued-apply cancellation remains available until final Stop
+publication and is serialized with that publication. Public runtime controls
+remain staged with the daemon/client integration.
+
 ## Later file changes
 
 Before each later real user turn, Jcode observes every captured file under the same path,

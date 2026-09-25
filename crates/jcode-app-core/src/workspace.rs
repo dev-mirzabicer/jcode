@@ -3,6 +3,8 @@
 pub use jcode_base::workspace::*;
 mod clone_runner;
 mod closeout_runner;
+#[cfg(test)]
+mod runtime_tests;
 mod startup_copy;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_support;
@@ -46,6 +48,104 @@ pub(crate) async fn dispatch(
     }
 }
 pub fn dispatch_with(
+    service: &WorkspaceService,
+    request: WorkspaceRequest,
+    client: &WorkspaceClientAuthority,
+) -> WorkspaceResponse {
+    let revocation = match &request {
+        WorkspaceRequest::Permissions {
+            request:
+                PermissionRequest::Review {
+                    change: GrantChange::Revoke { .. },
+                    ..
+                },
+        } => true,
+        WorkspaceRequest::Permissions {
+            request: PermissionRequest::Apply { review, .. },
+        } => match service.inspect_grant_review(*review) {
+            Ok(review) => matches!(review.change, GrantChange::Revoke { .. }),
+            Err(error) => return WorkspaceResponse::Error(error),
+        },
+        _ => false,
+    };
+    if revocation {
+        return crate::runtime_lifecycle::admission::control(|| {
+            if let WorkspaceRequest::Permissions {
+                request: PermissionRequest::Apply { review, .. },
+            } = &request
+            {
+                match service.inspect_grant_review(*review) {
+                    Ok(review) if matches!(review.change, GrantChange::Revoke { .. }) => {}
+                    Ok(_) => {
+                        return WorkspaceResponse::Error(Issue {
+                            code: IssueCode::Conflict,
+                            detail: "Grant review changed before revocation".into(),
+                        });
+                    }
+                    Err(error) => return WorkspaceResponse::Error(error),
+                }
+            }
+            dispatch_admitted(service, request, client)
+        })
+        .unwrap_or_else(|error| {
+            WorkspaceResponse::Error(Issue {
+                code: IssueCode::Busy,
+                detail: error.to_string(),
+            })
+        });
+    }
+    if matches!(&request, WorkspaceRequest::CancelClone { .. }) {
+        return crate::runtime_lifecycle::admission::control(|| {
+            dispatch_admitted(service, request, client)
+        })
+        .unwrap_or_else(|error| {
+            WorkspaceResponse::Error(Issue {
+                code: IssueCode::Busy,
+                detail: error.to_string(),
+            })
+        });
+    }
+    let read_or_cancel = matches!(
+        &request,
+        WorkspaceRequest::Status {}
+            | WorkspaceRequest::Volumes {}
+            | WorkspaceRequest::List { .. }
+            | WorkspaceRequest::Inspect { .. }
+            | WorkspaceRequest::InspectReceipt { .. }
+            | WorkspaceRequest::Sessions { .. }
+            | WorkspaceRequest::Snapshots {}
+            | WorkspaceRequest::InspectClone { .. }
+            | WorkspaceRequest::InspectRebind { .. }
+            | WorkspaceRequest::InspectStartupCopy { .. }
+            | WorkspaceRequest::CancelClone { .. }
+    ) || matches!(&request, WorkspaceRequest::Permissions { request } if matches!(request,
+        PermissionRequest::ImportedGrants { .. } | PermissionRequest::ContextScopeStatus { .. } |
+        PermissionRequest::Scope { .. } | PermissionRequest::Grant { .. } |
+        PermissionRequest::Proposal { .. } | PermissionRequest::List { .. }
+    ));
+    let permit = if read_or_cancel {
+        None
+    } else {
+        match mutation_permit("workspace") {
+            Ok(permit) => permit,
+            Err(error) => return WorkspaceResponse::Error(error),
+        }
+    };
+    crate::runtime_lifecycle::admission::sync_scope(permit, || {
+        dispatch_admitted(service, request, client)
+    })
+}
+
+pub(crate) fn mutation_permit(
+    label: &str,
+) -> Result<Option<crate::runtime_lifecycle::admission::WorkPermit>> {
+    crate::runtime_lifecycle::admission::preparation(label, None).map_err(|error| Issue {
+        code: IssueCode::Busy,
+        detail: format!("Runtime did not admit workspace mutation: {error:#}"),
+    })
+}
+
+fn dispatch_admitted(
     service: &WorkspaceService,
     request: WorkspaceRequest,
     client: &WorkspaceClientAuthority,

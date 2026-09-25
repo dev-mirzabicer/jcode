@@ -229,7 +229,9 @@ impl RuntimeLifecycle {
                             && self.registration.admission().work()?.is_empty(),
                         "Stopped receipt has outstanding runtime work"
                     );
-                    self.owner.confirm_stopped(operation.id)?;
+                    self.registration
+                        .admission()
+                        .confirm_stopped(&self.owner, operation.id)?;
                     self.stopped.send_replace(Some(operation.id));
                     return Ok(());
                 }
@@ -299,7 +301,11 @@ impl RuntimeLifecycle {
                                 self.registration.admission().work()?.is_empty(),
                                 "Admitted work remains after quiescence"
                             );
-                            let completed = self.owner.complete(operation.id, observed.revision)?;
+                            let completed = self.registration.admission().complete(
+                                &self.owner,
+                                operation.id,
+                                observed.revision,
+                            )?;
                             self.stopped.send_replace(Some(completed.id));
                             return Ok(());
                         }

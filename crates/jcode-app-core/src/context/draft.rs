@@ -5705,6 +5705,114 @@ mod orchestration_tests {
         })
     }
 
+    #[test]
+    fn runtime_fence_preserves_ready_apply_and_reversible_history() -> anyhow::Result<()> {
+        use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+        use crate::workspace::{RequestId, runtime::*};
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        tokio::runtime::Runtime::new()?.block_on(async {
+            let provider = DraftProvider::new();
+            let agent = test_agent(&provider);
+            let (service, _) = test_service(ContextServiceLimits::default());
+            let (draft, _) = ready_draft(&service, agent.clone()).await;
+            let owner = RuntimeStopStore::new(
+                &crate::storage::durable_state_dir(),
+                &home.root().join("context-mutation.sock"),
+            )?
+            .claim()?;
+            let registration = RuntimeAdmission::register(home.root(), owner.identity())?;
+            let begin = || -> anyhow::Result<_> {
+                let review = registration.admission().review(
+                    &owner,
+                    ShutdownOptions {
+                        strategy: StopStrategy::FinishCurrent,
+                        independent: IndependentTasks::Stop,
+                        quiescence_timeout_seconds: 5,
+                    },
+                    Vec::new(),
+                )?;
+                registration
+                    .admission()
+                    .begin(&owner, RequestId::new(), review.id, Vec::new())
+            };
+            let before = serde_json::to_vec(agent.lock().await.messages())?;
+            for action in [0, 1, 2] {
+                let operation = begin()?;
+                let (mut session, route, concrete) = {
+                    let guard = agent.lock().await;
+                    (
+                        guard.startup_context_session().clone(),
+                        guard.context_route_identity(),
+                        guard.provider_handle(),
+                    )
+                };
+                let snapshot = serde_json::to_vec(&session)?;
+                let (hosted, direct) = match action {
+                    0 => (
+                        service.apply_draft(&agent, &draft, None, false),
+                        service.apply_draft_to_session(
+                            &mut session,
+                            concrete.as_ref(),
+                            &route,
+                            None,
+                            &draft,
+                            None,
+                            false,
+                        ),
+                    ),
+                    1 => (
+                        service.revert_transaction(&agent, &draft, false),
+                        service.revert_transaction_in_session(
+                            &mut session,
+                            concrete.as_ref(),
+                            &route,
+                            None,
+                            &draft,
+                            false,
+                        ),
+                    ),
+                    _ => (
+                        service.reapply_transaction(&agent, &draft, false),
+                        service.reapply_transaction_in_session(
+                            &mut session,
+                            concrete.as_ref(),
+                            &route,
+                            None,
+                            &draft,
+                            false,
+                        ),
+                    ),
+                };
+                assert!(matches!(hosted, Err(ContextServiceError::Runtime(_))));
+                assert!(matches!(direct, Err(ContextServiceError::Runtime(_))));
+                assert_eq!(serde_json::to_vec(&session)?, snapshot);
+                if action == 0 {
+                    assert!(matches!(
+                        service.draft_status(&draft)?,
+                        ContextDraftStatus::Ready { .. }
+                    ));
+                }
+                registration
+                    .admission()
+                    .cancel_wait(&owner, operation.id, operation.revision)?;
+                match action {
+                    0 => {
+                        service.apply_draft(&agent, &draft, None, false)?;
+                    }
+                    1 => {
+                        service.revert_transaction(&agent, &draft, false)?;
+                    }
+                    _ => {
+                        service.reapply_transaction(&agent, &draft, false)?;
+                    }
+                }
+            }
+            assert_eq!(serde_json::to_vec(agent.lock().await.messages())?, before);
+            assert!(registration.admission().work()?.is_empty());
+            Ok(())
+        })
+    }
+
     #[tokio::test]
     async fn cancellation_after_generation_before_ready_storage_is_terminal_and_bounded() {
         let provider = DraftProvider::new();

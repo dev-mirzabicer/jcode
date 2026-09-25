@@ -9,6 +9,117 @@ use std::ffi::OsString;
 
 struct MockProvider;
 
+#[test]
+fn runtime_shutdown_preserves_queued_startup_apply_until_admission_returns() -> Result<()> {
+    use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+    use crate::workspace::{RequestId, runtime::*};
+    let _environment = crate::storage::lock_test_env();
+    let env = TestEnv::new();
+    tokio::runtime::Runtime::new()?.block_on(async {
+        std::fs::write(env.project.path().join("A.md"), "alpha")?;
+        std::fs::write(env.project.path().join("B.md"), "before")?;
+        let coordinator = env.coordinator();
+        let session_id = "runtime-queued-startup";
+        let agent = agent_for(install_dispatched_session(
+            &coordinator,
+            env.project.path(),
+            session_id,
+            &["A.md"],
+        ))
+        .await;
+        let editor = opened_editor(
+            &coordinator,
+            session_id,
+            "runtime-client",
+            env.working_dir(),
+        )
+        .await;
+        let request = apply_request(
+            &editor,
+            session_id,
+            "runtime-client",
+            "runtime-apply",
+            wire_selection(&["A.md", "B.md"]),
+            false,
+        );
+        let owner = RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &env.home.path().join("startup.sock"),
+        )?
+        .claim()?;
+        let registration = RuntimeAdmission::register(env.home.path(), owner.identity())?;
+        let queued = coordinator
+            .apply_selection(request.clone(), agent.clone(), true)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        assert_eq!(queued.phase, StartupContextApplyPhase::Queued);
+        let before = serde_json::to_vec(agent.lock().await.startup_context_session())?;
+        let review = registration.admission().review(
+            &owner,
+            ShutdownOptions {
+                strategy: StopStrategy::FinishCurrent,
+                independent: IndependentTasks::Stop,
+                quiescence_timeout_seconds: 5,
+            },
+            Vec::new(),
+        )?;
+        let operation =
+            registration
+                .admission()
+                .begin(&owner, RequestId::new(), review.id, Vec::new())?;
+        assert!(
+            coordinator
+                .drain_pending_for_agent(&mut *agent.lock().await)
+                .is_empty()
+        );
+        assert_eq!(
+            coordinator
+                .apply_selection(request.clone(), agent.clone(), false)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:?}"))?
+                .phase,
+            StartupContextApplyPhase::Queued
+        );
+        assert_eq!(coordinator.pending_apply_count(session_id), 1);
+        assert_eq!(
+            serde_json::to_vec(agent.lock().await.startup_context_session())?,
+            before
+        );
+        let mut another = request.clone();
+        another.operation_id = "unadmitted-apply".into();
+        assert!(
+            coordinator
+                .apply_selection(another, agent.clone(), true)
+                .await
+                .is_err()
+        );
+        registration
+            .admission()
+            .cancel_wait(&owner, operation.id, operation.revision)?;
+        std::fs::write(env.project.path().join("B.md"), "captured-after-cancel")?;
+        let drained = coordinator.drain_pending_for_agent(&mut *agent.lock().await);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].phase, StartupContextApplyPhase::Succeeded);
+        assert_eq!(
+            exact_text_occurrences(
+                agent.lock().await.startup_context_session(),
+                "captured-after-cancel"
+            ),
+            1
+        );
+        assert_eq!(
+            coordinator
+                .apply_selection(request, agent.clone(), false)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:?}"))?
+                .phase,
+            StartupContextApplyPhase::Succeeded
+        );
+        assert!(registration.admission().work()?.is_empty());
+        Ok(())
+    })
+}
+
 struct FailingSessionPersistence;
 
 impl StartupContextSessionPersistence for FailingSessionPersistence {

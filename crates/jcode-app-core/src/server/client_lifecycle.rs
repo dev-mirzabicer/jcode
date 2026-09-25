@@ -1071,14 +1071,34 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     return Ok(());
                 }
             };
+            let permit =
+                match crate::runtime_lifecycle::admission::preparation("primary-create", None) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        write_direct_event(
+                            &writer,
+                            &ServerEvent::Error {
+                                id: initial_request.id(),
+                                message: format!("Primary creation was not admitted: {error:#}"),
+                                retry_after_secs: None,
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
             let provider = provider_template.fork_for_new_session();
-            let registry = Registry::new_for_shared_session(
-                provider.clone(),
-                mcp_pool.clone(),
-                (*instruction_repositories).clone(),
+            let registry = crate::runtime_lifecycle::admission::scope(
+                permit.clone(),
+                Registry::new_for_shared_session(
+                    provider.clone(),
+                    mcp_pool.clone(),
+                    (*instruction_repositories).clone(),
+                ),
             )
             .await?;
-            let prepared =
+            let prepared = crate::runtime_lifecycle::admission::scope(
+                permit.clone(),
                 crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
                     Agent::new_with_startup_context_and_agent_with_repositories(
                         provider.clone(),
@@ -1089,8 +1109,9 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         initial_subscribe_selfdev(&initial_request),
                         (*instruction_repositories).clone(),
                     )
-                })
-                .await;
+                }),
+            )
+            .await;
             let (mut prepared, _) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -1116,6 +1137,25 @@ pub(super) async fn handle_client_with_instruction_repositories(
             prepared.set_memory_enabled(crate::config::config().features.memory);
             let id = prepared.session_id().to_string();
             let name = prepared.session_short_name().map(str::to_string);
+            if !crate::runtime_lifecycle::admission::sync_scope(permit.clone(), || {
+                sessions.accepts_prepared_work()
+            }) {
+                prepared.mark_closed();
+                crate::tool::clear_session_tool_policy(&id);
+                crate::session::remove_unpublished_session(&id)?;
+                write_direct_event(
+                    &writer,
+                    &ServerEvent::Error {
+                        id: initial_request.id(),
+                        message:
+                            "Runtime stopped before primary publication; no session was published"
+                                .into(),
+                        retry_after_secs: None,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             if let Err(error) = sessions.adopt_owner(&prepared) {
                 prepared.mark_closed();
                 crate::tool::clear_session_tool_policy(&id);
@@ -2075,16 +2115,23 @@ pub(super) async fn handle_client_with_instruction_repositories(
                                 continue;
                             }
                         };
+                    let permit = match crate::runtime_lifecycle::admission::preparation("primary-create", None) {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            let _ = client_event_tx.send(ServerEvent::Error { id, message: format!("Primary creation was not admitted: {error:#}"), retry_after_secs: None });
+                            continue;
+                        }
+                    };
                     let next_provider = provider_template.fork_for_new_session();
-                    let next_registry = Registry::new_for_shared_session(
+                    let next_registry = crate::runtime_lifecycle::admission::scope(permit.clone(), Registry::new_for_shared_session(
                         next_provider.clone(),
                         mcp_pool.clone(),
                         (*instruction_repositories).clone(),
-                    )
+                    ))
                     .await?;
                     let is_selfdev = selfdev.unwrap_or(false);
                     let prepared =
-                        crate::hooks::with_client_terminal_env(terminal_env.clone(), async {
+                        crate::runtime_lifecycle::admission::scope(permit.clone(), crate::hooks::with_client_terminal_env(terminal_env.clone(), async {
                             Agent::new_with_startup_context_and_agent_with_repositories(
                                 Arc::clone(&next_provider),
                                 next_registry.clone(),
@@ -2096,7 +2143,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                                 is_selfdev,
                                 (*instruction_repositories).clone(),
                             )
-                        })
+                        }))
                         .await;
                     let (mut prepared, _) = match prepared {
                         Ok(prepared) => prepared,
@@ -2127,7 +2174,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         && connections
                             .get(&client_connection_id)
                             .is_some_and(|connection| connection.session_id == client_session_id);
-                    if !unchanged_attachment {
+                    if !unchanged_attachment || !crate::runtime_lifecycle::admission::sync_scope(permit.clone(), || sessions.accepts_prepared_work()) {
                         drop(idle);
                         drop(live_sessions);
                         drop(connections);
