@@ -1,6 +1,6 @@
 # Checkout closeout acceptance map
 
-Status: implementation verification in progress. This is not Mirza's acceptance,
+Status: production verification routes and recorded evidence. This is not Mirza's acceptance,
 C01 completion, or a claim that the active shared runtime has been replaced.
 The operating contract is [WORKSPACE_CLOSEOUT.md](WORKSPACE_CLOSEOUT.md).
 
@@ -8,8 +8,11 @@ The independent read-only review's F1–F3 were reproduced and repaired: source
 metadata after interruption, independent registrations under quarantine, and
 unavailable historical evidence stranding retention. Seven expanded regressions
 passed and the same reviewer confirmed the original sequences are addressed.
-The follow-up is bounded source review, not acceptance. Final combined suites,
-native candidate runs and user-runtime activation must still be reconciled below.
+The follow-up is bounded source review, not acceptance. The post-repair combined
+suite passed 52 closeout cases, eight native descriptor cases and two owned
+execution-supervisor cases, with the configured external volume selected. Exact
+final binary, native-run, activation and publication identities belong in the
+package completion ledger, not an inferred claim from these test counts.
 
 ## Requirement coverage
 

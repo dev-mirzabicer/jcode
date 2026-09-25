@@ -3,9 +3,9 @@
 pub use jcode_base::workspace::*;
 mod clone_runner;
 mod closeout_runner;
+mod startup_copy;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_support;
-mod startup_copy;
 
 pub(crate) async fn dispatch(
     request: WorkspaceRequest,
