@@ -88,6 +88,8 @@ fn log_task_completion(result: Result<(), tokio::task::JoinError>) {
 
 #[derive(Clone)]
 pub(super) struct ServerRuntime {
+    #[cfg(unix)]
+    lifecycle: Option<Arc<super::shutdown::RuntimeLifecycle>>,
     sessions: Arc<crate::primary::PrimaryHost>,
     event_tx: broadcast::Sender<ServerEvent>,
     provider: Arc<dyn Provider>,
@@ -124,6 +126,8 @@ pub(super) struct ServerRuntime {
 impl ServerRuntime {
     pub(super) fn from_server(server: &super::Server) -> Self {
         Self {
+            #[cfg(unix)]
+            lifecycle: server.runtime_lifecycle.get().cloned(),
             sessions: Arc::clone(&server.sessions),
             event_tx: server.event_tx.clone(),
             provider: Arc::clone(&server.provider),
@@ -380,6 +384,8 @@ impl ServerRuntime {
                     Arc::clone(&self.soft_interrupt_queues),
                     self.await_members_runtime.clone(),
                     self.swarm_mutation_runtime.clone(),
+                    #[cfg(unix)]
+                    self.lifecycle.clone(),
                 )
                 .await
             };

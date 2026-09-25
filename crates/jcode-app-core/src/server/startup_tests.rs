@@ -11,7 +11,147 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+#[path = "runtime_exit_tests.rs"]
+mod forced_exit;
+
 struct TestProvider;
+
+#[test]
+#[cfg(unix)]
+fn stopped_runtime_and_changed_socket_paths_are_not_silently_recreated_or_removed() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let socket = sandbox.root().join("stopped.sock");
+        let debug = sandbox.root().join("stopped-debug.sock");
+        let store = crate::runtime_lifecycle::RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &socket,
+        )?;
+        let owner = store.claim()?;
+        use crate::workspace::{RequestId, runtime::*};
+        let review = owner.review(
+            ShutdownOptions {
+                strategy: StopStrategy::Interrupt,
+                independent: IndependentTasks::Stop,
+                quiescence_timeout_seconds: 1,
+            },
+            Vec::new(),
+        )?;
+        let operation = owner.begin(RequestId::new(), review.id, Vec::new())?;
+        owner.complete(operation.id, operation.revision)?;
+        drop(owner);
+        let server = Server::new_with_paths(Arc::new(TestProvider), socket.clone(), debug.clone());
+        assert!(server.run().await.is_err());
+        assert!(!socket.exists() && !debug.exists());
+        let owned = sandbox.root().join("owned.sock");
+        let listener = Listener::bind(&owned)?;
+        let witness = std::fs::symlink_metadata(&owned)?;
+        std::fs::rename(&owned, sandbox.root().join("retained.sock"))?;
+        std::fs::write(&owned, "replacement belongs to another operation")?;
+        assert!(super::cleanup_bound_sockets(&[(owned.clone(), witness)]).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&owned)?,
+            "replacement belongs to another operation"
+        );
+        drop(listener);
+        Ok(())
+    })
+}
+
+#[test]
+#[cfg(unix)]
+fn reviewed_runtime_stop_exits_actual_server_without_a_provisional_session() -> Result<()> {
+    use crate::protocol::{Request, ServerEvent};
+    use crate::workspace::{RequestId, runtime::*};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let socket = sandbox.root().join("main.sock");
+        let debug = sandbox.root().join("debug.sock");
+        let server = Arc::new(Server::new_with_paths(
+            Arc::new(TestProvider),
+            socket.clone(),
+            debug.clone(),
+        ));
+        let serving = server.clone();
+        let task = tokio::spawn(async move { serving.run().await });
+        assert!(wait_for_existing_server(&socket, Duration::from_secs(10)).await);
+        let client = crate::transport::Stream::connect(&socket).await?;
+        let (read, mut write) = client.into_split();
+        let mut read = BufReader::new(read);
+        async fn exchange(
+            read: &mut BufReader<crate::transport::ReadHalf>,
+            write: &mut crate::transport::WriteHalf,
+            request: Request,
+        ) -> Result<ServerEvent> {
+            write
+                .write_all((serde_json::to_string(&request)? + "\n").as_bytes())
+                .await?;
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(15), read.read_line(&mut line)).await??;
+            Ok(serde_json::from_str(&line)?)
+        }
+        assert!(matches!(
+            exchange(&mut read, &mut write, Request::RuntimeProbe { id: 1 }).await?,
+            ServerEvent::RuntimeCapabilities {
+                id: 1,
+                version: Some(1)
+            }
+        ));
+        let event = exchange(
+            &mut read,
+            &mut write,
+            Request::RuntimeControl {
+                id: 2,
+                request: Box::new(RuntimeRequest::Review {
+                    options: ShutdownOptions {
+                        strategy: StopStrategy::FinishCurrent,
+                        independent: IndependentTasks::Stop,
+                        quiescence_timeout_seconds: 5,
+                    },
+                }),
+            },
+        )
+        .await?;
+        let ServerEvent::RuntimeResponse { id: 2, response } = event else {
+            anyhow::bail!("Unexpected review: {event:?}");
+        };
+        let RuntimeResponse::Review(review) = *response else {
+            anyhow::bail!("Review rejected: {response:?}");
+        };
+        let request = RequestId::new();
+        write
+            .write_all(
+                (serde_json::to_string(&Request::RuntimeControl {
+                    id: 3,
+                    request: Box::new(RuntimeRequest::Begin {
+                        request,
+                        review: review.id,
+                    }),
+                })? + "\n")
+                    .as_bytes(),
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(20), task).await???;
+        assert!(server.sessions.read().await.is_empty());
+        assert!(!socket.exists() && !debug.exists());
+        let store = crate::runtime_lifecycle::RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &socket,
+        )?;
+        let status = store.status()?;
+        assert!(status.desired_stopped);
+        let stopped = status.operation.unwrap();
+        assert_eq!(stopped.request, request);
+        assert_eq!(stopped.phase, ShutdownPhase::Stopped);
+        assert!(store.require_automatic_start().is_err());
+        drop(server);
+        store.authorize_start()?;
+        store.require_automatic_start()?;
+        Ok(())
+    })
+}
 
 #[async_trait]
 impl Provider for TestProvider {

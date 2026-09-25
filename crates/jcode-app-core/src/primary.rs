@@ -25,6 +25,8 @@ pub use launch::{PrimaryLauncher, PrimaryRegistryMode};
 type Agents = HashMap<String, Arc<Mutex<Agent>>>;
 
 pub struct PrimaryHost {
+    runtime_admission:
+        std::sync::OnceLock<Arc<crate::runtime_lifecycle::admission::RuntimeAdmission>>,
     input_restore: std::sync::OnceLock<InputRestore>,
     startup_context:
         std::sync::OnceLock<Arc<crate::server::startup_context::StartupContextCoordinator>>,
@@ -138,6 +140,7 @@ impl PrimaryHost {
             .collect();
         Self {
             input_restore: std::sync::OnceLock::new(),
+            runtime_admission: std::sync::OnceLock::new(),
             startup_context: std::sync::OnceLock::new(),
             ownership_id: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
             agents: RwLock::new(agents),
@@ -384,14 +387,37 @@ impl PrimaryHost {
 
     pub(crate) fn accepts_input(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
-            && crate::runtime_lifecycle::admission::current_runtime()
+            && self
+                .runtime_admission()
                 .is_ok_and(|runtime| runtime.is_none_or(|runtime| runtime.accepts_input()))
     }
 
     pub(crate) fn accepts_prepared_work(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
-            && crate::runtime_lifecycle::admission::current_runtime()
+            && self
+                .runtime_admission()
                 .is_ok_and(|runtime| runtime.is_none_or(|runtime| runtime.permits_current_work()))
+    }
+
+    pub(crate) fn bind_runtime_admission(
+        &self,
+        gate: Arc<crate::runtime_lifecycle::admission::RuntimeAdmission>,
+    ) -> Result<()> {
+        let bound = self.runtime_admission.get_or_init(|| gate.clone());
+        ensure!(
+            Arc::ptr_eq(bound, &gate),
+            "Primary host belongs to another runtime admission owner"
+        );
+        Ok(())
+    }
+
+    fn runtime_admission(
+        &self,
+    ) -> Result<Option<Arc<crate::runtime_lifecycle::admission::RuntimeAdmission>>> {
+        match self.runtime_admission.get() {
+            Some(gate) => Ok(Some(gate.clone())),
+            None => crate::runtime_lifecycle::admission::current_runtime(),
+        }
     }
 
     pub(crate) fn configure_startup_context(
@@ -500,7 +526,8 @@ impl PrimaryHost {
         request_id: u64,
         agent: Arc<Mutex<Agent>>,
     ) -> Result<Admission> {
-        let permit = crate::runtime_lifecycle::admission::current_runtime()?
+        let permit = self
+            .runtime_admission()?
             .map(|runtime| {
                 runtime.independent(
                     crate::workspace::runtime::RuntimeWorkKind::PrimaryTurn,

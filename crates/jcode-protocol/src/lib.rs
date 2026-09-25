@@ -608,6 +608,8 @@ impl Request {
             Request::SetAgent { id, .. } => *id,
             Request::GetAgentCatalog { id }
             | Request::WorkspaceProbe { id }
+            | Request::RuntimeProbe { id }
+            | Request::RuntimeControl { id, .. }
             | Request::Workspace { id, .. }
             | Request::Execution { id, .. }
             | Request::TaskMonitorProbe { id }

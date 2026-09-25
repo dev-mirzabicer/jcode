@@ -2,6 +2,95 @@ use super::*;
 use std::sync::{Arc, Barrier};
 
 #[test]
+fn reviewed_replacement_preserves_history_and_never_reopens_cancel_after_stop() -> Result<()> {
+    let (_root, store) = fixture()?;
+    let owner = store.claim()?;
+    let original = owner.review(
+        options(StopStrategy::FinishCurrent, IndependentTasks::Stop),
+        vec![work("held", false)],
+    )?;
+    let first = owner.begin(RequestId::new(), original.id, vec![work("held", false)])?;
+    let changed = owner.review_change(
+        first.id,
+        first.revision,
+        options(StopStrategy::Interrupt, IndependentTasks::KeepSupported),
+        vec![work("held", false)],
+    )?;
+    let request = RequestId::new();
+    let second = owner.begin(request, changed.id, vec![work("held", false)])?;
+    assert_eq!(owner.inspect(first.id)?.phase, ShutdownPhase::Superseded);
+    assert_eq!(owner.inspect(first.id)?.review, original);
+    assert_eq!(owner.begin(request, changed.id, Vec::new())?, second);
+    assert!(owner.cancel_wait(first.id, first.revision).is_err());
+    let blocked = owner.block(
+        second.id,
+        second.revision,
+        vec!["fixture still held".into()],
+    )?;
+    let finish = owner.review_change(
+        second.id,
+        blocked.revision,
+        options(StopStrategy::FinishCurrent, IndependentTasks::Stop),
+        vec![work("held", false)],
+    )?;
+    let third = owner.begin(RequestId::new(), finish.id, vec![work("held", false)])?;
+    assert!(third.cancellation_closed);
+    assert!(owner.cancel_wait(third.id, third.revision).is_err());
+    assert!(
+        owner
+            .update(second.id, blocked.revision, |_| Ok(()))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn changed_revision_refuses_replacement_and_force_retains_uncertainty() -> Result<()> {
+    let (_root, store) = fixture()?;
+    let owner = store.claim()?;
+    let review = owner.review(
+        options(StopStrategy::FinishCurrent, IndependentTasks::Stop),
+        vec![work("held", false)],
+    )?;
+    let first = owner.begin(RequestId::new(), review.id, vec![work("held", false)])?;
+    let stale = owner.review_change(
+        first.id,
+        first.revision,
+        options(StopStrategy::Interrupt, IndependentTasks::Stop),
+        vec![work("held", false)],
+    )?;
+    let stopping = owner.enter_stopping(first.id, first.revision)?;
+    assert!(
+        owner
+            .begin(RequestId::new(), stale.id, vec![work("held", false)])
+            .is_err()
+    );
+    let blocked = owner.block(
+        first.id,
+        stopping.revision,
+        vec!["checkpoint unavailable".into()],
+    )?;
+    assert!(owner.force_exit(first.id, blocked.revision).is_err());
+    let retry = owner.retry(first.id, blocked.revision, true)?;
+    let blocked = owner.block(
+        first.id,
+        retry.revision,
+        vec!["checkpoint still unavailable".into()],
+    )?;
+    let forced = owner.force_exit(first.id, blocked.revision)?;
+    assert_eq!(forced.phase, ShutdownPhase::Forced);
+    assert_eq!(forced.remaining, vec![work("held", false)]);
+    assert!(!forced.issues.is_empty());
+    assert!(owner.confirm_stopped(forced.id).is_err());
+    owner.confirm_forced(forced.id)?;
+    assert!(store.require_automatic_start().is_err());
+    drop(owner);
+    store.authorize_start()?;
+    assert_eq!(store.claim()?.inspect(forced.id)?, forced);
+    Ok(())
+}
+
+#[test]
 fn stopped_confirmation_is_same_owner_and_does_not_rewrite_history() -> Result<()> {
     let (_root, store) = fixture()?;
     let owner = store.claim()?;

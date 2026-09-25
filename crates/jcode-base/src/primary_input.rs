@@ -27,10 +27,27 @@ struct Record {
     receipt: PrimaryInputReceipt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cancelled_queue: Option<Vec<crate::todo::QueuedMessage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_namespace: Option<String>,
+}
+
+impl Record {
+    fn delivery_receipt(&self, namespace: &Option<String>) -> PrimaryInputReceipt {
+        let mut receipt = self.receipt.clone();
+        if receipt.state == PrimaryInputState::Accepted && &self.delivery_namespace != namespace {
+            receipt.issue = Some("Input is retained for another or unbound runtime. Inspect the original, cancel it if appropriate, and explicitly submit a new input in the intended runtime.".into());
+        }
+        receipt
+    }
 }
 
 pub struct PrimaryInputStore {
     root: PathBuf,
+}
+
+fn current_namespace() -> Result<Option<String>> {
+    Ok(crate::runtime_lifecycle::admission::current_runtime()?
+        .and_then(|runtime| runtime.namespace().map(str::to_owned)))
 }
 pub struct ClientInputCancellation {
     pub input: PrimaryInputEnvelope,
@@ -211,6 +228,7 @@ impl PrimaryInputStore {
             issue: None,
         };
         lease.inbox.records.push(Record {
+            delivery_namespace: current_namespace()?,
             input,
             receipt: receipt.clone(),
             cancelled_queue: None,
@@ -253,6 +271,7 @@ impl PrimaryInputStore {
             issue: None,
         };
         lease.inbox.records.push(Record {
+            delivery_namespace: current_namespace()?,
             input: input.clone(),
             receipt,
             cancelled_queue: None,
@@ -265,7 +284,32 @@ impl PrimaryInputStore {
         let mut lease = self.lock(session)?;
         let source = crate::session::Session::load_startup_stub(session)?;
         lease.reconcile(&source)?;
-        Ok(lease.record(id)?.receipt.clone())
+        Ok(lease.record(id)?.delivery_receipt(&current_namespace()?))
+    }
+
+    /// An explicit user retry can route legacy unbound input. Ordinary startup
+    /// enumeration and synthetic wakes cannot acquire another runtime's queue.
+    pub fn confirm_delivery(&self, session: &str, id: RequestId) -> Result<PrimaryInputReceipt> {
+        let namespace = current_namespace()?;
+        let mut lease = self.lock(session)?;
+        let source = crate::session::Session::load_startup_stub(session)?;
+        lease.reconcile(&source)?;
+        let record = lease
+            .inbox
+            .records
+            .iter_mut()
+            .find(|record| record.input.id == id)
+            .context("Unknown primary input")?;
+        if record.receipt.state == PrimaryInputState::Accepted
+            && record.delivery_namespace.is_none()
+            && namespace.is_some()
+            && (record.input.origin == Some(jcode_session_types::StoredMessageOrigin::Human)
+                || record.input.client_request_digest.is_some())
+        {
+            record.delivery_namespace = namespace.clone();
+            lease.save()?;
+        }
+        Ok(lease.record(id)?.delivery_receipt(&namespace))
     }
 
     pub fn original(&self, session: &str, id: RequestId) -> Result<Option<PrimaryInputEnvelope>> {
@@ -295,11 +339,16 @@ impl PrimaryInputStore {
         let mut lease = self.lock(session)?;
         let source = crate::session::Session::load_startup_stub_in(session_root, session)?;
         lease.reconcile(&source)?;
+        let namespace =
+            crate::runtime_lifecycle::admission::RuntimeAdmission::for_root(session_root)?
+                .and_then(|runtime| runtime.namespace().map(str::to_owned));
         Ok(lease
             .inbox
             .records
             .iter()
-            .filter(|r| r.receipt.state == PrimaryInputState::Accepted)
+            .filter(|r| {
+                r.receipt.state == PrimaryInputState::Accepted && r.delivery_namespace == namespace
+            })
             .map(|r| r.input.clone())
             .collect())
     }
@@ -410,6 +459,7 @@ impl PrimaryInputStore {
                 };
                 receipts.push(receipt.clone());
                 lease.inbox.records.push(Record {
+                    delivery_namespace: current_namespace()?,
                     input,
                     receipt,
                     cancelled_queue: queue,
@@ -510,6 +560,10 @@ impl InputLease {
             record.input == *input && record.receipt.state == PrimaryInputState::Accepted,
             "Primary input is not pending with these exact contents"
         );
+        ensure!(
+            record.delivery_namespace == current_namespace()?,
+            "Pending input belongs to another runtime delivery namespace"
+        );
         Ok(())
     }
 }
@@ -518,6 +572,68 @@ impl InputLease {
 mod tests {
     use super::*;
     use crate::session::Session;
+
+    #[test]
+    fn pending_delivery_keeps_its_runtime_and_legacy_routing_requires_user_intake() -> Result<()> {
+        use crate::runtime_lifecycle::admission::RuntimeAdmission;
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        let mut session = Session::create(None, None);
+        session.save()?;
+        let store = PrimaryInputStore::current();
+        let mut human = PrimaryInputEnvelope::new(
+            session.id.clone(),
+            "retained human input".into(),
+            PrimaryInputDelivery::NextTurn,
+        );
+        human.origin = Some(jcode_session_types::StoredMessageOrigin::Human);
+        let automatic = PrimaryInputEnvelope::new(
+            session.id.clone(),
+            "retained notification".into(),
+            PrimaryInputDelivery::NextTurn,
+        );
+        store.accept(human.clone())?;
+        store.accept(automatic.clone())?;
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let registration =
+            RuntimeAdmission::register_namespace(sandbox.root(), "first", Some(a.clone()))?;
+        assert!(store.pending(&session.id)?.is_empty());
+        assert!(store.inspect(&session.id, human.id)?.issue.is_some());
+        assert!(
+            store
+                .confirm_delivery(&session.id, automatic.id)?
+                .issue
+                .is_some()
+        );
+        assert!(
+            store
+                .confirm_delivery(&session.id, human.id)?
+                .issue
+                .is_none()
+        );
+        assert_eq!(store.pending(&session.id)?, vec![human.clone()]);
+        assert_eq!(store.original(&session.id, human.id)?, Some(human.clone()));
+        drop(registration);
+        let other = RuntimeAdmission::register_namespace(sandbox.root(), "other", Some(b))?;
+        assert!(store.pending(&session.id)?.is_empty());
+        assert!(
+            store
+                .confirm_delivery(&session.id, human.id)?
+                .issue
+                .is_some()
+        );
+        assert!(store.lock(&session.id)?.require_pending(&human).is_err());
+        drop(other);
+        let _restarted =
+            RuntimeAdmission::register_namespace(sandbox.root(), "restarted", Some(a))?;
+        assert_eq!(store.pending(&session.id)?, vec![human.clone()]);
+        store.lock(&session.id)?.require_pending(&human)?;
+        assert_eq!(
+            store.inspect(&session.id, human.id)?.state,
+            PrimaryInputState::Accepted
+        );
+        Ok(())
+    }
 
     #[test]
     fn primary_input_reconciles_committed_session_without_reappending_or_losing_original()
@@ -594,7 +710,7 @@ mod tests {
         session.save()?;
         // Crash after Session checkpoint and before inbox acknowledgement is
         // repaired from its structural receipt, not a string search.
-        let committed = store.inspect(&session.id, input.id)?;
+        let committed = store.confirm_delivery(&session.id, input.id)?;
         assert_eq!(committed.state, PrimaryInputState::Committed);
         assert!(committed.issue.is_none());
         assert_eq!(committed.messages, vec![session.messages[start].id.clone()]);

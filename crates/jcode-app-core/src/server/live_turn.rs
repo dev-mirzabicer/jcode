@@ -306,7 +306,9 @@ pub(super) async fn submit_primary_input(
     sessions.configure_input_delivery(swarm.clone());
     let receipt = crate::runtime_lifecycle::admission::control(|| {
         validate_input_recipient(sessions, &input.session)?;
-        crate::primary_input::PrimaryInputStore::current().accept(input)
+        let store = crate::primary_input::PrimaryInputStore::current();
+        let receipt = store.accept(input)?;
+        store.confirm_delivery(&receipt.session, receipt.id)
     })??;
     if receipt.state == jcode_session_types::PrimaryInputState::Accepted && sessions.accepts_input()
     {
@@ -349,7 +351,7 @@ pub(super) async fn submit_client_input(
                 }
                 Ok(input)
             })?;
-        store.inspect(&input.session, input.id)
+        store.confirm_delivery(&input.session, input.id)
     })??;
     if receipt.state == jcode_session_types::PrimaryInputState::Accepted && sessions.accepts_input()
     {

@@ -347,6 +347,8 @@ async fn retirement_connection(
             server.soft_interrupt_queues.clone(),
             server.await_members_runtime.clone(),
             server.swarm_mutation_runtime.clone(),
+            #[cfg(unix)]
+            None,
         ),
     );
     (client, task)

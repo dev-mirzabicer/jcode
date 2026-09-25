@@ -89,7 +89,8 @@ resources only after admission allows it. A blocked resource restore keeps the
 envelope accepted and adds an inspectable receipt issue; a successful later
 commit clears that diagnostic. An exact pending retry after repair uses the same
 UUID. Acceptance, restoration, dispatch and completion remain separate facts.
-The configurable runtime command surface remains staged with daemon integration.
+The native protocol is described in [reviewed runtime shutdown](dev/RUNTIME_SHUTDOWN.md).
+The CLI/SDK command surface and activated-runtime acceptance remain staged.
 
 ## Public clients
 

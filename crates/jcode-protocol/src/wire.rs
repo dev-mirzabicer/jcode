@@ -94,6 +94,13 @@ pub enum Request {
     },
     #[serde(rename = "workspace_probe")]
     WorkspaceProbe { id: u64 },
+    #[serde(rename = "runtime_probe")]
+    RuntimeProbe { id: u64 },
+    #[serde(rename = "runtime_control")]
+    RuntimeControl {
+        id: u64,
+        request: Box<jcode_workspace_types::runtime::RuntimeRequest>,
+    },
     #[serde(rename = "workspace")]
     Workspace {
         id: u64,
@@ -1281,6 +1288,13 @@ pub enum ServerEvent {
     WorkspaceResponse {
         id: u64,
         response: Box<jcode_workspace_types::WorkspaceResponse>,
+    },
+    #[serde(rename = "runtime_capabilities")]
+    RuntimeCapabilities { id: u64, version: Option<u32> },
+    #[serde(rename = "runtime_response")]
+    RuntimeResponse {
+        id: u64,
+        response: Box<jcode_workspace_types::runtime::RuntimeResponse>,
     },
     #[serde(rename = "task_monitor_capabilities")]
     TaskMonitorCapabilities {

@@ -2,6 +2,144 @@ use super::*;
 use crate::workspace::RequestId;
 
 #[test]
+fn lost_lifecycle_does_not_reclassify_hosted_primaries_as_unmanaged() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let host = lifecycle.primaries.clone();
+        assert!(host.accepts_input());
+        drop(lifecycle);
+        assert!(!host.accepts_input());
+        assert!(!host.accepts_prepared_work());
+        Ok(())
+    })
+}
+
+#[test]
+fn reviewed_change_and_explicit_force_keep_uncertain_owner_truth() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let held = lifecycle.registration.admission().independent(
+            RuntimeWorkKind::Preparation,
+            "unsettled".into(),
+            None,
+        )?;
+        let first = begin(&lifecycle, StopStrategy::FinishCurrent, 1).await?;
+        let first = phase(&lifecycle, first.id, ShutdownPhase::WaitingForCurrent).await?;
+        let RuntimeResponse::Review(review) = lifecycle
+            .request(RuntimeRequest::ReviewChange {
+                operation: first.id,
+                expected_revision: first.revision,
+                options: ShutdownOptions {
+                    strategy: StopStrategy::Interrupt,
+                    independent: IndependentTasks::Stop,
+                    quiescence_timeout_seconds: 1,
+                },
+            })
+            .await?
+        else {
+            anyhow::bail!("Review missing");
+        };
+        let RuntimeResponse::Operation(next) = lifecycle
+            .request(RuntimeRequest::Begin {
+                request: RequestId::new(),
+                review: review.id,
+            })
+            .await?
+        else {
+            anyhow::bail!("Operation missing");
+        };
+        ensure!(
+            lifecycle.owner.inspect(first.id)?.phase == ShutdownPhase::Superseded,
+            "Old operation remained active"
+        );
+        let blocked = phase(&lifecycle, next.id, ShutdownPhase::Blocked).await?;
+        lifecycle
+            .request(RuntimeRequest::Force {
+                operation: blocked.id,
+                expected_revision: blocked.revision,
+            })
+            .await?;
+        let forced = phase(&lifecycle, next.id, ShutdownPhase::Forced).await?;
+        let mut exit = lifecycle.stopped();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            exit.wait_for(|value| value.is_some()),
+        )
+        .await??;
+        ensure!(
+            !forced.remaining.is_empty() && !forced.issues.is_empty(),
+            "Force manufactured quiescence"
+        );
+        ensure!(
+            lifecycle
+                .stopped()
+                .borrow()
+                .is_some_and(|exit| exit.forced && exit.operation == next.id),
+            "Force did not publish its distinct exit disposition"
+        );
+        drop(held);
+        Ok(())
+    })
+}
+
+#[test]
+fn force_does_not_abandon_an_unpublished_keep_supported_handoff() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let held = lifecycle.registration.admission().independent(
+            RuntimeWorkKind::Execution,
+            "pending-native-owner".into(),
+            None,
+        )?;
+        let RuntimeResponse::Review(review) = lifecycle
+            .request(RuntimeRequest::Review {
+                options: ShutdownOptions {
+                    strategy: StopStrategy::Interrupt,
+                    independent: IndependentTasks::KeepSupported,
+                    quiescence_timeout_seconds: 1,
+                },
+            })
+            .await?
+        else {
+            anyhow::bail!("Review missing");
+        };
+        let RuntimeResponse::Operation(operation) = lifecycle
+            .request(RuntimeRequest::Begin {
+                request: RequestId::new(),
+                review: review.id,
+            })
+            .await?
+        else {
+            anyhow::bail!("Operation missing");
+        };
+        let blocked = phase(&lifecycle, operation.id, ShutdownPhase::Blocked).await?;
+        lifecycle
+            .request(RuntimeRequest::Force {
+                operation: blocked.id,
+                expected_revision: blocked.revision,
+            })
+            .await?;
+        let blocked = phase(&lifecycle, operation.id, ShutdownPhase::Blocked).await?;
+        ensure!(
+            blocked.force_requested && lifecycle.stopped().borrow().is_none(),
+            "Failed preservation became destructive force"
+        );
+        drop(held);
+        lifecycle
+            .request(RuntimeRequest::Retry {
+                operation: blocked.id,
+                expected_revision: blocked.revision,
+            })
+            .await?;
+        phase(&lifecycle, operation.id, ShutdownPhase::Stopped).await?;
+        Ok(())
+    })
+}
+
+#[test]
 fn replay_recovers_stopped_publication_without_reexecuting_the_operation() -> Result<()> {
     let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
     tokio::runtime::Runtime::new()?.block_on(async {
@@ -117,7 +255,11 @@ fn idle_shutdown_is_runtime_driven_and_not_just_begin_acknowledgement() -> Resul
         );
         let complete = phase(&lifecycle, operation.id, ShutdownPhase::Stopped).await?;
         ensure!(
-            *lifecycle.stopped().borrow() == Some(complete.id),
+            *lifecycle.stopped().borrow()
+                == Some(RuntimeExit {
+                    operation: complete.id,
+                    forced: false
+                }),
             "No runtime-owned exit signal"
         );
         ensure!(

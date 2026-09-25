@@ -52,6 +52,7 @@ mod reload_recovery;
 mod reload_state;
 mod reload_trace;
 mod runtime;
+mod runtime_control;
 #[cfg(unix)]
 pub mod shutdown;
 mod socket;
@@ -655,8 +656,42 @@ const HEAP_RETENTION_CHECK_SECS: u64 = 120;
 /// Exit code when server shuts down due to idle timeout
 pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 
+#[cfg(unix)]
+fn cleanup_bound_sockets(files: &[(PathBuf, std::fs::Metadata)]) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let mut issues = Vec::new();
+    for (path, bound) in files {
+        match std::fs::symlink_metadata(path) {
+            Ok(current)
+                if current.file_type().is_socket()
+                    && bound.file_type().is_socket()
+                    && current.dev() == bound.dev()
+                    && current.ino() == bound.ino() =>
+            {
+                if let Err(error) = std::fs::remove_file(path) {
+                    issues.push(format!("{}: {error}", path.display()));
+                }
+            }
+            Ok(_) => issues.push(format!(
+                "{}: endpoint identity changed; replacement retained",
+                path.display()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => issues.push(format!("{}: {error}", path.display())),
+        }
+    }
+    anyhow::ensure!(
+        issues.is_empty(),
+        "Runtime endpoint cleanup incomplete: {}",
+        issues.join("; ")
+    );
+    Ok(())
+}
+
 /// Server state
 pub struct Server {
+    #[cfg(unix)]
+    runtime_lifecycle: OnceCell<Arc<shutdown::RuntimeLifecycle>>,
     provider: Arc<dyn Provider>,
     /// Process-wide bounded context draft store. Drafts survive client reconnects
     /// for their TTL but are never persisted as active context state.
@@ -773,6 +808,8 @@ impl Server {
         } = load_persisted_swarm_runtime_state();
 
         let server = Self {
+            #[cfg(unix)]
+            runtime_lifecycle: OnceCell::new(),
             provider,
             context_transactions: Arc::new(crate::context::ContextTransactionService::new()),
             startup_context: Arc::new(startup_context::StartupContextCoordinator::new(&identity)),
@@ -1427,7 +1464,9 @@ impl Server {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
-                    crate::logging::info("Server received SIGTERM, shutting down gracefully");
+                    crate::logging::info(
+                        "Server received external SIGTERM; this is not a reviewed runtime Stop",
+                    );
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
                     std::process::exit(0);
                 }
@@ -2337,12 +2376,30 @@ impl Server {
             );
         }
 
+        #[cfg(unix)]
+        crate::runtime_lifecycle::RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &self.socket_path,
+        )?
+        .require_automatic_start()?;
+
         // Remove existing sockets (uses transport abstraction for cross-platform cleanup)
         crate::transport::remove_socket(&self.socket_path);
         crate::transport::remove_socket(&self.debug_socket_path);
 
         let main_listener = Listener::bind(&self.socket_path)?;
         let debug_listener = Listener::bind(&self.debug_socket_path)?;
+        #[cfg(unix)]
+        let socket_files = [
+            (
+                self.socket_path.clone(),
+                std::fs::symlink_metadata(&self.socket_path)?,
+            ),
+            (
+                self.debug_socket_path.clone(),
+                std::fs::symlink_metadata(&self.debug_socket_path)?,
+            ),
+        ];
 
         #[cfg(unix)]
         {
@@ -2400,6 +2457,19 @@ impl Server {
 
         let server_start_time = Instant::now();
 
+        #[cfg(unix)]
+        self.runtime_lifecycle
+            .get_or_try_init(|| async {
+                shutdown::RuntimeLifecycle::new(
+                    &crate::storage::jcode_dir()?,
+                    &self.socket_path,
+                    self.sessions.clone(),
+                    crate::background::global().clone(),
+                )
+                .await
+            })
+            .await?;
+
         self.spawn_background_tasks(server_start_time, temporary_server_policy);
         let (runtime, main_handle, debug_handle) = self
             .finish_startup_after_bind(main_listener, debug_listener, server_start_time)
@@ -2411,6 +2481,24 @@ impl Server {
         let mut main_handle = main_handle;
         let mut debug_handle = debug_handle;
         tokio::select! {
+            forced = self.wait_for_reviewed_stop() => {
+                if forced {
+                    // Force has a durable, owner-bound uncertainty receipt.
+                    // Tokio may be unable to join the blocking work named in
+                    // that receipt. This exits ONLY this runtime process.
+                    #[cfg(unix)]
+                    if let Err(error) = cleanup_bound_sockets(&socket_files) {
+                        crate::logging::warn(&format!("Forced runtime exit retained changed endpoints: {error:#}"));
+                    }
+                    std::process::exit(2);
+                }
+                runtime.shutdown().await;
+                let _ = main_handle.await;
+                let _ = debug_handle.await;
+                #[cfg(unix)]
+                cleanup_bound_sockets(&socket_files)?;
+                let _ = crate::registry::unregister_server(&self.identity.name).await;
+            }
             result = &mut main_handle => {
                 if let Err(error) = result {
                     crate::logging::error(&format!("Main accept loop failed: {error}"));
@@ -2427,6 +2515,34 @@ impl Server {
             }
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    pub async fn runtime_control(
+        &self,
+        request: crate::workspace::runtime::RuntimeRequest,
+    ) -> Result<crate::workspace::runtime::RuntimeResponse> {
+        self.runtime_lifecycle
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Runtime lifecycle is not initialized"))?
+            .request(request)
+            .await
+    }
+
+    async fn wait_for_reviewed_stop(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(lifecycle) = self.runtime_lifecycle.get() {
+            let mut stopped = lifecycle.stopped();
+            loop {
+                if let Some(exit) = *stopped.borrow() {
+                    return exit.forced;
+                }
+                if stopped.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        std::future::pending::<bool>().await
     }
 
     /// Spawn the WebSocket gateway if enabled in config.

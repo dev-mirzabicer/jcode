@@ -20,6 +20,10 @@ enum CompletionPermit {
     Tracked(crate::execution::DeliveryAttempt),
     Skip,
 }
+
+#[cfg(test)]
+#[path = "background_namespace_tests.rs"]
+mod namespace_tests;
 async fn completion_permit(
     task: &crate::bus::BackgroundTaskCompleted,
     channel: crate::execution::DeliveryChannel,
@@ -29,6 +33,10 @@ async fn completion_permit(
     }
     let id = task.task_id.clone();
     let session = task.session_id.clone();
+    let namespace = match crate::runtime_lifecycle::admission::current_runtime() {
+        Ok(runtime) => runtime.and_then(|runtime| runtime.namespace().map(str::to_owned)),
+        Err(_) => return CompletionPermit::Skip,
+    };
     let result = tokio::task::spawn_blocking(move || {
         let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
         let record = store
@@ -38,6 +46,15 @@ async fn completion_permit(
             record.session_id == session,
             "Completion recipient differs from the invocation owner"
         );
+        if let Some(namespace) = namespace {
+            let origin = store
+                .command_ownership(&id)?
+                .map(|handoff| handoff.parent)
+                .unwrap_or_else(|| record.owner.clone());
+            if store.runtime_namespace(&origin)?.as_deref() != Some(&namespace) {
+                return Ok(None);
+            }
+        }
         store.begin_delivery(&id, channel)
     })
     .await;

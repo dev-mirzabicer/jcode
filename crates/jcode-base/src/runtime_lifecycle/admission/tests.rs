@@ -2,6 +2,43 @@ use super::*;
 use crate::runtime_lifecycle::RuntimeStopStore;
 
 #[test]
+fn reload_and_stop_cannot_both_acquire_the_runtime_transition() -> Result<()> {
+    let (_root, owner, registration) = fixture()?;
+    let gate = registration.admission();
+    let review = gate.review(&owner, options(StopStrategy::FinishCurrent), Vec::new())?;
+    let reload = gate.reserve_reload()?;
+    assert!(
+        gate.begin(&owner, RequestId::new(), review.id, Vec::new())
+            .is_err()
+    );
+    assert!(!owner.status()?.desired_stopped);
+    assert!(gate.is_reloading());
+    assert!(gate.reserve_reload().is_err());
+    drop(reload);
+    assert!(gate.accepts_input());
+    let barrier = std::sync::Barrier::new(2);
+    let (stop, reload) = std::thread::scope(|threads| {
+        let stop = threads.spawn(|| {
+            barrier.wait();
+            gate.begin(&owner, RequestId::new(), review.id, Vec::new())
+        });
+        let reload = threads.spawn(|| {
+            barrier.wait();
+            gate.reserve_reload()
+        });
+        (stop.join().unwrap(), reload.join().unwrap())
+    });
+    assert_ne!(stop.is_ok(), reload.is_ok());
+    if let Ok(operation) = stop {
+        assert!(gate.reserve_reload().is_err());
+        gate.cancel_wait(&owner, operation.id, operation.revision)?;
+    }
+    drop(reload);
+    assert!(gate.accepts_input());
+    Ok(())
+}
+
+#[test]
 fn final_stop_serializes_with_control_and_seals_later_writes() -> Result<()> {
     let (_root, owner, registration) = fixture()?;
     let gate = registration.admission().clone();

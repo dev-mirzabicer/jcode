@@ -12,6 +12,28 @@ type SessionAgents = Arc<crate::primary::PrimaryHost>;
 
 const RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+struct ReloadAdmission {
+    reservation: Option<crate::runtime_lifecycle::admission::ReloadReservation>,
+    sessions: std::sync::Weak<crate::primary::PrimaryHost>,
+}
+impl Drop for ReloadAdmission {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            drop(reservation);
+            if let Some(host) = self.sessions.upgrade() {
+                let resume = host.clone();
+                host.retain_delivery(async move {
+                    if let Err(error) = resume.resume_deferred_inputs().await {
+                        crate::logging::warn(&format!(
+                            "Input retained after failed reload: {error:#}"
+                        ));
+                    }
+                });
+            }
+        }
+    }
+}
+
 fn prepare_server_exec(cmd: &mut std::process::Command, socket_path: &std::path::Path) {
     // The replacement daemon must own the published socket paths. Unlink them
     // before exec so we never inherit a stale on-disk endpoint through reload.
@@ -76,6 +98,25 @@ pub(super) async fn await_reload_signal(
         let signal = match receive_reload_signal(&mut rx, &mut last_request_id).await {
             Some(signal) => signal,
             None => return,
+        };
+
+        let reservation = crate::runtime_lifecycle::admission::current_runtime()
+            .and_then(|runtime| runtime.map(|runtime| runtime.reserve_reload()).transpose());
+        let _admission = match reservation {
+            Ok(reservation) => ReloadAdmission {
+                reservation,
+                sessions: Arc::downgrade(&sessions),
+            },
+            Err(error) => {
+                crate::server::write_reload_state(
+                    &signal.request_id,
+                    &signal.hash,
+                    crate::server::ReloadPhase::Failed,
+                    signal.triggering_session.clone(),
+                );
+                crate::logging::error(&format!("Reload refused before effects: {error:#}"));
+                continue;
+            }
         };
 
         crate::logging::info(&format!(

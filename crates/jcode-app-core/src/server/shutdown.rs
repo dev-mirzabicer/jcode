@@ -23,7 +23,13 @@ pub struct RuntimeLifecycle {
     background: BackgroundTaskManager,
     mutation: Mutex<()>,
     wake: Arc<Notify>,
-    stopped: watch::Sender<Option<OperationId>>,
+    stopped: watch::Sender<Option<RuntimeExit>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeExit {
+    pub operation: OperationId,
+    pub forced: bool,
 }
 
 struct WakeMutation(Option<Arc<Notify>>);
@@ -48,8 +54,13 @@ impl RuntimeLifecycle {
     ) -> Result<Arc<Self>> {
         let store = RuntimeStopStore::new(&crate::storage::durable_state_dir(), socket)?;
         let owner = store.claim()?;
-        let registration = RuntimeAdmission::register(root, owner.identity())?;
+        let registration = RuntimeAdmission::register_namespace(
+            root,
+            owner.identity(),
+            Some(owner.namespace().into()),
+        )?;
         let executions = OwnedExecutions::bind(root, &owner).await?;
+        primaries.bind_runtime_admission(registration.admission().clone())?;
         let lifecycle = Arc::new(Self {
             owner,
             registration,
@@ -81,7 +92,7 @@ impl RuntimeLifecycle {
         Ok(lifecycle)
     }
 
-    pub fn stopped(&self) -> watch::Receiver<Option<OperationId>> {
+    pub fn stopped(&self) -> watch::Receiver<Option<RuntimeExit>> {
         self.stopped.subscribe()
     }
 
@@ -118,6 +129,7 @@ impl RuntimeLifecycle {
         let response = match request {
             RuntimeRequest::Status {} => {
                 let mut status = self.owner.status()?;
+                status.reload_in_progress = self.registration.admission().is_reloading();
                 status.work = self.work().await?;
                 RuntimeResponse::Status(status)
             }
@@ -129,6 +141,17 @@ impl RuntimeLifecycle {
                     .admission()
                     .review(&self.owner, options, self.work().await?)?,
             ),
+            RuntimeRequest::ReviewChange {
+                operation,
+                expected_revision,
+                options,
+            } => RuntimeResponse::Review(self.registration.admission().review_change(
+                &self.owner,
+                operation,
+                expected_revision,
+                options,
+                self.work().await?,
+            )?),
             RuntimeRequest::Begin { request, review } => {
                 RuntimeResponse::Operation(self.registration.admission().begin(
                     &self.owner,
@@ -210,6 +233,19 @@ impl RuntimeLifecycle {
                 return Ok(());
             };
             match operation.phase {
+                ShutdownPhase::Forced
+                    if operation.review.runtime == self.owner.identity()
+                        && self.owner.status()?.desired_stopped =>
+                {
+                    self.registration
+                        .admission()
+                        .confirm_forced(&self.owner, operation.id)?;
+                    self.stopped.send_replace(Some(RuntimeExit {
+                        operation: operation.id,
+                        forced: true,
+                    }));
+                    return Ok(());
+                }
                 ShutdownPhase::Stopped
                     if operation.review.runtime == self.owner.identity()
                         && self.owner.status()?.desired_stopped =>
@@ -232,7 +268,10 @@ impl RuntimeLifecycle {
                     self.registration
                         .admission()
                         .confirm_stopped(&self.owner, operation.id)?;
-                    self.stopped.send_replace(Some(operation.id));
+                    self.stopped.send_replace(Some(RuntimeExit {
+                        operation: operation.id,
+                        forced: false,
+                    }));
                     return Ok(());
                 }
                 ShutdownPhase::WaitingForCurrent => {
@@ -281,7 +320,12 @@ impl RuntimeLifecycle {
                     let timeout = Duration::from_secs(
                         operation.review.options.quiescence_timeout_seconds.into(),
                     );
-                    let result = tokio::time::timeout(timeout, self.quiesce(&operation)).await;
+                    let preservation_complete = std::sync::atomic::AtomicBool::new(false);
+                    let result = tokio::time::timeout(
+                        timeout,
+                        self.quiesce(&operation, &preservation_complete),
+                    )
+                    .await;
                     match result {
                         Ok(Ok(())) => {
                             let observed =
@@ -306,12 +350,39 @@ impl RuntimeLifecycle {
                                 operation.id,
                                 observed.revision,
                             )?;
-                            self.stopped.send_replace(Some(completed.id));
+                            self.stopped.send_replace(Some(RuntimeExit {
+                                operation: completed.id,
+                                forced: false,
+                            }));
                             return Ok(());
                         }
                         failure => {
                             let issue = match failure { Ok(Err(error)) => format!("{error:#}"), Err(_) => "Shutdown deadline elapsed before owned work and checkpoints completed".into(), Ok(Ok(())) => unreachable!() };
                             self.block(operation.id, issue).await?;
+                            let current = self.owner.inspect(operation.id)?;
+                            if current.phase == ShutdownPhase::Blocked
+                                && current.force_requested
+                                && !operation.force_requested
+                            {
+                                let _mutation = self.mutation.lock().await;
+                                self.owner.retry(current.id, current.revision, true)?;
+                                continue;
+                            }
+                            if operation.force_requested
+                                && preservation_complete.load(std::sync::atomic::Ordering::SeqCst)
+                            {
+                                let _mutation = self.mutation.lock().await;
+                                let current = self.owner.inspect(operation.id)?;
+                                let forced = self.registration.admission().force_exit(
+                                    &self.owner,
+                                    current.id,
+                                    current.revision,
+                                )?;
+                                self.stopped.send_replace(Some(RuntimeExit {
+                                    operation: forced.id,
+                                    forced: true,
+                                }));
+                            }
                             return Ok(());
                         }
                     }
@@ -331,14 +402,34 @@ impl RuntimeLifecycle {
         Ok(())
     }
 
-    async fn quiesce(&self, operation: &ShutdownOperation) -> Result<()> {
+    async fn quiesce(
+        &self,
+        operation: &ShutdownOperation,
+        preservation_complete: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
         let timeout =
             Duration::from_secs(operation.review.options.quiescence_timeout_seconds.into());
         let mut preserved = operation.preserved.clone();
         // Preservation must succeed for every eligible owner before parents are
         // interrupted. Earlier successful handoffs remain durable on failure.
         if operation.review.options.independent == IndependentTasks::KeepSupported {
-            for work in self.executions.inventory().await? {
+            let inventory = loop {
+                let inventory = self.executions.inventory().await?;
+                if self
+                    .registration
+                    .admission()
+                    .work()?
+                    .iter()
+                    .filter(|work| work.kind == RuntimeWorkKind::Execution)
+                    .all(|work| inventory.iter().any(|known| known.id == work.id))
+                {
+                    break inventory;
+                }
+                // An admitted producer may not have published its native
+                // capability yet. Never classify it as disposable by absence.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            for work in inventory {
                 if work.supported_survivor && !preserved.iter().any(|item| item.id == work.id) {
                     if let Some(work) = self.executions.preserve(&work.id, timeout).await? {
                         preserved.push(work);
@@ -348,6 +439,7 @@ impl RuntimeLifecycle {
                 }
             }
         }
+        preservation_complete.store(true, std::sync::atomic::Ordering::SeqCst);
         let kept = preserved
             .iter()
             .map(|work| work.id.clone())

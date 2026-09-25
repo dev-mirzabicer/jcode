@@ -57,6 +57,15 @@ pub struct ShutdownReview {
     pub revision: Revision,
     pub options: ShutdownOptions,
     pub work: Vec<RuntimeWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<ShutdownRevision>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShutdownRevision {
+    pub operation: OperationId,
+    pub revision: Revision,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -70,11 +79,18 @@ pub enum ShutdownPhase {
     /// The coordinator disappeared before proving its outcome. This never
     /// implies interrupted commands can be executed again.
     Interrupted,
+    Superseded,
+    /// Explicit force authorized this owner to exit without claiming graceful
+    /// quiescence. Remaining work and uncertain results stay inspectable.
+    Forced,
 }
 
 impl ShutdownPhase {
     pub fn terminal(self) -> bool {
-        matches!(self, Self::Stopped | Self::Cancelled | Self::Interrupted)
+        matches!(
+            self,
+            Self::Stopped | Self::Cancelled | Self::Interrupted | Self::Superseded | Self::Forced
+        )
     }
 }
 
@@ -87,6 +103,8 @@ pub struct ShutdownOperation {
     pub revision: Revision,
     pub phase: ShutdownPhase,
     pub force_requested: bool,
+    #[serde(default)]
+    pub cancellation_closed: bool,
     /// Fresh observations, distinct from the original immutable review.
     pub remaining: Vec<RuntimeWork>,
     pub preserved: Vec<RuntimeWork>,
@@ -97,6 +115,8 @@ pub struct ShutdownOperation {
 pub struct RuntimeStatus {
     /// Present only on a response from the actual live coordinator.
     pub runtime: Option<String>,
+    #[serde(default)]
+    pub reload_in_progress: bool,
     pub desired_stopped: bool,
     pub revision: Revision,
     pub operation: Option<ShutdownOperation>,
@@ -108,6 +128,11 @@ pub struct RuntimeStatus {
 pub enum RuntimeRequest {
     Status {},
     Review {
+        options: ShutdownOptions,
+    },
+    ReviewChange {
+        operation: OperationId,
+        expected_revision: Revision,
         options: ShutdownOptions,
     },
     Begin {

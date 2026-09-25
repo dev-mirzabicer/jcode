@@ -501,6 +501,8 @@ pub(super) async fn handle_client(
         soft_interrupt_queues,
         await_members_runtime,
         swarm_mutation_runtime,
+        #[cfg(unix)]
+        None,
     )
     .await
 }
@@ -541,6 +543,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
     soft_interrupt_queues: SessionInterruptQueues,
     await_members_runtime: AwaitMembersRuntime,
     swarm_mutation_runtime: SwarmMutationRuntime,
+    #[cfg(unix)] lifecycle: Option<Arc<super::shutdown::RuntimeLifecycle>>,
 ) -> Result<()> {
     sessions.configure_input_restore(
         provider_template.clone(),
@@ -576,6 +579,16 @@ pub(super) async fn handle_client_with_instruction_repositories(
         match decode_request(&line) {
             Ok(request) => {
                 if let Some(event) = primary_control_read(&request) {
+                    write_direct_event(&writer, &event).await?;
+                    continue;
+                }
+                if let Some(event) = super::runtime_control::dispatch(
+                    &request,
+                    #[cfg(unix)]
+                    lifecycle.as_ref(),
+                )
+                .await
+                {
                     write_direct_event(&writer, &event).await?;
                     continue;
                 }
@@ -1708,6 +1721,11 @@ pub(super) async fn handle_client_with_instruction_repositories(
             }
         } else { None };
         match request {
+            Request::RuntimeProbe { .. } | Request::RuntimeControl { .. } => {
+                if let Some(event) = super::runtime_control::dispatch(&request, #[cfg(unix)] lifecycle.as_ref()).await {
+                    let _ = client_event_tx.send(event);
+                }
+            }
             Request::ScopedContext { .. } => unreachable!("Scoped context was normalized before dispatch"),
             Request::PrimaryControlProbe { .. } | Request::PrimaryInputRead { .. } => {
                 if let Some(event) = primary_control_read(&request) { let _ = client_event_tx.send(event); }

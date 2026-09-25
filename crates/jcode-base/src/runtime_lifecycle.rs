@@ -162,6 +162,7 @@ impl RuntimeStopStore {
         if !self.directory.try_exists()? {
             return Ok(RuntimeStatus {
                 runtime: None,
+                reload_in_progress: false,
                 desired_stopped: false,
                 revision: 0,
                 operation: None,
@@ -218,6 +219,7 @@ impl Transaction {
     fn status(&self) -> RuntimeStatus {
         RuntimeStatus {
             runtime: None,
+            reload_in_progress: false,
             desired_stopped: self.journal.desired_stopped,
             revision: self.journal.revision,
             operation: self.journal.current.and_then(|id| {
@@ -282,6 +284,14 @@ impl RuntimeStopOwner {
     /// caller's acknowledgement. This never reexecutes shutdown work or changes
     /// the operation revision. The live owner must independently check work.
     pub fn confirm_stopped(&self, id: OperationId) -> Result<()> {
+        self.confirm_exit(id, false)
+    }
+
+    pub fn confirm_forced(&self, id: OperationId) -> Result<()> {
+        self.confirm_exit(id, true)
+    }
+
+    fn confirm_exit(&self, id: OperationId, forced: bool) -> Result<()> {
         let tx = self.store.transaction()?;
         let op = tx
             .journal
@@ -293,10 +303,14 @@ impl RuntimeStopOwner {
             tx.journal.current == Some(id)
                 && tx.journal.desired_stopped
                 && op.review.runtime == self.identity
-                && op.phase == ShutdownPhase::Stopped
-                && op.remaining.is_empty()
-                && op.issues.is_empty(),
-            "Runtime has no matching stopped checkpoint"
+                && if forced {
+                    op.phase == ShutdownPhase::Forced && op.force_requested && !op.issues.is_empty()
+                } else {
+                    op.phase == ShutdownPhase::Stopped
+                        && op.remaining.is_empty()
+                        && op.issues.is_empty()
+                },
+            "Runtime has no matching exit checkpoint"
         );
         open_file(&self.store.directory.join("journal.json"), false, true)?.sync_all()?;
         tx.lease.sync_all()?;
@@ -343,22 +357,65 @@ impl RuntimeStopOwner {
         options: ShutdownOptions,
         work: Vec<RuntimeWork>,
     ) -> Result<ShutdownReview> {
+        self.review_transition(options, work, None)
+    }
+
+    pub fn review_change(
+        &self,
+        operation: OperationId,
+        expected: Revision,
+        options: ShutdownOptions,
+        work: Vec<RuntimeWork>,
+    ) -> Result<ShutdownReview> {
+        self.review_transition(
+            options,
+            work,
+            Some(ShutdownRevision {
+                operation,
+                revision: expected,
+            }),
+        )
+    }
+
+    fn review_transition(
+        &self,
+        options: ShutdownOptions,
+        work: Vec<RuntimeWork>,
+        replaces: Option<ShutdownRevision>,
+    ) -> Result<ShutdownReview> {
         ensure!(
             options.quiescence_timeout_seconds > 0,
             "Quiescence timeout must be positive"
         );
         validate_work(&work)?;
         let mut tx = self.store.transaction()?;
-        ensure!(
-            !tx.journal.operations.iter().any(|op| !op.phase.terminal()),
-            "Another runtime shutdown is active"
-        );
+        if let Some(target) = &replaces {
+            ensure!(
+                tx.journal.current == Some(target.operation),
+                "Shutdown replacement target changed"
+            );
+            let prior = tx.operation(target.operation, &self.identity)?;
+            ensure!(
+                prior.revision == target.revision
+                    && matches!(
+                        prior.phase,
+                        ShutdownPhase::WaitingForCurrent | ShutdownPhase::Blocked
+                    ),
+                "Only the current waiting or blocked revision can be reviewed for replacement"
+            );
+        } else {
+            ensure!(
+                !tx.journal.operations.iter().any(|op| !op.phase.terminal()),
+                "Another runtime shutdown is active"
+            );
+        }
         let review = ShutdownReview {
             id: ReviewId::new(),
             runtime: self.identity.clone(),
             revision: tx.journal.revision,
             options,
             work,
+            replaces,
         };
         tx.journal.reviews.push(review.clone());
         tx.commit()?;
@@ -388,10 +445,6 @@ impl RuntimeStopOwner {
             );
             return Ok(op.clone());
         }
-        ensure!(
-            !tx.journal.operations.iter().any(|op| !op.phase.terminal()),
-            "Another runtime shutdown is active"
-        );
         let review = tx
             .journal
             .reviews
@@ -414,6 +467,34 @@ impl RuntimeStopOwner {
             work.iter().all(|item| review.work.contains(item)),
             "Shutdown review is stale: new work or changed owners require review"
         );
+        let mut cancellation_closed = review.options.strategy == StopStrategy::Interrupt;
+        if let Some(target) = &review.replaces {
+            ensure!(
+                tx.journal.current == Some(target.operation),
+                "Shutdown replacement target changed"
+            );
+            let prior = tx.operation(target.operation, &self.identity)?;
+            ensure!(
+                prior.revision == target.revision
+                    && matches!(
+                        prior.phase,
+                        ShutdownPhase::WaitingForCurrent | ShutdownPhase::Blocked
+                    ),
+                "Shutdown replacement review is stale"
+            );
+            cancellation_closed |=
+                prior.cancellation_closed || prior.phase == ShutdownPhase::Blocked;
+            prior.phase = ShutdownPhase::Superseded;
+            prior.revision = prior
+                .revision
+                .checked_add(1)
+                .context("Shutdown revision exhausted")?;
+        } else {
+            ensure!(
+                !tx.journal.operations.iter().any(|op| !op.phase.terminal()),
+                "Another runtime shutdown is active"
+            );
+        }
         let phase = match review.options.strategy {
             StopStrategy::FinishCurrent => ShutdownPhase::WaitingForCurrent,
             StopStrategy::Interrupt => ShutdownPhase::Stopping,
@@ -425,6 +506,7 @@ impl RuntimeStopOwner {
             revision: 1,
             phase,
             force_requested: false,
+            cancellation_closed,
             remaining: work,
             preserved: Vec::new(),
             issues: Vec::new(),
@@ -444,7 +526,7 @@ impl RuntimeStopOwner {
         }
         ensure!(op.revision == expected, "Shutdown revision changed");
         ensure!(
-            op.phase == ShutdownPhase::WaitingForCurrent,
+            op.phase == ShutdownPhase::WaitingForCurrent && !op.cancellation_closed,
             "Shutdown can be cancelled only while waiting"
         );
         op.phase = ShutdownPhase::Cancelled;
@@ -462,6 +544,7 @@ impl RuntimeStopOwner {
                 "Shutdown is no longer waiting"
             );
             op.phase = ShutdownPhase::Stopping;
+            op.cancellation_closed = true;
             Ok(())
         })
     }
@@ -475,6 +558,7 @@ impl RuntimeStopOwner {
         self.update(id, expected, |op| {
             ensure!(op.phase == ShutdownPhase::Blocked || (force && op.phase == ShutdownPhase::Stopping), "Only a blocked shutdown can retry; Force cannot replace FinishCurrent while waiting");
             op.phase = ShutdownPhase::Stopping;
+            op.cancellation_closed = true;
             op.force_requested |= force;
             op.issues.clear();
             Ok(())
@@ -552,6 +636,16 @@ impl RuntimeStopOwner {
         })
     }
 
+    pub fn force_exit(&self, id: OperationId, expected: Revision) -> Result<ShutdownOperation> {
+        self.update(id, expected, |op| {
+            ensure!(op.phase == ShutdownPhase::Blocked && op.force_requested && !op.issues.is_empty(), "Forced exit requires an explicit failed force attempt and retained uncertainty");
+            op.phase = ShutdownPhase::Forced;
+            op.cancellation_closed = true;
+            op.issues.push("Explicit Force authorized runtime exit. Remaining owner outcomes and incomplete checkpoints are uncertain; do not replay effects.".into());
+            Ok(())
+        })
+    }
+
     fn update(
         &self,
         id: OperationId,
@@ -559,6 +653,10 @@ impl RuntimeStopOwner {
         change: impl FnOnce(&mut ShutdownOperation) -> Result<()>,
     ) -> Result<ShutdownOperation> {
         let mut tx = self.store.transaction()?;
+        ensure!(
+            tx.journal.current == Some(id),
+            "Only the current shutdown operation may change"
+        );
         let op = tx.operation(id, &self.identity)?;
         ensure!(op.revision == expected, "Shutdown revision changed");
         change(op)?;

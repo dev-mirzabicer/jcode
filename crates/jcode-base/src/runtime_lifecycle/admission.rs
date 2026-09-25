@@ -18,6 +18,7 @@ enum Mode {
     Draining,
     Stopping,
     Sealed,
+    Reloading,
 }
 
 struct State {
@@ -34,6 +35,7 @@ struct AdmittedWork {
 pub struct RuntimeAdmission {
     state: Mutex<State>,
     identity: String,
+    namespace: Option<String>,
 }
 
 /// The caller retains this registration for the runtime's complete lifetime.
@@ -42,6 +44,20 @@ pub struct RuntimeRegistration {
     root: PathBuf,
     admission: Arc<RuntimeAdmission>,
 }
+
+pub struct ReloadReservation(Arc<RuntimeAdmission>);
+impl Drop for ReloadReservation {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.mode == Mode::Reloading {
+            state.mode = Mode::Running;
+        }
+    }
+}
 impl Drop for RuntimeRegistration {
     fn drop(&mut self) {
         let mut state = self
@@ -49,8 +65,9 @@ impl Drop for RuntimeRegistration {
             .state
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let reloading = state.mode == Mode::Reloading;
         state.mode = Mode::Stopping;
-        if !state.work.is_empty() {
+        if reloading || !state.work.is_empty() {
             return;
         }
         let mut runtimes = RUNTIMES.lock().unwrap_or_else(|p| p.into_inner());
@@ -88,6 +105,24 @@ impl Drop for Permit {
 }
 
 impl RuntimeAdmission {
+    pub fn reserve_reload(self: &Arc<Self>) -> Result<ReloadReservation> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            state.mode == Mode::Running,
+            "Runtime shutdown or reload already owns the transition"
+        );
+        state.mode = Mode::Reloading;
+        Ok(ReloadReservation(self.clone()))
+    }
+
+    pub fn is_reloading(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.mode == Mode::Reloading)
+    }
     /// Only short existing-work control transactions use this boundary. It is
     /// not permission to launch a producer while the runtime is draining.
     pub fn control_boundary<T>(&self, control: impl FnOnce() -> T) -> Result<T> {
@@ -134,6 +169,20 @@ impl RuntimeAdmission {
         result
     }
     pub fn register(root: &Path, identity: &str) -> Result<RuntimeRegistration> {
+        Self::register_namespace(root, identity, None)
+    }
+
+    pub fn register_namespace(
+        root: &Path,
+        identity: &str,
+        namespace: Option<String>,
+    ) -> Result<RuntimeRegistration> {
+        if let Some(namespace) = &namespace {
+            ensure!(
+                namespace.len() == 64 && namespace.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "Invalid runtime delivery namespace"
+            );
+        }
         let root = root.canonicalize()?;
         let mut runtimes = RUNTIMES
             .lock()
@@ -144,6 +193,7 @@ impl RuntimeAdmission {
         );
         let admission = Arc::new(Self {
             identity: identity.into(),
+            namespace,
             state: Mutex::new(State {
                 mode: Mode::Running,
                 work: BTreeMap::new(),
@@ -151,6 +201,10 @@ impl RuntimeAdmission {
         });
         runtimes.insert(root.clone(), Arc::downgrade(&admission));
         Ok(RuntimeRegistration { root, admission })
+    }
+
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
     }
 
     pub fn for_root(root: &Path) -> Result<Option<Arc<Self>>> {
@@ -317,10 +371,59 @@ impl RuntimeAdmission {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            state.mode != Mode::Reloading,
+            "Reload already owns the runtime transition"
+        );
         let result = owner.begin(request, review, merge_work(&state, observed));
         // Even an error can follow atomic publication (e.g. directory fsync).
         // Reconcile authority while still holding the fence; uncertainty closes
         // admission rather than pretending the durable write was rolled back.
+        self.reconcile(&mut state, owner)?;
+        result
+    }
+
+    pub fn review_change(
+        &self,
+        owner: &RuntimeStopOwner,
+        operation: OperationId,
+        expected: Revision,
+        options: ShutdownOptions,
+        observed: Vec<RuntimeWork>,
+    ) -> Result<ShutdownReview> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            matches!(state.mode, Mode::Draining | Mode::Stopping),
+            "Runtime has no revisable shutdown"
+        );
+        owner.review_change(operation, expected, options, merge_work(&state, observed))
+    }
+
+    pub fn force_exit(
+        &self,
+        owner: &RuntimeStopOwner,
+        operation: OperationId,
+        expected: Revision,
+    ) -> Result<ShutdownOperation> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(state.mode == Mode::Stopping, "Runtime is not stopping");
+        let result = owner.force_exit(operation, expected);
+        self.reconcile(&mut state, owner)?;
+        result
+    }
+
+    pub fn confirm_forced(&self, owner: &RuntimeStopOwner, operation: OperationId) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        let result = owner.confirm_forced(operation);
         self.reconcile(&mut state, owner)?;
         result
     }
@@ -335,6 +438,10 @@ impl RuntimeAdmission {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            state.mode != Mode::Reloading,
+            "Reload already owns the runtime transition"
+        );
         let result = owner.cancel_wait(operation, expected);
         self.reconcile(&mut state, owner)?;
         result
@@ -370,7 +477,7 @@ impl RuntimeAdmission {
         );
         state.mode = match status.operation.map(|op| op.phase) {
             Some(ShutdownPhase::WaitingForCurrent) => Mode::Draining,
-            Some(ShutdownPhase::Stopped) => Mode::Sealed,
+            Some(ShutdownPhase::Stopped | ShutdownPhase::Forced) => Mode::Sealed,
             _ if !status.desired_stopped => Mode::Running,
             _ => Mode::Stopping,
         };
