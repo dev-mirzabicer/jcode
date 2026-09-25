@@ -41,10 +41,10 @@ mod scope;
 mod startup_copy;
 pub use startup_copy::StartupCopyIntent;
 mod storage;
-#[cfg(test)]
-mod tests;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
 pub use storage::{CatalogLease, RootLease};
 
 pub type Result<T> = std::result::Result<T, Issue>;
@@ -138,4 +138,4 @@ pub(crate) fn entity(connection: &Connection, id: EntityId) -> Result<Entity> {
 }
 
 #[cfg(unix)]
-pub use closeout::{CloseoutRuntime, CLOSEOUT_EXECUTION_SESSION, CLOSEOUT_EXECUTION_TOOL};
+pub use closeout::{CLOSEOUT_EXECUTION_SESSION, CLOSEOUT_EXECUTION_TOOL, CloseoutRuntime};

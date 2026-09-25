@@ -171,6 +171,7 @@ impl WorkspaceService {
             let metadata = std::fs::symlink_metadata(&original).map_err(io)?;
             let actual = Witness::of(&metadata)?;
             if item.entry.kind == CloseoutEntryKind::Directory {
+                inventory::verify_removal_metadata(&item, &original)?;
                 if actual.inode != witness.inode
                     || actual.device != witness.device
                     || actual.created != witness.created

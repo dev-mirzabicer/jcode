@@ -2,8 +2,21 @@
 //! access/ctime and link counts are not portable metadata content.
 use super::*;
 
-#[cfg(target_os = "macos")]
 pub(super) fn fingerprint(path: &Path, kind: CloseoutEntryKind) -> Result<String> {
+    fingerprint_impl(path, kind, false)
+}
+
+/// Child removal legitimately changes a directory's mtime. Content metadata,
+/// including ACLs, xattrs, flags, ownership, mode and birth time, must not change.
+pub(in crate::workspace::closeout) fn removal_fingerprint(
+    path: &Path,
+    kind: CloseoutEntryKind,
+) -> Result<String> {
+    fingerprint_impl(path, kind, true)
+}
+
+#[cfg(target_os = "macos")]
+fn fingerprint_impl(path: &Path, kind: CloseoutEntryKind, removing: bool) -> Result<String> {
     use crate::location::native_files::VerifiedDirectory;
     use std::ffi::{CString, c_void};
     use std::os::fd::AsRawFd;
@@ -162,7 +175,11 @@ pub(super) fn fingerprint(path: &Path, kind: CloseoutEntryKind) -> Result<String
         before.mode,
         before.owner,
         before.created,
-        before.modified,
+        if removing && kind == CloseoutEntryKind::Directory {
+            None
+        } else {
+            Some(before.modified)
+        },
         stat.st_flags,
         attributes,
         acl_text,
@@ -170,7 +187,7 @@ pub(super) fn fingerprint(path: &Path, kind: CloseoutEntryKind) -> Result<String
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn fingerprint(_: &Path, _: CloseoutEntryKind) -> Result<String> {
+fn fingerprint_impl(_: &Path, _: CloseoutEntryKind, _: bool) -> Result<String> {
     Err(issue(
         IssueCode::UnsupportedCapability,
         "Native metadata verification is unavailable",

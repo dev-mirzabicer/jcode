@@ -110,6 +110,41 @@ impl Default for LocationResolver {
     }
 }
 impl LocationResolver {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn without_volume_for_test(&self, identity: VolumeIdentity) -> Self {
+        struct Unavailable {
+            inner: Arc<dyn VolumeEnvironment>,
+            identity: VolumeIdentity,
+        }
+        impl VolumeEnvironment for Unavailable {
+            fn mounted(&self) -> Result<Vec<VolumeInfo>> {
+                Ok(self
+                    .inner
+                    .mounted()?
+                    .into_iter()
+                    .filter(|volume| volume.identity != self.identity)
+                    .collect())
+            }
+            fn containing(&self, path: &Path) -> Result<VolumeInfo> {
+                let volume = self.inner.containing(path)?;
+                if volume.identity == self.identity {
+                    return Err(LocationError::new(
+                        LocationIssue::OfflineVolume,
+                        path,
+                        "owned fixture volume observation is unavailable",
+                    ));
+                }
+                Ok(volume)
+            }
+        }
+        Self {
+            environment: Arc::new(Unavailable {
+                inner: self.environment.clone(),
+                identity,
+            }),
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             environment: Arc::new(native::NativeVolumes),

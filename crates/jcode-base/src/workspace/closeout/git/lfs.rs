@@ -115,6 +115,7 @@ pub(super) async fn preserve(
                 blockers: vec![],
             },
             witness: Some(witness),
+            removal_metadata: None,
         };
         let destination = stage.join("lfs").join(oid);
         files::copy_entry(archive, &item, &source, &destination)?;

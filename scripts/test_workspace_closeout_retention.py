@@ -31,6 +31,8 @@ def complete(self):
         ]}; finish='tool_calls'
     elif number==3:
         delta={'tool_calls':[tool(0,'bash',{'command':'pwd > repaired-cwd; printf "repaired tool output\\n"','intent':'Verify explicitly repaired location','notify':False,'wake':False})]};finish='tool_calls'
+    elif number==5:
+        delta={'tool_calls':[tool(0,'write',{'file_path':str(checkout/'forbidden-new-write'),'content':'must not be written','intent':'Exercise stale grant rejection in owned replacement fixture'})]};finish='tool_calls'
     else: delta={'content':'Synthetic retention fixture complete'};finish='stop'
     chunks=[{'id':'fixture','object':'chat.completion.chunk','choices':[{'index':0,'delta':delta,'finish_reason':None}]},{'id':'fixture','object':'chat.completion.chunk','choices':[{'index':0,'delta':{},'finish_reason':finish}]}]
     body=(''.join('data: '+json.dumps(chunk)+'\n\n' for chunk in chunks)+'data: [DONE]\n\n').encode()
@@ -50,6 +52,8 @@ def change(action,**fields):
     review=ws('review','review',expected_revision=ws('status','status')['revision'],change={'action':action,**fields})
     receipt=ws('apply','receipt',request=uid(),review=review['id']);assert not receipt['issues'],receipt;return receipt['targets'][0]
 def co(request):return ws('closeout','closeout',request=request)
+def permission(request,kind):
+    response=ws('permissions','permissions',request=request);assert response['kind']==kind,response;return response['value']
 def check_wait(check,label,seconds=180):
     deadline=time.monotonic()+seconds
     while time.monotonic()<deadline:
@@ -112,6 +116,8 @@ try:
     assert launch['response']['status']=='launched',launch;session=launch['response']['record']['session']
     assert rpc('subscribe',target_session_id=session,working_dir=str(checkout),selfdev=False)['type']=='done'
     attached=True
+    grant_review=permission({'action':'review','expected_revision':ws('status','status')['revision'],'change':{'action':'issue','audience':{'kind':'session','id':session},'target':{'kind':'root','id':location['id']},'proposal':None}},'review')
+    grant=permission({'action':'apply','request':uid(),'review':grant_review['id']},'mutation')['grant']
     submitted=rpc('primary_input',input={'id':uid(),'session':session,'delivery':'safe_boundary','content':'INITIAL-RETENTION-FIXTURE','images':[]})
     assert submitted['type']=='primary_input_receipt',submitted
     check_wait(lambda:settled(2),'initial-primary-completion')
@@ -158,8 +164,22 @@ try:
     capture=next(path for path in Path(record['preservation_directory']).iterdir() if (path/'verified-restore/effect-count').is_file())
     assert (capture/'verified-restore/effect-count').read_text()=='x'
     assert (capture/'verified-restore/linked.md').read_text()=='Unique linked closeout fixture information\n'
+    # This is an explicit fixture-owned replacement, not runtime resurrection.
+    checkout.mkdir();(checkout/'replacement-data').write_text('unrelated replacement survives')
+    assert permission({'action':'grant','grant':grant['id']},'grant')['state']=='active'
+    scope=permission({'action':'scope','session':session},'scope')
+    assert not any(root['location']['id']==location['id'] and root['issue'] is None for root in scope['roots']),scope
+    denied=rpc('primary_input',input={'id':uid(),'session':session,'delivery':'safe_boundary','content':'REPLACEMENT-WRITE-PROBE','images':[]})
+    assert denied['type']=='primary_input_receipt',denied
+    check_wait(lambda:settled(6),'stale-grant-denial-completion')
+    assert not (checkout/'forbidden-new-write').exists()
+    assert (checkout/'replacement-data').read_text()=='unrelated replacement survives'
+    with sqlite3.connect((f.home/'execution/index.sqlite').as_uri()+'?mode=ro',uri=True) as db:
+        denied_runs=db.execute("SELECT state,complete FROM runs WHERE session_id=? AND tool='write'",(session,)).fetchall()
+    assert denied_runs==[('failed',1)],denied_runs
+    assert co({'action':'history','location':location['id']})['value']['record']['stage']=='closed'
     assert len(list((f.home/'sessions').glob('*.json')))==1,'Administration created a provisional Session'
-    result={'session':session,'operation':record['operation'],'location':location['id'],'retained_runs':initial_runs,'prior_session_content_and_outputs_preserved':True,'nonwaking_scope_notices':scope_notices,'linked_metadata_equal':True,'explicit_cwd_repair':True,'input_refusal':rejection,'provider_requests':len(f.posts),'paid_requests':0,'fixture_managed_rollout':True,'history':history}
+    result={'session':session,'operation':record['operation'],'location':location['id'],'retained_runs':initial_runs,'prior_session_content_and_outputs_preserved':True,'nonwaking_scope_notices':scope_notices,'linked_metadata_equal':True,'explicit_cwd_repair':True,'closed_grant_not_revived':True,'input_refusal':rejection,'provider_requests':len(f.posts),'paid_requests':0,'fixture_managed_rollout':True,'history':history}
 finally:
     try:
         if f.proc and f.proc.poll() is None:

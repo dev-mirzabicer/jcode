@@ -17,6 +17,7 @@ struct RecoveryFacts {
     work: CloseoutWorkReport,
     issues: Vec<Issue>,
     adopt: Option<PathBuf>,
+    historical_failure: Option<references::HistoricalFailure>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -28,6 +29,8 @@ struct PreparedRecovery {
     // Retained prior authority/evidence is inspectable even after restart.
     prior: StoredCloseout,
     reviewed_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    historical_failure: Option<references::HistoricalFailure>,
 }
 
 impl WorkspaceService {
@@ -103,6 +106,7 @@ impl WorkspaceService {
             work,
             mut issues,
             adopt,
+            historical_failure,
         } = self
             .recovery_facts(&stored, action, runtime)
             .await
@@ -121,6 +125,14 @@ impl WorkspaceService {
             adopt_empty_holding: adopt,
             work,
             issues,
+            evidence_issues: if action == CloseoutRecoveryAction::UnregisterRetainFiles {
+                historical_failure
+                    .iter()
+                    .map(|failure| failure.issue.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
         let prepared = PreparedRecovery {
             review: review.clone(),
@@ -129,6 +141,7 @@ impl WorkspaceService {
             references,
             prior,
             reviewed_by: client.0.clone(),
+            historical_failure,
         };
         runtime.check_stop().map_err(after_fence)?;
         let mut connection = self.connection()?;
@@ -219,6 +232,7 @@ impl WorkspaceService {
             work,
             issues,
             adopt,
+            historical_failure,
         } = self
             .recovery_facts(&stored, prepared.review.action, runtime)
             .await?;
@@ -232,6 +246,8 @@ impl WorkspaceService {
             != verification::hash_value(&prepared.observations)?
             || references != prepared.references
             || adopt != prepared.review.adopt_empty_holding
+            || verification::hash_value(&historical_failure)?
+                != verification::hash_value(&prepared.historical_failure)?
         {
             return Err(issue(
                 IssueCode::Conflict,
@@ -255,6 +271,7 @@ impl WorkspaceService {
                 &report,
                 &serde_json::json!({"kind":"checkout_retention_decision_evidence", "review":prepared.review,
                 "issued_by":client.0, "observations":observations, "prior":prepared.prior, "current_before_commit":stored,
+                "unavailable_reference_evidence":prepared.historical_failure,
                 "no_filesystem_removal_performed":true}),
             )?;
             Some(report)
@@ -275,6 +292,10 @@ impl WorkspaceService {
         )?;
         stored.record.revision = receipt.revision;
         stored.record.issues.clear();
+        stored
+            .record
+            .issues
+            .extend(prepared.review.evidence_issues.clone());
         match prepared.review.action {
             CloseoutRecoveryAction::RestartPreparation => {
                 stored.removal = None;
@@ -437,6 +458,7 @@ impl WorkspaceService {
         };
         let references = self.closeout_references(stored, runtime.session_root)?;
         let reference_digest = verification::references_digest(&references)?;
+        let historical_failure = references.historical_failure.clone();
         let mut issues = Vec::new();
         let mut adopt = None;
         match action {
@@ -487,6 +509,7 @@ impl WorkspaceService {
             work,
             issues,
             adopt,
+            historical_failure,
         })
     }
 

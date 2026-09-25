@@ -4,7 +4,7 @@ use super::*;
 use inventory::{Item, Witness};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-mod metadata;
+pub(super) mod metadata;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct PreservedItem {

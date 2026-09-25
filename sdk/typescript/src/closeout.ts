@@ -27,6 +27,8 @@ export interface CloseoutRecoveryPath {path: string; present: boolean; matches_r
 export interface CloseoutRecoveryReview {
   id: string; operation: string; revision: number; action: CloseoutRecoveryAction; paths: CloseoutRecoveryPath[];
   adopt_empty_holding: string | null; work: CloseoutWorkReport; issues: CloseoutIssue[];
+  /** Unavailable historical evidence disclosed for a non-destructive retention decision. */
+  evidence_issues?: CloseoutIssue[];
 }
 export type CloseoutEntryKind = "file" | "directory" | "symlink" | "mount" | "special" | "git" | "reference";
 export interface CloseoutEntry {

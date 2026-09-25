@@ -14,6 +14,27 @@ pub(super) struct PreparedChange {
 }
 
 impl WorkspaceService {
+    fn require_registration_admission(
+        &self,
+        connection: &Connection,
+        binding: &PhysicalBinding,
+    ) -> Result<()> {
+        let path = binding.observed_path();
+        self.reject_closeout_control_paths(connection, None, &[path.to_path_buf()])?;
+        for location in scope::locations(connection)? {
+            if location.lifecycle == LocationLifecycle::Closing
+                && (path.starts_with(&location.observed_path)
+                    || location.observed_path.starts_with(path))
+            {
+                return Err(issue(
+                    IssueCode::LiveWork,
+                    "Registration overlaps a closing checkout; resolve its closeout before changing physical ownership",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn review_organization_change(
         &self,
         expected: Revision,
@@ -92,6 +113,9 @@ impl WorkspaceService {
         } else {
             None
         };
+        if let Some(binding) = &binding {
+            self.require_registration_admission(&connection, binding)?;
+        }
         let binding = match (binding, &previous_binding) {
             (Some(binding), Some(previous)) => Some(
                 binding.with_generation(
@@ -149,6 +173,9 @@ impl WorkspaceService {
         let input = digest(encode(&prepared.review.change)?.as_bytes());
         if let Some(receipt) = replay(&connection, request, &input)? {
             return Ok(receipt);
+        }
+        if let Some(binding) = &prepared.binding {
+            self.require_registration_admission(&connection, binding)?;
         }
         let _root_lease = prepared
             .binding
@@ -226,6 +253,9 @@ impl WorkspaceService {
             return Ok(receipt);
         }
         require_revision(&transaction, prepared.review.revision)?;
+        if let Some(binding) = &prepared.binding {
+            self.require_registration_admission(&transaction, binding)?;
+        }
         apply(&transaction, &prepared)?;
         let receipt = commit_receipt(
             &transaction,

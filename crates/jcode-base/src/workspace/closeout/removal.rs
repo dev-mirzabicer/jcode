@@ -30,6 +30,15 @@ impl Removal {
     pub(super) fn control_paths(&self) -> [&Path; 2] {
         [&self.quarantine, &self.holding]
     }
+
+    pub(super) fn source_relative_path(&self, path: &Path) -> Option<PathBuf> {
+        if let Ok(relative) = path.strip_prefix(&self.quarantine) {
+            return Some(relative.to_path_buf());
+        }
+        let pending = self.pending.as_ref()?;
+        let relative = path.strip_prefix(self.holding.join("entry")).ok()?;
+        Some(pending.item.entry.path.join(relative))
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct WorktreeRetirement {
@@ -433,6 +442,7 @@ impl WorkspaceService {
         if backup::file_digest(path)? != *digest {
             return Err(corrupt("Removal reference snapshot changed"));
         }
+        self.require_current_removal_references(stored, runtime)?;
         let mut findings = Vec::new();
         runtime.observe_internal(self, stored, &mut findings)?;
         if !findings.is_empty() {
@@ -595,6 +605,7 @@ impl WorkspaceService {
                     }
                 }
             }
+            self.require_current_removal_references(stored, runtime)?;
             self.retire_worktree(stored, runtime).await?;
             if present(&removal.holding)?
                 && !work::external_work(
@@ -700,6 +711,18 @@ impl WorkspaceService {
     }
 
     #[cfg(target_os = "macos")]
+    fn require_current_removal_references(
+        &self,
+        stored: &StoredCloseout,
+        runtime: &CloseoutRuntime<'_>,
+    ) -> Result<()> {
+        let references = self.closeout_references(stored, runtime.session_root)?;
+        if let Some(issue) = references.issues.first() {
+            return Err(issue.clone());
+        }
+        verification::linked_content(stored, &references)
+    }
+
     async fn retire_worktree(
         &self,
         stored: &mut StoredCloseout,
@@ -1066,6 +1089,7 @@ fn present(path: &Path) -> Result<bool> {
 }
 
 fn verify_entry(item: &Item, path: &Path, captured: bool) -> Result<std::fs::Metadata> {
+    inventory::verify_removal_metadata(item, path)?;
     let metadata = std::fs::symlink_metadata(path).map_err(io)?;
     let current = Witness::of(&metadata)?;
     let expected = item

@@ -10,6 +10,18 @@ pub(super) struct References {
     pub sessions: Vec<SessionReference>,
     pub links: Vec<Link>,
     pub issues: Vec<Issue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub historical_failure: Option<HistoricalFailure>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct HistoricalFailure {
+    #[serde(with = "jcode_workspace_types::filesystem_path::optional")]
+    pub path: Option<PathBuf>,
+    pub expected_digest: Option<String>,
+    pub observed_digest: Option<String>,
+    pub witness: Option<inventory::Witness>,
+    pub issue: Issue,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct SessionReference {
@@ -34,8 +46,12 @@ impl WorkspaceService {
         stored: &StoredCloseout,
         session_root: &Path,
     ) -> Result<References> {
+        let mut roots = vec![stored.binding.observed_path()];
+        if let Some(removal) = &stored.removal {
+            roots.extend(removal.control_paths());
+        }
         for control in [session_root, self.root.as_path()] {
-            if contained(control, stored.binding.observed_path())? {
+            if contained_in(control, &roots)? {
                 return Err(issue(
                     IssueCode::Referenced,
                     "Checkout contains durable harness state; relocate that state explicitly before closeout",
@@ -58,6 +74,7 @@ impl WorkspaceService {
             sessions: Vec::new(),
             links: Vec::new(),
             issues: Vec::new(),
+            historical_failure: None,
         };
         let mut project = None;
         if let Some(home) = location.home {
@@ -96,7 +113,9 @@ impl WorkspaceService {
         for other in scope::locations(&transaction)? {
             if other.id != location.id
                 && !other.lifecycle.is_historical()
-                && other.observed_path.starts_with(&location.observed_path)
+                && roots
+                    .iter()
+                    .any(|root| other.observed_path.starts_with(root))
             {
                 result.issues.push(issue(IssueCode::Referenced, format!("Registered location {} is inside this checkout; resolve its independent lifecycle before removal", other.id)));
                 result.links.push(Link {
@@ -140,16 +159,16 @@ impl WorkspaceService {
                     None => false,
                 };
                 if let Some(path) = &session.working_dir {
-                    related |= contained(Path::new(path), &location.observed_path)?;
+                    related |= contained_in(Path::new(path), &roots)?;
                 }
                 if let Some(location_state) = &session.location {
-                    related |= contained(&location_state.initial_cwd, &location.observed_path)?;
+                    related |= contained_in(&location_state.initial_cwd, &roots)?;
                 }
                 for page in
                     crate::side_panel::references_for_session_in(session_root, id).map_err(io)?
                 {
                     let path = PathBuf::from(page.file_path);
-                    if contained(&path, &location.observed_path)? {
+                    if contained_in(&path, &roots)? {
                         related = true;
                         result.links.push(Link {
                             owner: format!("{id}/{}", page.id),
@@ -159,7 +178,7 @@ impl WorkspaceService {
                     }
                 }
                 if let Some(child) = &session.isolated_child
-                    && contained(&child.identity.artifact_dir, &location.observed_path)?
+                    && contained_in(&child.identity.artifact_dir, &roots)?
                 {
                     related = true;
                     result.links.push(Link {
@@ -191,37 +210,35 @@ impl WorkspaceService {
                 .removal
                 .as_ref()
                 .and_then(|removal| removal.reference_snapshot());
-            let (path, digest) = reviewed.or(stored.references.as_ref()).ok_or_else(|| {
-                issue(
-                    IssueCode::IncompleteCapture,
-                    "Removed source has no retained reference inventory",
-                )
-            })?;
-            if backup::file_digest(path)? != *digest {
-                return Err(corrupt("Retained reference inventory changed"));
+            match historical_references(reviewed.or(stored.references.as_ref())) {
+                Ok(historical) => {
+                    if reviewed.is_some() {
+                        result.issues.extend(historical.issues);
+                    } else {
+                        result.issues.push(issue(IssueCode::IncompleteCapture,
+                            "This removed source predates review-bound reference capture; retain files or restore the reviewed source before resuming removal"));
+                    }
+                    result.links.extend(
+                        historical
+                            .links
+                            .into_iter()
+                            .filter(|link| link.kind == "instruction_location")
+                            .map(|mut link| {
+                                link.kind = "recorded_instruction_location".into();
+                                link
+                            }),
+                    );
+                }
+                Err(failure) => {
+                    result.issues.push(failure.issue.clone());
+                    result.historical_failure = Some(*failure);
+                }
             }
-            let historical: References = storage::read_json(path)?;
-            if reviewed.is_some() {
-                result.issues.extend(historical.issues);
-            } else {
-                result.issues.push(issue(IssueCode::IncompleteCapture,
-                    "This removed source predates review-bound reference capture; retain files or restore the reviewed source before resuming removal"));
-            }
-            result.links.extend(
-                historical
-                    .links
-                    .into_iter()
-                    .filter(|link| link.kind == "instruction_location")
-                    .map(|mut link| {
-                        link.kind = "recorded_instruction_location".into();
-                        link
-                    }),
-            );
         } else {
             match instructions.preservation_references(&location.observed_path) {
                 Ok(paths) => {
                     for path in paths {
-                        if contained(&path, &location.observed_path)? {
+                        if contained_in(&path, &roots)? {
                             result.links.push(Link {
                                 owner: location.id.to_string(),
                                 kind: "instruction_location".into(),
@@ -244,19 +261,67 @@ impl WorkspaceService {
     }
 }
 
-fn contained(path: &Path, root: &Path) -> Result<bool> {
+/// Only unavailable historical evidence is downgraded into an observation.
+/// Current catalog, Session, side-panel, physical and live-owner errors above
+/// still propagate. Hash and witness bind a retain-files decision to the exact
+/// observed failure, not just an error message that different bytes could share.
+fn historical_references(
+    reference: Option<&(PathBuf, String)>,
+) -> std::result::Result<References, Box<HistoricalFailure>> {
+    let mut failure = HistoricalFailure {
+        path: reference.map(|(path, _)| path.clone()),
+        expected_digest: reference.map(|(_, hash)| hash.clone()),
+        observed_digest: None,
+        witness: None,
+        issue: issue(
+            IssueCode::IncompleteCapture,
+            "Removed source has no retained reference inventory",
+        ),
+    };
+    let result = (|| -> Result<References> {
+        let (path, expected) = reference.ok_or_else(|| failure.issue.clone())?;
+        let metadata = std::fs::symlink_metadata(path).map_err(io)?;
+        failure.witness = Some(inventory::Witness::of(&metadata)?);
+        if !metadata.is_file() {
+            return Err(corrupt(
+                "Historical reference evidence is not a regular file",
+            ));
+        }
+        let observed = backup::file_digest(path)?;
+        failure.observed_digest = Some(observed.clone());
+        if observed != *expected {
+            return Err(corrupt("Retained reference inventory changed"));
+        }
+        let references = storage::read_json(path)?;
+        if Some(inventory::Witness::of(
+            &std::fs::symlink_metadata(path).map_err(io)?,
+        )?) != failure.witness
+        {
+            return Err(issue(
+                IssueCode::Conflict,
+                "Historical reference evidence changed during observation",
+            ));
+        }
+        Ok(references)
+    })();
+    result.map_err(|issue| {
+        failure.issue = issue;
+        Box::new(failure)
+    })
+}
+
+fn contained_in(path: &Path, roots: &[&Path]) -> Result<bool> {
     if !path.is_absolute() {
         return Err(issue(
             IssueCode::IncompleteCapture,
             "A stored reference has no absolute location; repair it explicitly before closeout",
         ));
     }
-    Ok(crate::location::native_files::resolve_target(path)
-        .map_err(io)?
-        .starts_with(root)
-        || crate::location::native_files::resolve_removal_entry(path)
-            .map_err(io)?
-            .starts_with(root))
+    let target = crate::location::native_files::resolve_target(path).map_err(io)?;
+    let entry = crate::location::native_files::resolve_removal_entry(path).map_err(io)?;
+    Ok(roots
+        .iter()
+        .any(|root| target.starts_with(root) || entry.starts_with(root)))
 }
 
 pub(super) fn entry(references: &References) -> Result<CloseoutEntry> {

@@ -150,6 +150,7 @@ async fn prepare_index_view(
             blockers: Vec::new(),
         },
         witness: Some(witness),
+        removal_metadata: None,
     };
     files::copy_entry(&archive, &item, &path, &target)?;
     // Git may freshen the source shared-index timestamp while expanding this

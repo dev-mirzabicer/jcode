@@ -782,3 +782,79 @@ async fn closeout_source_gate_covers_resolved_child_cwd_and_custom_startup_witho
         std::panic::resume_unwind(error);
     }
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closeout_live_child_inference_is_observed_without_cancelling_its_owner() {
+    let f = Fixture::new().await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let root = Path::new(f.parent.working_dir.as_ref().unwrap()).join("live-checkout");
+        let state = crate::storage::durable_state_dir();
+        let (workspace, location) =
+            crate::workspace::test_support::registered_checkout(&state, &root);
+        let gate = Arc::new(Semaphore::new(0));
+        f.http.push(Reply::Hold(gate.clone()));
+        let mut input = f.create();
+        input["working_dir"] = json!(root);
+        input["run_in_background"] = json!(true);
+        input["notify"] = json!(false);
+        input["wake"] = json!(false);
+        f.call("live-closeout-child", input).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while f.http.requests.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let child = f.child_id("live-closeout-child");
+        assert!(Session::load(&child).unwrap().isolated_child.is_some());
+        let (record, work) = crate::workspace::test_support::closeout_work(
+            &workspace,
+            location,
+            f.home.root(),
+            &state,
+        )
+        .await;
+        assert!(
+            work.findings.iter().any(|finding| finding.kind
+                == crate::workspace::CloseoutWorkKind::Session
+                && finding.identity.contains(&child)),
+            "{work:?}"
+        );
+        let execution = ExecutionStore::open(f.home.root()).unwrap();
+        let run = execution
+            .inspect(&crate::execution::invocation_id(
+                &f.ctx("live-closeout-child"),
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(!run.state.terminal() && run.stop_cause.is_none(), "{run:?}");
+        assert_eq!(gate.available_permits(), 0);
+        workspace
+            .revoke_closeout(
+                &crate::workspace::WorkspaceClientAuthority::authenticated("fixture-human")
+                    .unwrap(),
+                crate::workspace::RequestId::new(),
+                record.operation,
+                record.revision,
+            )
+            .unwrap();
+        gate.add_permits(1);
+        assert_eq!(
+            f.terminal("live-closeout-child").await.unwrap().state,
+            crate::execution::RunState::Completed
+        );
+        assert_eq!(f.http.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("payload.md")).unwrap(),
+            "retained synthetic data"
+        );
+    })
+    .catch_unwind()
+    .await;
+    f.cleanup().await;
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}

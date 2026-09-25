@@ -258,6 +258,10 @@ pub struct CloseoutRecoveryReview {
     pub adopt_empty_holding: Option<PathBuf>,
     pub work: CloseoutWorkReport,
     pub issues: Vec<Issue>,
+    /// Historical evidence unavailable during a non-destructive retain decision.
+    /// These are not permission to resume deletion or ignore live-work findings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_issues: Vec<Issue>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

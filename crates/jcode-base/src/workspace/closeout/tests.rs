@@ -1,7 +1,10 @@
 use super::*;
+mod combined_disposal;
 mod git_edges;
 mod native_paths;
 mod reference_freshness;
+mod review_findings;
+mod work_admission;
 
 struct Fixture {
     _directory: tempfile::TempDir,
@@ -2840,6 +2843,28 @@ async fn bundle_restores_acquired_refs_detached_stash_and_reflog_without_source(
             "HEAD",
         ],
     );
+    let branch = git_text(&fixture.root, &["branch", "--show-current"]);
+    git(&fixture.root, &["checkout", "-qb", "squash-feature"]);
+    std::fs::write(
+        fixture.root.join("squash-info"),
+        "squash-integrated information",
+    )
+    .unwrap();
+    git(&fixture.root, &["add", "squash-info"]);
+    git(&fixture.root, &["commit", "-qm", "original feature"]);
+    let squashed = git_text(&fixture.root, &["rev-parse", "HEAD"]);
+    git(&fixture.root, &["checkout", "-q", branch.trim()]);
+    git(&fixture.root, &["merge", "--squash", "squash-feature"]);
+    git(&fixture.root, &["commit", "-qm", "squash integration"]);
+    assert_eq!(
+        std::process::Command::new("git")
+            .current_dir(&fixture.root)
+            .args(["merge-base", "--is-ancestor", squashed.trim(), "HEAD"])
+            .status()
+            .unwrap()
+            .code(),
+        Some(1)
+    );
     git(
         &fixture.root,
         &["commit", "--allow-empty", "-qm", "reflog-only"],
@@ -2886,6 +2911,17 @@ async fn bundle_restores_acquired_refs_detached_stash_and_reflog_without_source(
     std::fs::rename(&fixture.root, fixture.root.with_extension("offline")).unwrap();
     let restored = bundle.parent().unwrap().join("restored.git");
     git(&restored, &["fsck", "--full"]);
+    assert_eq!(
+        git_text(&restored, &["cat-file", "-t", squashed.trim()]).trim(),
+        "commit"
+    );
+    assert_eq!(
+        git_text(
+            &restored,
+            &["show", &format!("{}:squash-info", squashed.trim())]
+        ),
+        "squash-integrated information"
+    );
     assert_eq!(
         git_text(&restored, &["cat-file", "-t", lost.trim()]).trim(),
         "commit"

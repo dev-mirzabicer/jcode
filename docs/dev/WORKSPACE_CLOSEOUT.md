@@ -270,6 +270,21 @@ the exclusive active-skill mechanism or the later C05 corpus/migration.
 
 ## Journaled removal and retained history
 
+Inventory also binds source metadata content for every removable entry. Retry
+checks that receipt for captured slots, regular files, hardlinks and remaining
+directories, rather than accepting newly observed metadata merely because its
+inode is unchanged. Directory mtime is excluded from this destructive receipt
+because removing children changes it; ACLs, xattrs, flags, ownership, mode and
+birth time are still bound. Full preservation receipts continue to retain the
+original directory timestamps. Older inventories without source receipts require
+fresh preparation while intact or non-destructive retention after partial work.
+
+Registration, rebind and adoption cannot overlap a Closing root or its owned
+quarantine/holding paths, including application of a prior review. Every resumed
+destructive attempt also inspects current catalog/Session/linked references at
+all those roots. Newly linked data needs an actual preserved inventory entry;
+an intact old reference-file digest alone is not current authorization.
+
 `finish_closeout` consumes an existing current authorization, not a force flag.
 It rechecks authority after acquiring physical/catalog ownership, records intent
 before effects and exclusively renames the checkout to a same-volume quarantine.
@@ -303,6 +318,15 @@ waiting and keep inspection/control responsive. Stop is not new deletion
 authority, rollback, or permission to reuse an old terminal execution.
 
 ## Trusted recovery and retaining files
+
+Missing or corrupt historical reference evidence remains a blocker to removal.
+It does not strand the trusted **Unregister and retain files** alternative.
+That review exposes `evidence_issues` separately from blocking `issues`, and
+binds the observed evidence path, expected/actual digest and physical witness.
+Changing the damaged evidence invalidates Apply too. The Retained outcome and
+report preserve the warning and observation without claiming complete evidence
+or performing another unlink. Current catalog/physical errors and unknown or
+live work remain blockers; this is not a force-removal override.
 
 `review_closeout_recovery` requires trusted client authority. It fences the
 location and clears earlier final and conditional authorization before collecting

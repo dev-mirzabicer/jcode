@@ -45,6 +45,8 @@ impl Witness {
 pub(super) struct Item {
     pub entry: CloseoutEntry,
     pub witness: Option<Witness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removal_metadata: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -367,18 +369,18 @@ pub(super) fn verify_tree_controlled(
     check_control(control)?;
     visit_tree(tree, |item| {
         check_control(control)?;
-        let Some(witness) = item.witness else {
+        let Some(witness) = item.witness.as_ref() else {
             return Ok(());
         };
         let path = tree.root.join(&item.entry.path);
-        if Witness::of(&std::fs::symlink_metadata(&path).map_err(io)?)? != witness {
+        if Witness::of(&std::fs::symlink_metadata(&path).map_err(io)?)? != *witness {
             return Err(issue(
                 IssueCode::Conflict,
                 format!("Inventory entry changed: {}", path.display()),
             ));
         }
         if item.entry.kind == CloseoutEntryKind::File
-            && Some(hash_file_controlled(&path, &witness, control)?) != item.entry.sha256
+            && Some(hash_file_controlled(&path, witness, control)?) != item.entry.sha256
         {
             return Err(issue(
                 IssueCode::Conflict,
@@ -390,6 +392,7 @@ pub(super) fn verify_tree_controlled(
         {
             return Err(issue(IssueCode::Conflict, "Inventory symlink changed"));
         }
+        verify_removal_metadata(&item, &path)?;
         Ok(())
     })
 }
@@ -413,6 +416,7 @@ pub(super) fn append(
         writer.push(Item {
             entry,
             witness: None,
+            removal_metadata: None,
         })?;
     }
     writer.file.flush().map_err(io)?;
@@ -481,9 +485,18 @@ fn scan_policy(
             .facts
             .push("Git metadata, not disposable merely because the worktree is clean".into());
     }
+    let removal_metadata = if matches!(
+        kind,
+        CloseoutEntryKind::File | CloseoutEntryKind::Directory | CloseoutEntryKind::Symlink
+    ) {
+        Some(files::metadata::removal_fingerprint(&path, kind)?)
+    } else {
+        None
+    };
     writer.push(Item {
         entry,
         witness: Some(witness.clone()),
+        removal_metadata,
     })?;
     if kind == CloseoutEntryKind::Directory {
         let mut children = std::fs::read_dir(&path)
@@ -523,6 +536,27 @@ fn scan_policy(
 
 pub(super) fn hash_file(path: &Path, expected: &Witness) -> Result<String> {
     hash_file_controlled(path, expected, None)
+}
+
+pub(super) fn verify_removal_metadata(item: &Item, path: &Path) -> Result<()> {
+    if !matches!(
+        item.entry.kind,
+        CloseoutEntryKind::File | CloseoutEntryKind::Directory | CloseoutEntryKind::Symlink
+    ) {
+        return Ok(());
+    }
+    let expected = item.removal_metadata.as_ref().ok_or_else(|| issue(IssueCode::IncompleteCapture,
+        "Inventory predates source-metadata receipts; refresh an intact source or use trusted retain-files recovery"))?;
+    if files::metadata::removal_fingerprint(path, item.entry.kind)? != *expected {
+        return Err(issue(
+            IssueCode::Conflict,
+            format!(
+                "Source metadata changed since inventory: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn hash_file_controlled(

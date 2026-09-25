@@ -2,9 +2,7 @@
 use super::*;
 use std::path::Path;
 
-pub(crate) async fn closing_checkout(state: &Path, home: &Path, checkout: &Path) {
-    use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
-    use jcode_tool_core::OutputCapture;
+pub(crate) fn registered_checkout(state: &Path, checkout: &Path) -> (WorkspaceService, LocationId) {
     std::fs::create_dir_all(checkout).unwrap();
     for args in [
         vec!["init", "-q"],
@@ -77,6 +75,22 @@ pub(crate) async fn closing_checkout(state: &Path, home: &Path, checkout: &Path)
     ) else {
         panic!()
     };
+    (service, location)
+}
+
+pub(crate) async fn closing_checkout(state: &Path, home: &Path, checkout: &Path) {
+    let (service, location) = registered_checkout(state, checkout);
+    closeout_work(&service, location, home, state).await;
+}
+
+pub(crate) async fn closeout_work(
+    service: &WorkspaceService,
+    location: LocationId,
+    home: &Path,
+    state: &Path,
+) -> (CloseoutRecord, CloseoutWorkReport) {
+    use crate::execution::{Capture, ExecutionStore, Invocation, PreparedInvocation, RunState};
+    use jcode_tool_core::OutputCapture;
     let record = service
         .begin_closeout(
             &WorkspaceClientAuthority::authenticated("fixture-human").unwrap(),
@@ -106,7 +120,7 @@ pub(crate) async fn closing_checkout(state: &Path, home: &Path, checkout: &Path)
     };
     execution.start(&run.id, "fixture").unwrap();
     let capture = Capture::create(execution.clone(), run, Default::default()).unwrap();
-    service
+    let (record, report) = service
         .prepare_closeout_work(
             record.operation,
             record.revision,
@@ -120,4 +134,5 @@ pub(crate) async fn closing_checkout(state: &Path, home: &Path, checkout: &Path)
     let mut output = jcode_tool_types::ToolOutput::new("");
     output.source = jcode_tool_types::OutputSource::Retained(capture.reference().unwrap());
     capture.seal(output, RunState::Completed).unwrap();
+    (record, report)
 }

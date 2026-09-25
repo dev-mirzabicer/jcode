@@ -105,6 +105,12 @@ pub(super) fn linked_content(
         ] {
             if let Ok(relative) = path.strip_prefix(stored.binding.observed_path()) {
                 required.insert(relative.to_path_buf());
+            } else if let Some(relative) = stored
+                .removal
+                .as_ref()
+                .and_then(|removal| removal.source_relative_path(&path))
+            {
+                required.insert(relative);
             }
         }
     }
@@ -117,8 +123,12 @@ pub(super) fn linked_content(
             .as_ref()
             .ok_or_else(|| issue(IssueCode::PreservationIncomplete, "Preservation is missing"))?,
     )?;
+    let mut witnessed = std::collections::BTreeSet::new();
     for line in std::io::BufReader::new(std::fs::File::open(manifest.files).map_err(io)?).lines() {
         let item: files::PreservedItem = decode(&line.map_err(io)?)?;
+        if required.contains(&item.item.entry.path) {
+            witnessed.insert(item.item.entry.path.clone());
+        }
         if item.saved.is_none()
             && item
                 .item
@@ -135,6 +145,12 @@ pub(super) fn linked_content(
                 ),
             ));
         }
+    }
+    if witnessed != required {
+        return Err(issue(
+            IssueCode::PreservationIncomplete,
+            "Known linked content has no captured preservation entry",
+        ));
     }
     Ok(())
 }
