@@ -71,23 +71,63 @@ impl InstructionManagementWorker {
         request: InstructionManagementRequest,
     ) -> tokio::sync::oneshot::Receiver<InstructionManagementReply> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let read_or_release = matches!(
+            &request,
+            InstructionManagementRequest::Recoveries
+                | InstructionManagementRequest::RepositoryReceipt { .. }
+                | InstructionManagementRequest::RepositoryChoices { .. }
+                | InstructionManagementRequest::CompareDraft { .. }
+                | InstructionManagementRequest::ExportRevision { .. }
+                | InstructionManagementRequest::Close
+        );
+        let permit = if read_or_release {
+            Ok(None)
+        } else {
+            crate::runtime_lifecycle::admission::preparation(
+                "instructions",
+                Some(context.session_id.clone()),
+            )
+        };
+        let permit = match permit {
+            Ok(permit) => permit,
+            Err(error) => {
+                let _ = sender.send(InstructionManagementReply {
+                    session_id: context.session_id,
+                    result: InstructionManagementResult::Failed(fail("runtime admission", error)),
+                });
+                return receiver;
+            }
+        };
         let state = Arc::clone(&self.state);
         tokio::task::spawn_blocking(move || {
-            let session_id = context.session_id.clone();
-            let result = match state.try_lock() {
-                Ok(mut state) => {
-                    let result = state.handle(&repositories, context, &resolver, request);
-                    result.unwrap_or_else(|mut error| {
-                        error.draft = state.workspace.draft().map(|record| record.id.clone());
-                        InstructionManagementResult::Failed(error)
-                    })
-                }
-                Err(_) => InstructionManagementResult::Failed(fail(
-                    "manage instructions",
-                    "Another manager operation is still running. Its result is not canceled; wait or recover its receipt.",
-                )),
-            };
-            let _ = sender.send(InstructionManagementReply { session_id, result });
+            crate::runtime_lifecycle::admission::sync_scope(permit.clone(), || {
+                let session_id = context.session_id.clone();
+                let result = if permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.stop_signal().is_set())
+                {
+                    InstructionManagementResult::Failed(fail(
+                        "runtime admission",
+                        "Runtime stopped before this instruction operation began",
+                    ))
+                } else {
+                    match state.try_lock() {
+                        Ok(mut state) => {
+                            let result = state.handle(&repositories, context, &resolver, request);
+                            result.unwrap_or_else(|mut error| {
+                                error.draft =
+                                    state.workspace.draft().map(|record| record.id.clone());
+                                InstructionManagementResult::Failed(error)
+                            })
+                        }
+                        Err(_) => InstructionManagementResult::Failed(fail(
+                            "manage instructions",
+                            "Another manager operation is still running. Its result is not canceled; wait or recover its receipt.",
+                        )),
+                    }
+                };
+                let _ = sender.send(InstructionManagementReply { session_id, result });
+            })
         });
         receiver
     }

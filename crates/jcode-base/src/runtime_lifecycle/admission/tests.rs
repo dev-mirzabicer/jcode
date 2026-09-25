@@ -1,6 +1,72 @@
 use super::*;
 use crate::runtime_lifecycle::RuntimeStopStore;
 
+#[tokio::test]
+async fn interrupted_async_preparation_retains_its_actual_blocking_descendant() -> Result<()> {
+    let (_root, owner, registration) = fixture()?;
+    let gate = registration.admission();
+    let permit = gate.independent(
+        RuntimeWorkKind::Preparation,
+        "blocking-preparation".into(),
+        None,
+    )?;
+    let (ready, entered) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let task = tokio::spawn(prepare(Some(permit), async move {
+        spawn_blocking(move || {
+            let _ = ready.send(());
+            wait.recv_timeout(std::time::Duration::from_secs(5))
+        })
+        .await??;
+        Ok(())
+    }));
+    entered.await?;
+    let review = gate.review(&owner, options(StopStrategy::Interrupt), Vec::new())?;
+    gate.begin(&owner, RequestId::new(), review.id, Vec::new())?;
+    gate.interrupt_preparations()?;
+    assert!(task.await?.is_err());
+    assert_eq!(
+        gate.work()?.len(),
+        1,
+        "Dropping a waiter is not blocking-work quiescence"
+    );
+    release.send(())?;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !gate.work()?.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn finish_allows_only_the_admitted_preparation_to_publish_and_propagate_blocking_scope()
+-> Result<()> {
+    let (_root, owner, registration) = fixture()?;
+    let gate = registration.admission().clone();
+    let permit = gate.independent(RuntimeWorkKind::Preparation, "admitted".into(), None)?;
+    let review = gate.review(&owner, options(StopStrategy::FinishCurrent), Vec::new())?;
+    gate.begin(&owner, RequestId::new(), review.id, Vec::new())?;
+    assert!(!gate.permits_current_work());
+    assert!(gate.interrupt_preparations().is_err());
+    let worker_gate = gate.clone();
+    scope(Some(permit), async move {
+        assert!(worker_gate.permits_current_work());
+        spawn_blocking(move || {
+            assert!(worker_gate.permits_current_work());
+            worker_gate
+                .causal(RuntimeWorkKind::Preparation, "nested".into(), None)
+                .map(drop)
+        })
+        .await?
+    })
+    .await?;
+    assert!(gate.work()?.is_empty());
+    Ok(())
+}
+
 fn fixture() -> Result<(tempfile::TempDir, RuntimeStopOwner, RuntimeRegistration)> {
     let root = tempfile::tempdir()?;
     let owner = RuntimeStopStore::new(root.path(), &root.path().join("fixture.sock"))?.claim()?;

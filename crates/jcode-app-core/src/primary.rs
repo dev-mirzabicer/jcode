@@ -341,6 +341,12 @@ impl PrimaryHost {
                 .is_ok_and(|runtime| runtime.is_none_or(|runtime| runtime.accepts_input()))
     }
 
+    pub(crate) fn accepts_prepared_work(&self) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && crate::runtime_lifecycle::admission::current_runtime()
+                .is_ok_and(|runtime| runtime.is_none_or(|runtime| runtime.permits_current_work()))
+    }
+
     pub(crate) fn configure_startup_context(
         &self,
         coordinator: Arc<crate::server::startup_context::StartupContextCoordinator>,

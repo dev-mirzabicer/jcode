@@ -54,6 +54,147 @@ fn empty_swarm_status_state() -> (
 
 struct MockProvider;
 
+#[test]
+fn runtime_shutdown_rejects_scoped_split_and_transfer_with_correlated_source() -> Result<()> {
+    use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+    use crate::workspace::{GrantCarryChoice, RequestId, ReviewId, runtime::*};
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::new(provider).await)));
+        let session = agent.lock().await.session_id().to_owned();
+        let owner = RuntimeStopStore::new(&crate::storage::durable_state_dir(), &home.root().join("scoped.sock"))?.claim()?;
+        let registration = RuntimeAdmission::register(home.root(), owner.identity())?;
+        let review = registration.admission().review(&owner, ShutdownOptions { strategy: StopStrategy::Interrupt, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 3 }, Vec::new())?;
+        registration.admission().begin(&owner, RequestId::new(), review.id, Vec::new())?;
+        let (send, mut receive) = mpsc::unbounded_channel();
+        let send = send.into();
+        let repositories = crate::instruction::InstructionRepositoryService::new();
+        let choice = Some(GrantCarryChoice { review: ReviewId::new(), carry: false });
+        super::handle_split_with_grants(51, &session, &repositories, None, &send, choice).await;
+        super::handle_transfer_with_grants(52, &session, &agent, &repositories, &send, choice).await;
+        for expected in [51, 52] {
+            assert!(matches!(receive.recv().await, Some(ServerEvent::ScopedContextRejected { id, source_session, .. }) if id == expected && source_session == session));
+            assert!(matches!(receive.recv().await, Some(ServerEvent::Error { id, .. }) if id == expected));
+        }
+        assert!(receive.try_recv().is_err());
+        assert!(registration.admission().work()?.is_empty());
+        Ok(())
+    })
+}
+
+#[derive(Clone, Default)]
+struct PendingTransferProvider {
+    entered: Arc<tokio::sync::Notify>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+struct TransferStreamDrop(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for TransferStreamDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl Provider for PendingTransferProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        let guard = TransferStreamDrop(self.dropped.clone());
+        let entered = self.entered.clone();
+        Ok(Box::pin(futures::stream::poll_fn(move |_| {
+            let _guard = &guard;
+            entered.notify_one();
+            std::task::Poll::Pending
+        })))
+    }
+    fn name(&self) -> &str {
+        "pending-transfer-fixture"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn runtime_interrupt_cancels_transfer_provider_and_preserves_source() -> Result<()> {
+    use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+    use crate::workspace::{RequestId, runtime::*};
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+        let provider = PendingTransferProvider::default();
+        let concrete: Arc<dyn Provider> = Arc::new(provider.clone());
+        let mut agent = Agent::new(concrete.clone(), Registry::new(concrete).await);
+        agent
+            .startup_context_session_mut()
+            .add_user_message_with_origin(
+                vec![ContentBlock::Text {
+                    text: "synthetic existing source".into(),
+                    cache_control: None,
+                }],
+                None,
+                None,
+            )?;
+        agent.startup_context_session_mut().save()?;
+        let session = agent.session_id().to_owned();
+        let before = serde_json::to_value(&agent.startup_context_session().messages)?;
+        let owner = RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &home.root().join("transfer.sock"),
+        )?
+        .claim()?;
+        let registration = RuntimeAdmission::register(home.root(), owner.identity())?;
+        let source = Arc::new(Mutex::new(agent));
+        let (events, mut replies) = mpsc::unbounded_channel();
+        let worker_session = session.clone();
+        let task = tokio::spawn(async move {
+            super::handle_transfer_with_grants(
+                41,
+                &worker_session,
+                &source,
+                &crate::instruction::InstructionRepositoryService::new(),
+                &events.into(),
+                None,
+            )
+            .await;
+        });
+        timeout(Duration::from_secs(10), provider.entered.notified()).await?;
+        let review = registration.admission().review(
+            &owner,
+            ShutdownOptions {
+                strategy: StopStrategy::Interrupt,
+                independent: IndependentTasks::Stop,
+                quiescence_timeout_seconds: 3,
+            },
+            Vec::new(),
+        )?;
+        registration
+            .admission()
+            .begin(&owner, RequestId::new(), review.id, Vec::new())?;
+        registration.admission().interrupt_preparations()?;
+        timeout(Duration::from_secs(3), task).await??;
+        assert!(provider.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(registration.admission().work()?.is_empty());
+        assert_eq!(
+            serde_json::to_value(&crate::session::Session::load(&session)?.messages)?,
+            before
+        );
+        assert!(matches!(
+            replies.recv().await,
+            Some(ServerEvent::Error { id: 41, .. })
+        ));
+        assert!(
+            replies.try_recv().is_err(),
+            "Interrupted transfer published a child response"
+        );
+        Ok(())
+    })
+}
+
 #[derive(Clone, Default)]
 struct StreamingMockProvider {
     responses: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,

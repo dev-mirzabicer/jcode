@@ -26,30 +26,35 @@ impl PrimaryHost {
         pool: &Arc<crate::mcp::SharedMcpPool>,
         choice: Option<GrantCarryChoice>,
     ) -> Result<Arc<Mutex<Agent>>> {
+        let permit =
+            crate::runtime_lifecycle::admission::preparation("clear", Some(source_id.into()))?;
         let (send, receive) = tokio::sync::oneshot::channel();
         let host = Arc::downgrade(self);
         let source = source.clone();
         let source_id = source_id.to_owned();
         let repositories = repositories.clone();
         let pool = pool.clone();
-        self.retain_delivery(async move {
-            let result = match host.upgrade() {
-                Some(host) => {
-                    Box::pin(host.clear_context_owned(
-                        &source,
-                        &source_id,
-                        &repositories,
-                        &pool,
-                        choice,
-                    ))
-                    .await
-                }
-                None => Err(anyhow::anyhow!(
-                    "Primary runtime ended before Clear preparation"
-                )),
-            };
-            let _ = send.send(result);
-        });
+        self.retain_delivery(crate::runtime_lifecycle::admission::scope(
+            permit,
+            async move {
+                let result = match host.upgrade() {
+                    Some(host) => {
+                        Box::pin(host.clear_context_owned(
+                            &source,
+                            &source_id,
+                            &repositories,
+                            &pool,
+                            choice,
+                        ))
+                        .await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "Primary runtime ended before Clear preparation"
+                    )),
+                };
+                let _ = send.send(result);
+            },
+        ));
         receive
             .await
             .context("Clear outcome requires runtime reconciliation")?
@@ -74,7 +79,7 @@ impl PrimaryHost {
             "Clear source identity changed"
         );
         ensure!(
-            self.processing(source_id).is_none() && self.accepts_input(),
+            self.processing(source_id).is_none() && self.accepts_prepared_work(),
             "Primary is busy or stopping"
         );
         source.primary_owner = Some(self.adopt_owner(&source)?);
@@ -183,7 +188,7 @@ impl PrimaryHost {
                 fresh.working_dir().map(std::path::PathBuf::from),
             )
             .await;
-        if !self.accepts_input() {
+        if !self.accepts_prepared_work() {
             crate::tool::clear_session_tool_policy(&identity);
             crate::session::remove_unpublished_session(&identity)?;
             anyhow::bail!("Primary runtime stopped during Clear preparation; source is unchanged");
@@ -233,6 +238,8 @@ fn prepare_fresh_context(
     kind: NewContextKind,
 ) -> Result<crate::session::Session> {
     use crate::session::Session;
+    let _permit =
+        crate::runtime_lifecycle::admission::preparation("new-context", Some(parent.id.clone()))?;
     let parent_session_id = parent.id.as_str();
     let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
     let scope = workspace.prepare_context_scope(
@@ -389,6 +396,8 @@ pub fn prepare_split_session(
     choice: Option<GrantCarryChoice>,
 ) -> Result<crate::session::Session> {
     use crate::session::Session;
+    let _permit =
+        crate::runtime_lifecycle::admission::preparation("split", Some(parent.id.clone()))?;
     let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
     let scope = workspace.prepare_context_scope(
         parent,
@@ -467,6 +476,17 @@ mod tests {
     }
     #[test]
     fn clear_failure_and_concurrent_peer_admission_preserve_the_source() -> Result<()> {
+        clear_with_shutdown(crate::workspace::runtime::StopStrategy::FinishCurrent)
+    }
+
+    #[test]
+    fn interrupted_clear_cleans_the_unpublished_context_and_retains_its_source() -> Result<()> {
+        clear_with_shutdown(crate::workspace::runtime::StopStrategy::Interrupt)
+    }
+
+    fn clear_with_shutdown(strategy: crate::workspace::runtime::StopStrategy) -> Result<()> {
+        use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+        use crate::workspace::runtime::*;
         let _environment = crate::auth::test_sandbox::AuthTestSandbox::new()?;
         tokio::runtime::Runtime::new()?.block_on(async {
             let provider = ForkGate::default();
@@ -489,6 +509,13 @@ mod tests {
                 source.clone(),
             )])));
             let pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+            let root = crate::storage::jcode_dir()?;
+            let owner = RuntimeStopStore::new(
+                &crate::storage::durable_state_dir(),
+                &root.join("clear.sock"),
+            )?
+            .claim()?;
+            let registration = RuntimeAdmission::register(&root, owner.identity())?;
             let before = serde_json::to_vec(source.lock().await.startup_context_session())?;
             let profile = crate::storage::jcode_dir()?.join("instructions/agents/jcode.md");
             let original = std::fs::read(&profile)?;
@@ -516,19 +543,44 @@ mod tests {
                     .await
             });
             entered.await?;
+            let review = registration.admission().review(
+                &owner,
+                ShutdownOptions {
+                    strategy,
+                    independent: IndependentTasks::Stop,
+                    quiescence_timeout_seconds: 5,
+                },
+                Vec::new(),
+            )?;
+            let operation =
+                registration
+                    .admission()
+                    .begin(&owner, RequestId::new(), review.id, Vec::new())?;
             assert!(
                 host.admit(&id, 71, source.clone()).is_err(),
                 "a peer cannot enter after Clear's initial check"
             );
             release.send(())?;
-            let fresh = clear.await??;
-            assert!(!Arc::ptr_eq(&source, &fresh));
+            let outcome = clear.await?;
+            if strategy == StopStrategy::FinishCurrent {
+                let fresh = outcome?;
+                assert!(!Arc::ptr_eq(&source, &fresh));
+                registration
+                    .admission()
+                    .cancel_wait(&owner, operation.id, operation.revision)?;
+            } else {
+                assert!(outcome.is_err());
+                assert_eq!(host.read().await.len(), 1);
+            }
             assert_eq!(
                 serde_json::to_vec(source.lock().await.startup_context_session())?,
                 before
             );
             assert!(host.read().await.contains_key(&id));
-            drop(host.admit(&id, 72, source.clone())?);
+            if strategy == StopStrategy::FinishCurrent {
+                drop(host.admit(&id, 72, source.clone())?);
+            }
+            assert!(registration.admission().work()?.is_empty());
             host.shutdown().await
         })
     }

@@ -21,7 +21,13 @@ enum Mode {
 
 struct State {
     mode: Mode,
-    work: BTreeMap<String, RuntimeWork>,
+    work: BTreeMap<String, AdmittedWork>,
+}
+
+#[derive(Clone)]
+struct AdmittedWork {
+    view: RuntimeWork,
+    stop: jcode_agent_runtime::InterruptSignal,
 }
 
 pub struct RuntimeAdmission {
@@ -59,9 +65,15 @@ impl Drop for RuntimeRegistration {
 
 #[derive(Clone)]
 pub struct WorkPermit(Arc<Permit>);
+impl WorkPermit {
+    pub fn stop_signal(&self) -> jcode_agent_runtime::InterruptSignal {
+        self.0.stop.clone()
+    }
+}
 struct Permit {
     admission: Arc<RuntimeAdmission>,
     key: String,
+    stop: jcode_agent_runtime::InterruptSignal,
 }
 impl Drop for Permit {
     fn drop(&mut self) {
@@ -111,6 +123,40 @@ impl RuntimeAdmission {
         self.state
             .lock()
             .is_ok_and(|state| state.mode == Mode::Running)
+    }
+
+    /// An already-admitted preparation may publish during Finish. This does
+    /// not reopen independent work or new input, and Interrupt still fences it.
+    pub fn permits_current_work(&self) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.mode == Mode::Running
+                || (state.mode == Mode::Draining
+                    && current_scope().is_some_and(|permit| {
+                        std::ptr::eq(self, Arc::as_ptr(&permit.0.admission))
+                            && state.work.contains_key(&permit.0.key)
+                    }))
+        })
+    }
+
+    /// Signal actual preparation owners, without calling their tasks quiescent.
+    pub fn interrupt_preparations(&self) -> Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            state.mode == Mode::Stopping,
+            "Preparation interruption needs a stopping fence"
+        );
+        for work in state
+            .work
+            .values()
+            .filter(|work| work.view.kind == RuntimeWorkKind::Preparation)
+        {
+            work.stop
+                .fire_with_cause(jcode_tool_types::StopCause::RuntimeShutdown);
+        }
+        Ok(())
     }
 
     /// Serialize the complete synchronous append/checkpoint boundary with Begin,
@@ -165,19 +211,24 @@ impl RuntimeAdmission {
             !state.work.contains_key(&id),
             "Runtime work already has an admission owner"
         );
+        let stop = jcode_agent_runtime::InterruptSignal::new();
         state.work.insert(
             id.clone(),
-            RuntimeWork {
-                id: id.clone(),
-                owner: self.identity.clone(),
-                session,
-                kind,
-                supported_survivor: false,
+            AdmittedWork {
+                view: RuntimeWork {
+                    id: id.clone(),
+                    owner: self.identity.clone(),
+                    session,
+                    kind,
+                    supported_survivor: false,
+                },
+                stop: stop.clone(),
             },
         );
         Ok(WorkPermit(Arc::new(Permit {
             admission: self.clone(),
             key: id,
+            stop,
         })))
     }
 
@@ -188,7 +239,7 @@ impl RuntimeAdmission {
             .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?
             .work
             .values()
-            .cloned()
+            .map(|work| work.view.clone())
             .collect())
     }
 
@@ -287,7 +338,11 @@ impl RuntimeRegistration {
 }
 
 fn merge_work(state: &State, observed: Vec<RuntimeWork>) -> Vec<RuntimeWork> {
-    let mut work = state.work.clone();
+    let mut work = state
+        .work
+        .iter()
+        .map(|(id, work)| (id.clone(), work.view.clone()))
+        .collect::<BTreeMap<_, _>>();
     // Execution owners supply the current physical/control capability for their
     // already-counted admission. Pending preparations remain visible too.
     for item in observed {
@@ -305,6 +360,52 @@ pub async fn scope<T>(permit: Option<WorkPermit>, future: impl Future<Output = T
         Some(permit) => SCOPE.scope(permit, future).await,
         None => future.await,
     }
+}
+
+pub fn preparation(label: &str, session: Option<String>) -> Result<Option<WorkPermit>> {
+    current_runtime()?
+        .map(|runtime| {
+            runtime.causal(
+                RuntimeWorkKind::Preparation,
+                format!("{label}:{}", uuid::Uuid::new_v4()),
+                session,
+            )
+        })
+        .transpose()
+}
+
+pub fn sync_scope<T>(permit: Option<WorkPermit>, work: impl FnOnce() -> T) -> T {
+    match permit {
+        Some(permit) => SCOPE.sync_scope(permit, work),
+        None => work(),
+    }
+}
+
+/// Dropping the async waiter cannot release a still-running blocking owner.
+pub fn spawn_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    let permit = current_scope();
+    tokio::task::spawn_blocking(move || sync_scope(permit, work))
+}
+
+/// Explicit runtime interruption drops this owned async future. Its blocking
+/// descendants retain cloned permits until their real work actually finishes.
+pub async fn prepare<T>(
+    permit: Option<WorkPermit>,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let stop = permit.as_ref().map(|permit| permit.0.stop.clone());
+    scope(permit, async move {
+        match stop {
+            Some(stop) => tokio::select! {
+                biased;
+                _ = stop.notified() => anyhow::bail!("Runtime interrupted preparation; retained work may still be settling"),
+                result = work => result,
+            },
+            None => work.await,
+        }
+    }).await
 }
 
 pub fn current_runtime() -> Result<Option<Arc<RuntimeAdmission>>> {

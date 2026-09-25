@@ -1,6 +1,68 @@
 use super::*;
 use crate::instruction::inspection::InspectionWorker;
 
+#[test]
+fn runtime_shutdown_fences_new_management_work_but_keeps_receipts_and_close() {
+    use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+    use jcode_workspace_types::{RequestId, runtime::*};
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let fixture = Fixture::new();
+        let before = std::fs::read(fixture.repository.root.join("modules/shared.md")).unwrap();
+        let owner = RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &sandbox.root().join("manager.sock"),
+        )
+        .unwrap()
+        .claim()
+        .unwrap();
+        let registration = RuntimeAdmission::register(sandbox.root(), owner.identity()).unwrap();
+        let review = registration
+            .admission()
+            .review(
+                &owner,
+                ShutdownOptions {
+                    strategy: StopStrategy::Interrupt,
+                    independent: IndependentTasks::Stop,
+                    quiescence_timeout_seconds: 3,
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        registration
+            .admission()
+            .begin(&owner, RequestId::new(), review.id, Vec::new())
+            .unwrap();
+        let result = fixture
+            .request(InstructionManagementRequest::ApplyRepository {
+                operation_id: "not-started".into(),
+            })
+            .await;
+        let InstructionManagementResult::Failed(error) = result else {
+            panic!("mutation was admitted");
+        };
+        assert_eq!(error.operation, "runtime admission");
+        assert!(error.source_unchanged);
+        assert!(matches!(
+            fixture.request(InstructionManagementRequest::Close).await,
+            InstructionManagementResult::Closed
+        ));
+        let receipt = fixture
+            .request(InstructionManagementRequest::RepositoryReceipt {
+                operation_id: "missing-receipt".into(),
+            })
+            .await;
+        if let InstructionManagementResult::Failed(error) = receipt {
+            assert_ne!(error.operation, "runtime admission");
+        }
+        assert_eq!(
+            std::fs::read(fixture.repository.root.join("modules/shared.md")).unwrap(),
+            before
+        );
+        assert!(registration.admission().work().unwrap().is_empty());
+    });
+}
+
 struct Fixture {
     _root: tempfile::TempDir,
     service: InstructionRepositoryService,

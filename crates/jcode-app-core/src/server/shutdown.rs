@@ -346,6 +346,7 @@ impl RuntimeLifecycle {
             .iter()
             .map(|work| work.id.clone())
             .collect::<BTreeSet<_>>();
+        self.registration.admission().interrupt_preparations()?;
         let execution_work = self.executions.inventory().await?;
         let legacy_work = self
             .background

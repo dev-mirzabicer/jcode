@@ -75,15 +75,16 @@ impl PrimaryLauncher {
             host.accepting.load(std::sync::atomic::Ordering::Acquire),
             "Primary runtime is stopping"
         );
-        let _preparation = crate::runtime_lifecycle::admission::current_runtime()?
+        let permit = crate::runtime_lifecycle::admission::current_runtime()?
             .map(|runtime| {
-                runtime.independent(
+                runtime.causal(
                     crate::workspace::runtime::RuntimeWorkKind::Preparation,
                     format!("launch:{request}"),
                     None,
                 )
             })
             .transpose()?;
+        crate::runtime_lifecycle::admission::scope(permit, async {
         let (agent, record) = self.prepare(request, expected, input, preparation).await?;
         if let PrimaryRegistryMode::Shared(pool) = &self.registry {
             agent
@@ -98,7 +99,7 @@ impl PrimaryLauncher {
         }
         let mut agents = host.write().await;
         ensure!(
-            host.accepting.load(std::sync::atomic::Ordering::Acquire),
+            host.accepts_prepared_work(),
             "Primary {} was persisted but the runtime is stopping; retry attachment after Start",
             record.session
         );
@@ -116,6 +117,7 @@ impl PrimaryLauncher {
             Arc::new(tokio::sync::Mutex::new(agent)),
         );
         Ok(record)
+        }).await
     }
 
     /// Process-owned inference retains exactly the same writer lease and launch

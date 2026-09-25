@@ -726,57 +726,28 @@ pub(super) async fn handle_split_with_grants(
         });
         return;
     }
-    let started = Instant::now();
-    crate::logging::event_info(
-        "SESSION_LIFECYCLE",
-        vec![
-            ("phase", "split_start".to_string()),
-            ("request_id", id.to_string()),
-            ("session_id", client_session_id.to_string()),
-        ],
-    );
-    let prepared = if let Some(workflow) = workflow {
-        Session::load(client_session_id).and_then(|parent| {
-            let text = crate::workflow::render_prompt(
-                instruction_repositories,
-                parent.working_dir.as_deref().map(std::path::Path::new),
-                workflow,
-            )?;
-            let (id, name) = clone_split_parent_with_grants(&parent, choice)?;
-            Ok((id, name, Some(text)))
-        })
-    } else {
-        Session::load(client_session_id)
-            .and_then(|parent| clone_split_parent_with_grants(&parent, choice))
-            .map(|(id, name)| (id, name, None))
-    };
-    let (new_session_id, new_session_name, startup_message) = match prepared {
-        Ok(result) => result,
-        Err(e) => {
+    let permit = match crate::runtime_lifecycle::admission::preparation(
+        "split-request",
+        Some(client_session_id.into()),
+    ) {
+        Ok(permit) => permit,
+        Err(error) => {
             if choice.is_some() {
                 let _ = client_event_tx.send(crate::primary::scope_rejection(
                     id,
                     client_session_id,
-                    &e,
+                    &error,
                 ));
             }
-            crate::logging::event_warn(
-                "SESSION_LIFECYCLE",
-                vec![
-                    ("phase", "split_error".to_string()),
-                    ("request_id", id.to_string()),
-                    ("session_id", client_session_id.to_string()),
-                    ("error", crate::util::format_error_chain(&e)),
-                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                ],
-            );
-            let message = format!("Failed to prepare split session: {e}");
             let event = if workflow.is_some() {
-                ServerEvent::WorkflowSplitFailed { id, message }
+                ServerEvent::WorkflowSplitFailed {
+                    id,
+                    message: format!("Split was not admitted: {error:#}"),
+                }
             } else {
                 ServerEvent::Error {
                     id,
-                    message,
+                    message: format!("Split was not admitted: {error:#}"),
                     retry_after_secs: None,
                 }
             };
@@ -784,42 +755,145 @@ pub(super) async fn handle_split_with_grants(
             return;
         }
     };
-    crate::logging::event_info(
-        "SESSION_LIFECYCLE",
-        vec![
-            ("phase", "split_done".to_string()),
-            ("request_id", id.to_string()),
-            ("session_id", client_session_id.to_string()),
-            ("new_session_id", new_session_id.clone()),
-            ("elapsed_ms", started.elapsed().as_millis().to_string()),
-        ],
-    );
+    crate::runtime_lifecycle::admission::sync_scope(permit, || {
+        let started = Instant::now();
+        crate::logging::event_info(
+            "SESSION_LIFECYCLE",
+            vec![
+                ("phase", "split_start".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", client_session_id.to_string()),
+            ],
+        );
+        let prepared = if let Some(workflow) = workflow {
+            Session::load(client_session_id).and_then(|parent| {
+                let text = crate::workflow::render_prompt(
+                    instruction_repositories,
+                    parent.working_dir.as_deref().map(std::path::Path::new),
+                    workflow,
+                )?;
+                let (id, name) = clone_split_parent_with_grants(&parent, choice)?;
+                Ok((id, name, Some(text)))
+            })
+        } else {
+            Session::load(client_session_id)
+                .and_then(|parent| clone_split_parent_with_grants(&parent, choice))
+                .map(|(id, name)| (id, name, None))
+        };
+        let (new_session_id, new_session_name, startup_message) = match prepared {
+            Ok(result) => result,
+            Err(e) => {
+                if choice.is_some() {
+                    let _ = client_event_tx.send(crate::primary::scope_rejection(
+                        id,
+                        client_session_id,
+                        &e,
+                    ));
+                }
+                crate::logging::event_warn(
+                    "SESSION_LIFECYCLE",
+                    vec![
+                        ("phase", "split_error".to_string()),
+                        ("request_id", id.to_string()),
+                        ("session_id", client_session_id.to_string()),
+                        ("error", crate::util::format_error_chain(&e)),
+                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                    ],
+                );
+                let message = format!("Failed to prepare split session: {e}");
+                let event = if workflow.is_some() {
+                    ServerEvent::WorkflowSplitFailed { id, message }
+                } else {
+                    ServerEvent::Error {
+                        id,
+                        message,
+                        retry_after_secs: None,
+                    }
+                };
+                let _ = client_event_tx.send(event);
+                return;
+            }
+        };
+        crate::logging::event_info(
+            "SESSION_LIFECYCLE",
+            vec![
+                ("phase", "split_done".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", client_session_id.to_string()),
+                ("new_session_id", new_session_id.clone()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
 
-    if choice.is_some() {
-        let _ = client_event_tx.send(ServerEvent::ScopedContextCreated {
-            id,
-            source_session: client_session_id.into(),
-            session_id: new_session_id.clone(),
-            kind: crate::workspace::NewContextKind::Split,
-        });
-    }
-    let event = match startup_message {
-        Some(startup_message) => ServerEvent::WorkflowSplitResponse {
-            id,
-            new_session_id,
-            new_session_name,
-            startup_message,
-        },
-        None => ServerEvent::SplitResponse {
-            id,
-            new_session_id,
-            new_session_name,
-        },
-    };
-    let _ = client_event_tx.send(event);
+        if choice.is_some() {
+            let _ = client_event_tx.send(ServerEvent::ScopedContextCreated {
+                id,
+                source_session: client_session_id.into(),
+                session_id: new_session_id.clone(),
+                kind: crate::workspace::NewContextKind::Split,
+            });
+        }
+        let event = match startup_message {
+            Some(startup_message) => ServerEvent::WorkflowSplitResponse {
+                id,
+                new_session_id,
+                new_session_name,
+                startup_message,
+            },
+            None => ServerEvent::SplitResponse {
+                id,
+                new_session_id,
+                new_session_name,
+            },
+        };
+        let _ = client_event_tx.send(event);
+    });
 }
 
 pub(super) async fn handle_transfer_with_grants(
+    id: u64,
+    client_session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    instruction_repositories: &crate::instruction::InstructionRepositoryService,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
+    choice: Option<crate::workspace::GrantCarryChoice>,
+) {
+    use crate::runtime_lifecycle::admission;
+    let result = match admission::preparation("transfer", Some(client_session_id.into())) {
+        Ok(permit) => {
+            admission::prepare(permit, async {
+                transfer_admitted(
+                    id,
+                    client_session_id,
+                    agent,
+                    instruction_repositories,
+                    client_event_tx,
+                    choice,
+                )
+                .await;
+                Ok(())
+            })
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        if choice.is_some() {
+            let _ = client_event_tx.send(crate::primary::scope_rejection(
+                id,
+                client_session_id,
+                &error,
+            ));
+        }
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Transfer did not complete: {error:#}"),
+            retry_after_secs: None,
+        });
+    }
+}
+
+async fn transfer_admitted(
     id: u64,
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
