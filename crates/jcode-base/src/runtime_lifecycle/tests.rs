@@ -2,6 +2,59 @@ use super::*;
 use std::sync::{Arc, Barrier};
 
 #[test]
+#[cfg(unix)]
+fn dangling_control_directory_is_not_an_empty_stopped_runtime() -> Result<()> {
+    let (root, store) = fixture()?;
+    std::fs::create_dir_all(store.directory.parent().unwrap())?;
+    std::os::unix::fs::symlink(root.path().join("missing"), &store.directory)?;
+    assert!(store.status().is_err());
+    assert!(store.owner_is_live().is_err());
+    assert!(store.require_automatic_start().is_err());
+    assert!(
+        store
+            .accepted_request(RequestId::new(), ReviewId::new())
+            .is_err()
+    );
+    assert!(!root.path().join("missing").exists());
+    let other = tempfile::tempdir()?;
+    let parent_alias = RuntimeStopStore::new(other.path(), &other.path().join("runtime.sock"))?;
+    std::os::unix::fs::symlink(
+        other.path().join("missing"),
+        parent_alias.directory.parent().unwrap(),
+    )?;
+    assert!(parent_alias.status().is_err());
+    assert!(parent_alias.owner_is_live().is_err());
+    Ok(())
+}
+
+#[test]
+fn offline_inspection_preserves_receipts_and_reports_actual_ownership() -> Result<()> {
+    let (_root, store) = fixture()?;
+    assert!(!store.owner_is_live()?);
+    let request = RequestId::new();
+    let owner = store.claim()?;
+    assert!(store.owner_is_live()?);
+    let review = owner.review(
+        options(StopStrategy::Interrupt, IndependentTasks::Stop),
+        Vec::new(),
+    )?;
+    let operation = owner.begin(request, review.id, Vec::new())?;
+    let complete = owner.complete(operation.id, operation.revision)?;
+    let bytes = std::fs::read(store.directory.join("journal.json"))?;
+    assert_eq!(
+        store.accepted_request(request, review.id)?,
+        Some(complete.clone())
+    );
+    assert!(store.accepted_request(request, ReviewId::new()).is_err());
+    drop(owner);
+    assert!(!store.owner_is_live()?);
+    assert_eq!(store.inspect(operation.id)?, complete);
+    assert_eq!(std::fs::read(store.directory.join("journal.json"))?, bytes);
+    assert_eq!(store.status()?.namespace, store.namespace());
+    Ok(())
+}
+
+#[test]
 fn reviewed_replacement_preserves_history_and_never_reopens_cancel_after_stop() -> Result<()> {
     let (_root, store) = fixture()?;
     let owner = store.claim()?;

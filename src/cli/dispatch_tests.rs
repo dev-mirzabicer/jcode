@@ -145,15 +145,22 @@ fn spawn_lock_serializes_shared_server_bootstrap() {
 
     drop(first);
 
+    let waiting_descriptor = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+
     let third = try_acquire_spawn_lock(&lock_path)
         .expect("acquire third lock")
         .expect("third lock should succeed after release");
     drop(third);
-
-    assert!(
-        !lock_path.exists(),
-        "lock file should be cleaned up when the guard drops"
-    );
+    // A retained descriptor and a new path opener must still serialize on the
+    // same kernel inode. File deletion was cleanup, not ownership authority.
+    waiting_descriptor.try_lock().unwrap();
+    assert!(try_acquire_spawn_lock(&lock_path).unwrap().is_none());
+    drop(waiting_descriptor);
+    assert!(try_acquire_spawn_lock(&lock_path).unwrap().is_some());
 }
 
 #[test]

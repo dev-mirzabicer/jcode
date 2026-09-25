@@ -2215,6 +2215,29 @@ pub async fn run_server_reload_command(force: bool, emit_json: bool) -> Result<(
 /// 2. Wait for the listener to go away (bounded), escalating to SIGKILL only if
 ///    the process refuses to exit.
 /// 3. Reap any leftover stale socket so a later launch binds cleanly.
+#[cfg(unix)]
+pub async fn run_server_stop_command(force: bool, emit_json: bool) -> Result<()> {
+    anyhow::ensure!(
+        !force,
+        "Unbounded server stop --force is retired. Use jcode runtime stop to review, runtime confirm with its review/request IDs, and runtime force with an exact operation/revision only if required. No process was signalled."
+    );
+    super::runtime::run(
+        super::args::RuntimeCommand::Stop(super::args::RuntimeStopOptions {
+            strategy: super::args::RuntimeStrategy::FinishCurrent,
+            tasks: super::args::RuntimeTasks::Stop,
+            quiescence_seconds: 30,
+            json: emit_json,
+        }),
+        &super::provider_init::ProviderChoice::Auto,
+        None,
+        None,
+    )
+    .await
+}
+
+// Non-Unix retains its existing explicit process-stop client, not the managed
+// Unix quiescence/survival contract.
+#[cfg(not(unix))]
 pub async fn run_server_stop_command(force: bool, emit_json: bool) -> Result<()> {
     use std::time::{Duration, Instant};
 

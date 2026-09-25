@@ -160,6 +160,12 @@ pub(crate) enum Command {
         action: ServerCommand,
     },
 
+    /// Review and control runtime shutdown without creating an agent session.
+    Runtime {
+        #[command(subcommand)]
+        action: RuntimeCommand,
+    },
+
     /// Connect to a running server
     Connect,
 
@@ -601,8 +607,8 @@ pub(crate) enum ServerCommand {
     /// This is the preferred way to pick up an upgrade: the daemon hands its
     /// live sessions off to a freshly exec'd server (the same path `/reload`
     /// uses), so headless/swarm work is preserved instead of being killed. If
-    /// no server is running, this is a no-op. Use `server stop --force` only
-    /// when you need to hard-retire a wedged daemon.
+    /// no server is running, this is a no-op. Runtime Stop uses separately
+    /// reviewed controls through `jcode runtime`.
     Reload {
         /// Reload even if the running server is already on the newest binary.
         #[arg(long)]
@@ -613,18 +619,98 @@ pub(crate) enum ServerCommand {
         json: bool,
     },
 
-    /// Stop the running background server and clear its socket.
-    ///
-    /// Prefer `server reload` after an upgrade; it preserves live sessions.
-    /// `stop` terminates the daemon (SIGTERM, escalating to SIGKILL), which
-    /// drops any in-flight headless/swarm sessions, so it requires `--force`
-    /// as a deliberate acknowledgement.
+    /// Unix: review Stop, then use `runtime confirm`. Non-Unix retains manual process stop.
     Stop {
-        /// Confirm that terminating the daemon (and dropping live sessions) is intended.
+        /// Unix: retired; use revision-bound `runtime force`. Required for legacy non-Unix stop.
         #[arg(long)]
         force: bool,
 
         /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum RuntimeStrategy {
+    FinishCurrent,
+    Interrupt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum RuntimeTasks {
+    Stop,
+    KeepSupported,
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct RuntimeStopOptions {
+    #[arg(long, value_enum, default_value = "finish-current")]
+    pub strategy: RuntimeStrategy,
+    #[arg(long, value_enum, default_value = "stop")]
+    pub tasks: RuntimeTasks,
+    /// Deadline after entering Stopping, never an automatic Force deadline.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
+    pub quiescence_seconds: u32,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct RuntimeRevision {
+    pub operation: crate::workspace::OperationId,
+    #[arg(long)]
+    pub revision: u64,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum RuntimeCommand {
+    /// Inspect actual coordinator availability and durable intent without autostart.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explicitly start an intentionally stopped runtime. Does not replay old turns.
+    Start {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a shutdown review. This does not begin shutdown.
+    Stop(RuntimeStopOptions),
+    /// Review different options for an exact waiting or blocked operation revision.
+    Change {
+        operation: crate::workspace::OperationId,
+        #[arg(long)]
+        revision: u64,
+        #[command(flatten)]
+        options: RuntimeStopOptions,
+    },
+    /// Confirm one exact review. Retain the request UUID for uncertain-reply retry.
+    Confirm {
+        review: crate::workspace::ReviewId,
+        #[arg(long)]
+        request: crate::workspace::RequestId,
+        #[arg(long)]
+        json: bool,
+    },
+    Inspect {
+        operation: crate::workspace::OperationId,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel only an operation whose waiting phase remains cancellable.
+    Cancel(RuntimeRevision),
+    /// Retry quiescence without replaying work effects.
+    Retry(RuntimeRevision),
+    /// Escalate an exact operation. Forced exit may retain uncertain outcomes.
+    Force(RuntimeRevision),
+    /// Wait for an outcome and actual coordinator exit. Never starts the runtime.
+    Wait {
+        operation: crate::workspace::OperationId,
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
+        timeout_seconds: u32,
         #[arg(long)]
         json: bool,
     },

@@ -218,19 +218,26 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Server { action }) => match action {
             ServerCommand::Start { json } => {
-                spawn_server(
-                    &args.provider,
-                    args.model.as_deref(),
-                    args.provider_profile.as_deref(),
-                )
-                .await?;
+                #[cfg(unix)]
+                {
+                    super::runtime::start(
+                        &args.provider,
+                        args.model.as_deref(),
+                        args.provider_profile.as_deref(),
+                    )
+                    .await?;
+                }
+                #[cfg(not(unix))]
+                {
+                    spawn_server(
+                        &args.provider,
+                        args.model.as_deref(),
+                        args.provider_profile.as_deref(),
+                    )
+                    .await?;
+                }
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "status": "running",
-                        })
-                    );
+                    println!("{}", serde_json::json!({"status":"running"}));
                 } else {
                     println!("Jcode server is running.");
                 }
@@ -250,6 +257,15 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 commands::run_server_stop_command(force, json).await?;
             }
         },
+        Some(Command::Runtime { action }) => {
+            super::runtime::run(
+                action,
+                &args.provider,
+                args.model.as_deref(),
+                args.provider_profile.as_deref(),
+            )
+            .await?;
+        }
         Some(Command::Run {
             message,
             json,
@@ -1193,35 +1209,31 @@ fn spawn_lock_path(socket_path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(unix)]
 struct SpawnLockGuard {
     _file: std::fs::File,
-    path: std::path::PathBuf,
-}
-
-#[cfg(unix)]
-impl Drop for SpawnLockGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 #[cfg(unix)]
 fn try_acquire_spawn_lock(path: &std::path::Path) -> Result<Option<SpawnLockGuard>> {
     use std::fs::OpenOptions;
-    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
 
     let file = OpenOptions::new()
         .create(true)
+        .read(true)
         .write(true)
         .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    let fd = file.as_raw_fd();
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if ret == 0 {
-        Ok(Some(SpawnLockGuard {
-            _file: file,
-            path: path.to_path_buf(),
-        }))
-    } else {
-        Ok(None)
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "Spawn lock is not a regular file"
+    );
+    // Keep the inode. Unlinking a released lease can split ownership between a
+    // waiter with the old descriptor and a new starter opening the new path.
+    match file.try_lock() {
+        Ok(()) => Ok(Some(SpawnLockGuard { _file: file })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!(error)),
     }
 }
 
@@ -1359,6 +1371,31 @@ pub(crate) async fn spawn_server_with_environment(
     provider_profile: Option<&str>,
     environment: crate::server_spawn::ServerEnvironment,
 ) -> Result<()> {
+    spawn_server_intent(provider_choice, model, provider_profile, environment, false).await
+}
+
+pub(crate) async fn start_server_explicit(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+) -> Result<()> {
+    spawn_server_intent(
+        provider_choice,
+        model,
+        provider_profile,
+        crate::server_spawn::ServerEnvironment::Inherit,
+        true,
+    )
+    .await
+}
+
+async fn spawn_server_intent(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+    environment: crate::server_spawn::ServerEnvironment,
+    explicit_start: bool,
+) -> Result<()> {
     let socket_path = server::socket_path();
     if server_is_running_at(&socket_path).await {
         startup_profile::mark("server_ready");
@@ -1371,7 +1408,21 @@ pub(crate) async fn spawn_server_with_environment(
     }
 
     #[cfg(unix)]
-    let _spawn_lock = acquire_spawn_lock_or_wait(&socket_path).await?;
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    let _spawn_lock = loop {
+        if let Some(guard) = acquire_spawn_lock_or_wait(&socket_path).await? {
+            break guard;
+        }
+        if server_is_running_at(&socket_path).await {
+            return Ok(());
+        }
+        // A listener may disappear after another starter released its lock.
+        // Never clear desired-stop or spawn without reacquiring this ownership.
+    };
 
     if server_is_running_at(&socket_path).await {
         startup_profile::mark("server_ready");
@@ -1382,6 +1433,21 @@ pub(crate) async fn spawn_server_with_environment(
         startup_profile::mark("server_ready");
         return Ok(());
     }
+
+    #[cfg(unix)]
+    {
+        let store = crate::runtime_lifecycle::RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &socket_path,
+        )?;
+        if explicit_start {
+            store.authorize_start()?;
+        } else {
+            store.require_automatic_start()?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = explicit_start;
 
     startup_profile::mark("server_spawn_start");
     output::stderr_info("Starting server...");

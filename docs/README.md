@@ -23,6 +23,7 @@ Reference documentation for the jcode codebase.
 - Primary runtime: [creation, detached ownership and native verification](dev/PRIMARY_HOST_ACCEPTANCE.md), [durable input and atomic location controls](PRIMARY_INPUT_LOCATION.md), and [reviewed new-context scope](PRIMARY_CONTEXT_SCOPE.md). Managed creation and location controls are explicitly staged; ordinary client detach does not stop hosted work.
 - Workspace foundation: [private catalog and recovery](dev/WORKSPACE_CATALOG.md), [independent checkout provisioning, adoption and path-only Startup Context copy](dev/WORKSPACE_CHECKOUTS.md). Managed session/scope rollout and the human management client remain separately gated.
 - Task monitor: [native task/output controls, child Context Editor and storage review](TASK_MONITOR.md)
+- Runtime control: [reviewed CLI shutdown, explicit Start and offline receipts](RUNTIME_CONTROL.md), [ownership and failure contract](dev/RUNTIME_SHUTDOWN.md)
 - Combined execution/delegation verification: [requirements, native journeys and evidence boundaries](dev/PHASE4_INTEGRATION_ACCEPTANCE.md)
 - Independent Phase 4 closeout: [requirement reconciliation, repairs and acceptance limits](dev/PHASE4_CLOSEOUT_ACCEPTANCE.md)
 - Isolated children: [workflow, permissions, MCP eligibility and recovery](ISOLATED_DELEGATION.md)

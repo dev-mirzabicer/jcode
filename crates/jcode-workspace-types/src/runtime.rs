@@ -113,6 +113,7 @@ pub struct ShutdownOperation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeStatus {
+    pub namespace: String,
     /// Present only on a response from the actual live coordinator.
     pub runtime: Option<String>,
     #[serde(default)]

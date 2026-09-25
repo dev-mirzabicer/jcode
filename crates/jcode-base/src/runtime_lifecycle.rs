@@ -158,9 +158,29 @@ impl RuntimeStopStore {
         })
     }
 
+    fn exists(&self) -> Result<bool> {
+        for path in [
+            self.directory
+                .parent()
+                .context("Missing runtime control parent")?,
+            self.directory.as_path(),
+        ] {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) => ensure!(
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    "Runtime control directory identity changed"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(true)
+    }
+
     pub fn status(&self) -> Result<RuntimeStatus> {
-        if !self.directory.try_exists()? {
+        if !self.exists()? {
             return Ok(RuntimeStatus {
+                namespace: self.namespace.clone(),
                 runtime: None,
                 reload_in_progress: false,
                 desired_stopped: false,
@@ -179,6 +199,67 @@ impl RuntimeStopStore {
             "Runtime was intentionally stopped; use jcode runtime start explicitly"
         );
         Ok(())
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub fn owner_is_live(&self) -> Result<bool> {
+        if !self.exists()? {
+            return Ok(false);
+        }
+        let tx = self.transaction()?;
+        let lease = match open_file(&self.directory.join("owner.lock"), false, true) {
+            Ok(lease) => lease,
+            Err(error)
+                if !tx.initialized
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error.context("Runtime ownership cannot be verified")),
+        };
+        match lease.try_lock() {
+            Ok(()) => Ok(false),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(error) => Err(anyhow::anyhow!(error).context("Inspect runtime ownership")),
+        }
+    }
+
+    pub fn inspect(&self, id: OperationId) -> Result<ShutdownOperation> {
+        ensure!(self.exists()?, "Unknown runtime operation");
+        self.transaction()?
+            .journal
+            .operations
+            .into_iter()
+            .find(|op| op.id == id)
+            .context("Unknown runtime operation")
+    }
+
+    pub fn accepted_request(
+        &self,
+        request: RequestId,
+        review: ReviewId,
+    ) -> Result<Option<ShutdownOperation>> {
+        if !self.exists()? {
+            return Ok(None);
+        }
+        let operation = self
+            .transaction()?
+            .journal
+            .operations
+            .into_iter()
+            .find(|op| op.request == request);
+        if let Some(operation) = &operation {
+            ensure!(
+                operation.review.id == review,
+                "Shutdown request ID belongs to a different review"
+            );
+        }
+        Ok(operation)
     }
 
     /// Explicit Start is independent of notification delivery. It does not
@@ -218,6 +299,7 @@ impl RuntimeStopStore {
 impl Transaction {
     fn status(&self) -> RuntimeStatus {
         RuntimeStatus {
+            namespace: self.store.namespace.clone(),
             runtime: None,
             reload_in_progress: false,
             desired_stopped: self.journal.desired_stopped,
@@ -343,13 +425,7 @@ impl RuntimeStopOwner {
     }
 
     pub fn inspect(&self, id: OperationId) -> Result<ShutdownOperation> {
-        self.store
-            .transaction()?
-            .journal
-            .operations
-            .into_iter()
-            .find(|op| op.id == id)
-            .context("Unknown runtime operation")
+        self.store.inspect(id)
     }
 
     pub fn review(
