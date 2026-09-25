@@ -83,6 +83,21 @@ checks as ordinary retained-output reads.
 
 ## Storage and remote clients
 
+On Unix, human input-shell commands also use this execution owner. They keep
+their captured session/cwd, run `bash -c` without interactive stdin, and retain
+the original command and complete raw stdout/stderr in private execution
+storage. The existing console display still groups stdout before stderr and
+limits its preview to 30,000 bytes. That preview limit does not delete the
+retained tail. These runs appear as `input_shell` in Tasks.
+
+Closing the requesting client does not cancel a started command. Explicit Stop
+reaches its verified native owner and retains partial output. A supported
+background handoff reports the same run identity, not a completed exit status.
+The runtime-shutdown backend can preserve that worker; the runtime command and
+daemon activation surface is still staged separately in this source series.
+Non-Unix input-shell execution retains its existing process-local behavior and
+does not claim this native-worker capability.
+
 Execution metadata and receipts stay in private local state. Configured emergency
 output placement can use a UUID-verified archive volume when local receipt headroom
 would otherwise be exhausted. Successful placement is quiet. Offline requested

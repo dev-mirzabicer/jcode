@@ -204,6 +204,16 @@ changed, Jcode refuses to retarget another block silently.
 The curator is request scoped. It is not a persistent agent type and it is not exposed to
 the coding agent as a context-maintenance tool.
 
+When a hosted runtime has registered reviewed-shutdown ownership, its coordinator
+accounts for each actual preparation worker, including snapshot/child callers.
+Finish-current waits for that worker. Interrupt uses the existing draft cancellation
+transition and token, then waits for generation and its reservations to settle.
+Cancelling the request does not apply an artifact, rewrite source messages, or bypass
+the normal review/commit gates. Ready drafts retain their existing in-memory TTL
+contract; runtime accounting does not create a second draft store or persistence
+guarantee. Public runtime controls remain separately staged with their daemon/client
+integration.
+
 ### One task per call
 
 Each semantic task is isolated:

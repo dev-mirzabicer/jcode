@@ -23,6 +23,8 @@ mod comm_plan;
 mod comm_session;
 mod comm_sync;
 mod context_control;
+#[cfg(unix)]
+mod input_shell;
 pub use child_context::forward as forward_child_context;
 mod debug;
 mod debug_ambient;

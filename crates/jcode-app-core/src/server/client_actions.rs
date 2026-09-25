@@ -10,9 +10,11 @@ use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use crate::util::truncate_str;
 use std::collections::{HashMap, HashSet};
+#[cfg(not(unix))]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
+#[cfg(not(unix))]
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -30,6 +32,7 @@ fn derive_subagent_description(prompt: &str) -> String {
     }
 }
 
+#[cfg(not(unix))]
 fn build_input_shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
@@ -46,7 +49,7 @@ fn build_input_shell_command(command: &str) -> Command {
     }
 }
 
-fn combine_input_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
+pub(super) fn combine_input_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
     let stdout = String::from_utf8_lossy(stdout);
     let stderr = String::from_utf8_lossy(stderr);
     let mut output = String::new();
@@ -144,6 +147,19 @@ pub(super) async fn handle_notify_session(
 }
 
 pub(super) fn handle_input_shell(
+    id: u64,
+    command: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &crate::client_delivery::ClientEventSender,
+) {
+    #[cfg(unix)]
+    super::input_shell::handle(id, command, agent, client_event_tx);
+    #[cfg(not(unix))]
+    handle_input_shell_local(id, command, agent, client_event_tx);
+}
+
+#[cfg(not(unix))]
+fn handle_input_shell_local(
     id: u64,
     command: String,
     agent: &Arc<Mutex<Agent>>,

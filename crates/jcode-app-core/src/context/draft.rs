@@ -58,6 +58,36 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+async fn own_runtime_preparation(
+    permit: Option<crate::runtime_lifecycle::admission::WorkPermit>,
+    cancellation: CancellationToken,
+    service: Arc<ContextTransactionService>,
+    draft_id: String,
+    work: impl std::future::Future<Output = ()>,
+) {
+    let stop = permit.as_ref().map(|permit| permit.stop_signal());
+    crate::runtime_lifecycle::admission::scope(permit, async move {
+        tokio::pin!(work);
+        if let Some(stop) = stop {
+            tokio::select! {
+                _ = &mut work => {},
+                _ = stop.notified() => {
+                    // Preserve the existing terminal state and late-result
+                    // exclusion, not merely transport cancellation.
+                    let _ = service.cancel_draft(&draft_id);
+                    cancellation.cancel();
+                    // The draft owner still settles progress, reservations and
+                    // provider work. A cancellation request is not completion.
+                    work.await;
+                }
+            }
+        } else {
+            work.await;
+        }
+    })
+    .await;
+}
+
 const TERMINAL_DRAFT_RESERVATION_FLOOR_BYTES: usize = 512;
 
 fn bounded_context_metadata(value: &str, max_chars: usize) -> String {
@@ -862,6 +892,11 @@ impl ContextTransactionService {
         guard
             .validate_active_agent_profile()
             .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        let runtime_permit = crate::runtime_lifecycle::admission::preparation(
+            "context-preparation",
+            Some(guard.session_id().to_owned()),
+        )
+        .map_err(|error| ContextServiceError::Runtime(error.to_string()))?;
         let draft_id = Uuid::new_v4().to_string();
         let created_at = Utc::now();
         let expires_at = created_at
@@ -936,11 +971,18 @@ impl ContextTransactionService {
         }
 
         let service = Arc::clone(self);
-        runtime.spawn(async move {
-            service
-                .prepare_draft_task(agent, capture, route, plan, cancellation)
-                .await;
-        });
+        let runtime_cancellation = cancellation.clone();
+        runtime.spawn(own_runtime_preparation(
+            runtime_permit,
+            runtime_cancellation,
+            self.clone(),
+            draft_id.clone(),
+            async move {
+                service
+                    .prepare_draft_task(agent, capture, route, plan, cancellation)
+                    .await;
+            },
+        ));
         Ok(draft_id)
     }
 
@@ -956,6 +998,11 @@ impl ContextTransactionService {
         if request.is_empty() {
             return Err(ContextServiceError::EmptyRequest);
         }
+        let runtime_permit = crate::runtime_lifecycle::admission::preparation(
+            "context-preparation",
+            Some(input.session_id.clone()),
+        )
+        .map_err(|error| ContextServiceError::Runtime(error.to_string()))?;
         let configured_default = crate::config::config().context.curator.clone();
         let (effective_curator_config, _) =
             effective_curator_config(&configured_default, &request.curator);
@@ -1028,18 +1075,25 @@ impl ContextTransactionService {
             )?;
         }
         let service = Arc::clone(self);
-        runtime.spawn(async move {
-            service
-                .prepare_draft_task_for_session(
-                    capture,
-                    route,
-                    plan,
-                    input.provider,
-                    input.estimated_total_request_tokens_before,
-                    cancellation,
-                )
-                .await;
-        });
+        let runtime_cancellation = cancellation.clone();
+        runtime.spawn(own_runtime_preparation(
+            runtime_permit,
+            runtime_cancellation,
+            self.clone(),
+            draft_id.clone(),
+            async move {
+                service
+                    .prepare_draft_task_for_session(
+                        capture,
+                        route,
+                        plan,
+                        input.provider,
+                        input.estimated_total_request_tokens_before,
+                        cancellation,
+                    )
+                    .await;
+            },
+        ));
         Ok(draft_id)
     }
 
@@ -5555,6 +5609,100 @@ mod orchestration_tests {
         assert!(matches!(entry.state, DraftEntryState::Canceled));
         assert!(!entry.generation_in_flight);
         assert_eq!(entry.reserved_bytes, 512);
+    }
+
+    #[test]
+    fn runtime_shutdown_cancels_both_curator_entrypoints_without_context_change()
+    -> anyhow::Result<()> {
+        use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
+        use crate::workspace::{RequestId, runtime::*};
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        tokio::runtime::Runtime::new()?.block_on(async {
+            for snapshot in [false, true] {
+                let provider = DraftProvider::new();
+                provider.gate_curator();
+                let agent = test_agent(&provider);
+                let (service, _) = test_service(ContextServiceLimits::default());
+                let owner = RuntimeStopStore::new(
+                    &crate::storage::durable_state_dir(),
+                    &home.root().join(format!("curator-{snapshot}.sock")),
+                )?
+                .claim()?;
+                let registration = RuntimeAdmission::register(home.root(), owner.identity())?;
+                let before = {
+                    let guard = agent.lock().await;
+                    serde_json::to_vec(&(guard.messages(), guard.context_view_state()))?
+                };
+                let draft = if snapshot {
+                    let mut guard = agent.lock().await;
+                    let mut request = request();
+                    let revision = guard.context_view_state().revision;
+                    let digest = authoritative_transcript_digest(guard.messages());
+                    request.curator.expected_plan_fingerprint = Some(
+                        service
+                            .preview_context_curator_plan(
+                                &mut guard,
+                                false,
+                                revision,
+                                digest,
+                                request.clone(),
+                            )?
+                            .fingerprint,
+                    );
+                    let input = ContextDraftRuntimeInput::from_session(
+                        guard.startup_context_session(),
+                        guard.provider_handle(),
+                        guard.context_route_identity(),
+                        guard.model_routes(),
+                        None,
+                    )?;
+                    service.prepare_draft_for_session(input, request, false)?
+                } else {
+                    prepare(&service, agent.clone())?
+                };
+                tokio::time::timeout(Duration::from_secs(3), provider.wait_for_curator_start())
+                    .await?;
+                let review = registration.admission().review(
+                    &owner,
+                    ShutdownOptions {
+                        strategy: StopStrategy::Interrupt,
+                        independent: IndependentTasks::Stop,
+                        quiescence_timeout_seconds: 3,
+                    },
+                    Vec::new(),
+                )?;
+                registration
+                    .admission()
+                    .begin(&owner, RequestId::new(), review.id, Vec::new())?;
+                registration.admission().interrupt_preparations()?;
+                let settled = tokio::time::timeout(Duration::from_secs(3), async {
+                    while !registration.admission().work()?.is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+                provider.release_curator();
+                wait_for_generation_release(&service, &draft).await;
+                settled??;
+                assert!(matches!(
+                    service.draft_status(&draft)?,
+                    ContextDraftStatus::Canceled { .. }
+                ));
+                assert!(!service.lock_store().entries[&draft].generation_in_flight);
+                let guard = agent.lock().await;
+                assert_eq!(
+                    serde_json::to_vec(&(guard.messages(), guard.context_view_state()))?,
+                    before
+                );
+                drop(guard);
+                assert!(matches!(
+                    prepare(&service, agent.clone()),
+                    Err(ContextServiceError::Runtime(_))
+                ));
+            }
+            Ok(())
+        })
     }
 
     #[tokio::test]

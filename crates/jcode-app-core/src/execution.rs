@@ -138,10 +138,13 @@ pub(crate) async fn execute(
 pub(crate) async fn execute_at(
     root: PathBuf,
     invocation: Invocation,
-    ctx: ToolContext,
+    mut ctx: ToolContext,
     target: NonZeroUsize,
     producer: Producer,
 ) -> Result<ToolOutput> {
+    // Native handoff uses the same target as terminal delivery. Public callers
+    // must not have to duplicate this owner-selected value in ToolContext.
+    ctx.invocation.output_target = Some(target);
     let policy = ctx.invocation.policy.clone();
     let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;
     let runtime = runtime::ensure_running(&store).await?;
