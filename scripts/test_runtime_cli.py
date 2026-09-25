@@ -30,6 +30,7 @@ def main():
     evidence = []
     errors = []
     cleanup_errors = []
+    lease_checks = []
     # Small IPC files need a short path on macOS. Durable evidence stays above.
     ipc = tempfile.mkdtemp(prefix='jcrt-', dir='/tmp')
     (root / 'runtime').mkdir(mode=0o700)
@@ -101,16 +102,18 @@ def main():
         except Exception as error:
             cleanup_errors.append(repr(error))
         try:
-            # Check exact owned coordinator/worker leases, not PID absence.
-            for endpoint_file in (home / '.jcode' / 'execution' / 'runtimes').glob('*.json'):
-                endpoint = json.loads(endpoint_file.read_text())
-                if 'lease_path' not in endpoint:
-                    continue
-                lease_path = Path(endpoint['lease_path'])
+            # Runtime endpoint records live in SQLite; enumerate the actual owned
+            # lease files, not namespace-only JSON metadata.
+            leases = list((home / '.jcode' / 'execution' / 'runtimes').glob('*.lease'))
+            if not errors:
+                assert len(leases) >= 2, 'No evidence of both runtime incarnations'
+            lease_checks = []
+            for lease_path in leases:
                 assert lease_path.is_relative_to(home), 'Fixture lease escaped its state root'
                 fd = os.open(lease_path, os.O_RDWR | os.O_NOFOLLOW)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lease_checks.append({'path': str(lease_path), 'released': True})
                 finally:
                     os.close(fd)
         except Exception as error:
@@ -122,7 +125,7 @@ def main():
                 cleanup_errors.append(repr(error))
         with binary.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-        result = {'ipc': ipc, 'binary': str(binary), 'sha256': digest, 'root': str(root), 'errors': errors, 'cleanup_errors': cleanup_errors, 'commands': evidence}
+        result = {'ipc': ipc, 'binary': str(binary), 'sha256': digest, 'root': str(root), 'errors': errors, 'cleanup_errors': cleanup_errors, 'lease_checks': lease_checks, 'commands': evidence}
         (root / 'result.json').write_text(json.dumps(result, indent=2))
         print(json.dumps({'root': str(root), 'passed': not errors and not cleanup_errors, 'errors': errors, 'cleanup_errors': cleanup_errors}))
     if errors or cleanup_errors:
