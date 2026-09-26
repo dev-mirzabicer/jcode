@@ -16,6 +16,7 @@ f.env['JCODE_SOCKET']=str(f.sockpath)
 prefix=f.args[:f.args.index('serve')]
 (f.ROOT/'owned-runtime-work.json').write_text(json.dumps({'binary':f.BIN,'namespace':str(f.sockpath)}))
 commands=[]; clients=[]; runs=[]; errors=[]; cleanup=[]; outcomes={}
+other_sockets=[]; endpoint_env={}
 testers=[]; frames=[]; physical_tui=os.environ.get("JCODE_WP08_PHYSICAL_TUI")=="1"
 fixture=f.ROOT/'native.py'
 fixture.write_text('''from pathlib import Path
@@ -55,9 +56,11 @@ def wait(predicate,label,seconds=40):
         if time.monotonic()>deadline: raise TimeoutError(label)
         time.sleep(.05)
 
-def cli(*args,success=True):
-    value=subprocess.run(prefix+['runtime',*args,'--json'],env=f.env,cwd=f.project,capture_output=True,text=True,timeout=65)
-    commands.append({'args':args,'exit':value.returncode,'stdout':value.stdout,'stderr':value.stderr})
+def cli(*args,success=True,endpoint=None):
+    selected=prefix.copy()
+    selected[selected.index('--socket')+1]=str(endpoint or f.sockpath)
+    value=subprocess.run(selected+['runtime',*args,'--json'],env=endpoint_env.get(str(endpoint),f.env),cwd=f.project,capture_output=True,text=True,timeout=65)
+    commands.append({'socket':str(endpoint or f.sockpath),'args':args,'exit':value.returncode,'stdout':value.stdout,'stderr':value.stderr})
     (f.ROOT/'cli.json').write_text(json.dumps(commands,indent=2))
     if success: assert value.returncode==0,commands[-1]
     else: assert value.returncode!=0,commands[-1];return value
@@ -65,22 +68,22 @@ def cli(*args,success=True):
 
 def current(): return cli('status')['response']['value']
 def inspect(op): return cli('inspect',op)['response']['value']
-def begin(strategy,tasks,timeout=10):
-    review=cli('stop','--strategy',strategy,'--tasks',tasks,'--quiescence-seconds',str(timeout))
-    return cli('confirm',review['response']['value']['id'],'--request',review['confirm_request'])['response']['value']
-def change(op,strategy,tasks):
-    latest=inspect(op['id'])
-    review=cli('change',op['id'],'--revision',str(latest['revision']),'--strategy',strategy,'--tasks',tasks,'--quiescence-seconds','15')
-    return cli('confirm',review['response']['value']['id'],'--request',review['confirm_request'])['response']['value']
-def stopped(op):
-    value=cli('wait',op['id'],'--timeout-seconds','35')
+def begin(strategy,tasks,timeout=10,endpoint=None):
+    review=cli('stop','--strategy',strategy,'--tasks',tasks,'--quiescence-seconds',str(timeout),endpoint=endpoint)
+    return cli('confirm',review['response']['value']['id'],'--request',review['confirm_request'],endpoint=endpoint)['response']['value']
+def change(op,strategy,tasks,endpoint=None):
+    latest=cli('inspect',op['id'],endpoint=endpoint)['response']['value']
+    review=cli('change',op['id'],'--revision',str(latest['revision']),'--strategy',strategy,'--tasks',tasks,'--quiescence-seconds','15',endpoint=endpoint)
+    return cli('confirm',review['response']['value']['id'],'--request',review['confirm_request'],endpoint=endpoint)['response']['value']
+def stopped(op,endpoint=None):
+    value=cli('wait',op['id'],'--timeout-seconds','35',endpoint=endpoint)
     assert value['response']['value']['phase']=='stopped' and value['coordinator_owned'] is False,value
-    assert not f.sockpath.exists()
+    assert not (endpoint or f.sockpath).exists()
     return value['response']['value']
 
 class Client:
-    def __init__(self):
-        self.sock=socket.socket(socket.AF_UNIX);self.sock.settimeout(45);self.sock.connect(str(f.sockpath))
+    def __init__(self,endpoint=None):
+        self.sock=socket.socket(socket.AF_UNIX);self.sock.settimeout(45);self.sock.connect(str(endpoint or f.sockpath))
         self.stream=self.sock.makefile('rwb',buffering=0);self.n=0;self.events=[];clients.append(self)
     def send(self,kind,**fields):
         self.n+=1;self.stream.write((json.dumps({'type':kind,'id':self.n,**fields})+'\n').encode());return self.n
@@ -156,11 +159,11 @@ def tui_shell(command,mode):
 def record(run):
     with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro',uri=True) as db:
         return db.execute('SELECT state,background,owner FROM runs WHERE id=?',(run,)).fetchone()
-def shell(client,mode):
+def shell(client,mode,native_only=False):
     with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro',uri=True) as db:
         before={row[0] for row in db.execute('SELECT id FROM runs')}
     command=f'{shlex.quote(sys.executable)} {shlex.quote(str(fixture))} {shlex.quote(str(f.ROOT))} {mode}'
-    if physical_tui:tui_shell(command,mode)
+    if physical_tui and not native_only:tui_shell(command,mode)
     else:client.send('input_shell',command=command)
     wait(lambda:(f.ROOT/(mode+'-ready')).exists(),mode+' ready')
     with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro',uri=True) as db:
@@ -180,6 +183,29 @@ def output(client,run):
 def resume(session):
     for c in list(clients):c.close()
     cli('start');c=Client();assert c.subscribe(session)==session;return c
+
+def cleanup_runtime(endpoint):
+    if endpoint.exists():
+        peer=Client(endpoint)
+        def control(request):
+            event=peer.rpc('runtime_control',request=request)
+            assert event['type']=='runtime_response',event
+            value=event['response'];assert value['kind']!='error',value
+            return value['value']
+        status=control({'action':'status'});op=status['operation']
+        options={'strategy':'interrupt','independent':'stop','quiescence_timeout_seconds':20}
+        if op and op['phase'] in ('waiting_for_current','blocked'):
+            review=control({'action':'review_change','operation':op['id'],'expected_revision':op['revision'],'options':options})
+        elif not status['desired_stopped'] or not op or op['review']['runtime'] != status['runtime'] or op['phase'] in ('cancelled','superseded','interrupted'):
+            review=control({'action':'review','options':options})
+        else: review=None
+        if review:
+            try:op=control({'action':'begin','request':str(uuid.uuid4()),'review':review['id']})
+            except EOFError: pass  # Verify actual exit/leases below, not the missing reply.
+        peer.close()
+        wait(lambda:not endpoint.exists(),'cleanup runtime exit',35)
+    offline=cli('status',endpoint=endpoint)
+    assert not offline['live_response'] and offline['coordinator_owned'] is False,offline
 
 try:
     progress('start')
@@ -245,6 +271,44 @@ try:
     assert 'TAIL_background-keep' in output(client,run)
     outcomes['actual_daemon_exit_background_survival']=True
     assert len(f.posts)==1,f.posts
+    if os.environ.get('JCODE_WP08_NAMESPACES')=='1':
+        progress('foreign-runtime-and-input')
+        other=ipc/'foreign.sock';other_sockets.append(other)
+        # A daemon owns its whole runtime directory, not just a socket name.
+        # Separate IPC/daemon locks while deliberately sharing durable input.
+        foreign_runtime=f.ROOT/'foreign-runtime';foreign_runtime.mkdir()
+        (foreign_runtime/'durable-state').symlink_to(f.ROOT/'runtime/durable-state',target_is_directory=True)
+        endpoint_env[str(other)]=f.env | {'JCODE_RUNTIME_DIR':str(foreign_runtime),'JCODE_SOCKET':str(other)}
+        foreign_identity=cli('start',endpoint=other)['response']['value']['runtime']
+        peer=Client(other);foreign_session=peer.subscribe()
+        foreign=shell(peer,'foreign-owner',native_only=True)
+        assert all(row['id']!=foreign for row in current()['work'])
+        stopped(begin('interrupt','stop'))
+        assert record(foreign)[0:2]==('running',0),'Stopping A changed B foreground ownership'
+        assert cli('status',endpoint=other)['response']['value']['runtime']==foreign_identity
+        cli('start')
+        b_wait=begin('finish-current','stop',endpoint=other)
+        foreign_input=str(uuid.uuid4())
+        receipt=peer.rpc('primary_input',input={'id':foreign_input,'session':foreign_session,'content':'Foreign deferred input','delivery':'next_turn','urgent':False,'origin':{'kind':'human'}})
+        assert receipt['receipt']['state']=='accepted'
+        peer.close()
+        stopped(change(b_wait,'interrupt','keep-supported',endpoint=other),endpoint=other)
+        stopped(begin('interrupt','stop'))
+        cli('start');observer=Client()
+        time.sleep(1)
+        receipt=observer.rpc('primary_input_inspect',session=foreign_session,input=foreign_input)['receipt']
+        assert receipt['state']=='accepted' and receipt.get('issue'),receipt
+        assert len(f.posts)==1,'Runtime A delivered runtime B input'
+        assert record(foreign)[0:2]==('running',1)
+        assert not other.exists(),'Foreign input auto-started its stopped runtime'
+        cli('start',endpoint=other);peer=Client(other)
+        wait(lambda:peer.rpc('primary_input_inspect',session=foreign_session,input=foreign_input)['receipt']['state']=='committed','original runtime delivers input')
+        wait(lambda:len(f.posts)==2,'one original-runtime provider request')
+        assert peer.subscribe(foreign_session)==foreign_session
+        (f.ROOT/'foreign-owner-release').write_text('release')
+        wait(lambda:record(foreign)[0]=='completed','foreign original command completed')
+        assert 'TAIL_foreign-owner' in output(peer,foreign)
+        outcomes['foreign_runtime_and_pending_input_isolation']=True
     for item in runs: assert (f.ROOT/(item['mode']+'-effects')).read_text()=='x'
 except Exception as error:
     errors.append(traceback.format_exc())
@@ -257,27 +321,7 @@ finally:
             if not f.sockpath.exists():cli('start')
             stop_testers()
         for c in list(clients):c.close()
-        if f.sockpath.exists():
-            peer=Client()
-            def control(request):
-                event=peer.rpc('runtime_control',request=request)
-                assert event['type']=='runtime_response',event
-                value=event['response'];assert value['kind']!='error',value
-                return value['value']
-            status=control({'action':'status'});op=status['operation']
-            options={'strategy':'interrupt','independent':'stop','quiescence_timeout_seconds':20}
-            if op and op['phase'] in ('waiting_for_current','blocked'):
-                review=control({'action':'review_change','operation':op['id'],'expected_revision':op['revision'],'options':options})
-            elif not status['desired_stopped'] or not op or op['review']['runtime'] != status['runtime'] or op['phase'] in ('cancelled','superseded','interrupted'):
-                review=control({'action':'review','options':options})
-            else: review=None
-            if review:
-                try:op=control({'action':'begin','request':str(uuid.uuid4()),'review':review['id']})
-                except EOFError: pass  # Verify actual exit/leases below, not the missing reply.
-            peer.close()
-            wait(lambda:not f.sockpath.exists(),'cleanup runtime exit',35)
-        offline=cli('status')
-        assert not offline['live_response'] and offline['coordinator_owned'] is False,offline
+        for endpoint in [*other_sockets,f.sockpath]:cleanup_runtime(endpoint)
         for item in runs: wait(lambda:record(item['id'])[0] in ('completed','cancelled','failed','interrupted'),'cleanup terminal')
         leases=list((f.home/'execution/runtimes').glob('*.lease'));assert leases
         def all_released():

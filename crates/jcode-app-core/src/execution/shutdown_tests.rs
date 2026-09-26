@@ -271,6 +271,17 @@ async fn survival_case(
                 .await??;
             }
         }
+        // Promotion also registers a process-global completion observer. Its
+        // durable work is terminal above, but it may not have removed its map
+        // entry before this test's Tokio runtime and temporary store disappear.
+        // Settle through the existing owner while the receipt is still readable.
+        ensure!(
+            crate::background::global()
+                .abort_live_tasks_for_reload()
+                .await?
+                == 0,
+            "Fixture left live legacy background work"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -450,6 +461,13 @@ fn damaged_native_handoff_blocks_preservation_without_destructive_fallback() -> 
         ensure!(
             owned.store.inspect(&id)?.unwrap().stop_cause == Some(StopCause::RuntimeShutdown),
             "Explicit runtime stop lost its cause"
+        );
+        ensure!(
+            crate::background::global()
+                .abort_live_tasks_for_reload()
+                .await?
+                == 0,
+            "Fixture left live legacy background work"
         );
         runtime::end_test_listener(&owned.runtime).await;
         outcome
