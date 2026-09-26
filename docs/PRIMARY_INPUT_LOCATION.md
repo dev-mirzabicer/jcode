@@ -91,7 +91,8 @@ commit clears that diagnostic. An exact pending retry after repair uses the same
 UUID. Acceptance, restoration, dispatch and completion remain separate facts.
 The native protocol is described in [reviewed runtime shutdown](dev/RUNTIME_SHUTDOWN.md).
 The [runtime CLI](RUNTIME_CONTROL.md) supplies its narrow human controls; the Harness and both SDKs expose the same negotiated administrative contract.
-Final activated-runtime acceptance remains staged.
+[Activated-runtime evidence](dev/RUNTIME_SHUTDOWN_ACCEPTANCE.md) records the
+final boundary separately from Mirza's implementation approval.
 
 ## Public clients
 

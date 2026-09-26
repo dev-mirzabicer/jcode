@@ -6,7 +6,8 @@ can use `runtime_probe` and `runtime_control` without constructing a primary
 Session. The [narrow CLI](../RUNTIME_CONTROL.md) uses this protocol and the same
 durable owner for offline inspection. Harness v1.11 and both SDKs expose negotiated
 `runtime_lifecycle_v1` controls with logical reply correlation, without a provisional
-Session. Final activated-runtime and combined acceptance remain pending. This
+Session. [The acceptance ledger](RUNTIME_SHUTDOWN_ACCEPTANCE.md) records the
+activated implementation and combined evidence, separately from human approval. This
 document does not claim macOS service supervision, planned restart or
 crash-inference recovery are ready.
 
@@ -121,7 +122,7 @@ must not be used to downgrade active control state. Native workers retain execut
 schema 21 and the separately negotiated control-transport compatibility described
 in [execution storage](EXECUTION_STORAGE.md).
 
-## Evidence and remaining activation
+## Evidence and activation
 
 Unit and production-owner tests cover reviewed replacement, cancellation closure,
 reload races, namespace routing, terminal acknowledgement recovery, actual native
@@ -150,6 +151,6 @@ and exercises natural completion and version-adapted cancellation. Ordinary buil
 have no worker-binary override. This does not adopt unrelated or provenance-less
 legacy workers into a runtime's authority.
 
-The work-package acceptance ledger must still reconcile final CLI/SDK/TUI journeys,
-legacy ownership boundaries, the activated immutable binary and Mirza's
-implementation review before claiming complete R30/R31 delivery.
+The [acceptance ledger](RUNTIME_SHUTDOWN_ACCEPTANCE.md) maps R30/R31 to final
+CLI/SDK/TUI, legacy-ownership, failure and activated-image evidence. Human
+implementation approval and downstream publication remain separate program gates.

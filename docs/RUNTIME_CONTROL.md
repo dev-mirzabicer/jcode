@@ -120,7 +120,8 @@ remain explicit rather than inferred from matching Session IDs or path strings.
 Login-service supervision, selected crash-inference recovery and stronger planned
 restart controls belong to the subsequent runtime-service work. External SIGTERM
 and temporary-server lifecycle policies are not this reviewed Stop command.
-Final activated-runtime and full C01 client acceptance remain separately recorded.
+[Activated-runtime evidence](dev/RUNTIME_SHUTDOWN_ACCEPTANCE.md) is recorded
+separately from implementation approval and later full C01 client acceptance.
 See [the backend guide](dev/RUNTIME_SHUTDOWN.md) for ownership, journal, namespace,
 failure and verification details.
 

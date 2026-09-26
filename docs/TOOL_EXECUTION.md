@@ -93,8 +93,9 @@ retained tail. These runs appear as `input_shell` in Tasks.
 Closing the requesting client does not cancel a started command. Explicit Stop
 reaches its verified native owner and retains partial output. A supported
 background handoff reports the same run identity, not a completed exit status.
-The runtime-shutdown backend can preserve that worker; the runtime command and
-daemon activation surface is still staged separately in this source series.
+The [reviewed runtime controls](RUNTIME_CONTROL.md) can preserve that worker.
+[Activated-image evidence](dev/RUNTIME_SHUTDOWN_ACCEPTANCE.md) records the actual
+CLI/SDK/TUI lifecycle, independently of later service-supervision work.
 Non-Unix input-shell execution retains its existing process-local behavior and
 does not claim this native-worker capability.
 
