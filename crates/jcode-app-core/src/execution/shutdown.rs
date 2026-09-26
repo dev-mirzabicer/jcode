@@ -17,8 +17,21 @@ pub struct OwnedExecutions {
 mod tests;
 
 impl OwnedExecutions {
-    pub fn is_background(&self, id: &str) -> Result<bool> {
-        Ok(self.owned(id)?.0.background)
+    /// None is admitted native setup whose row is not yet published. It is
+    /// neither a foreground classification nor proof that work has finished.
+    pub fn background_state(&self, id: &str) -> Result<Option<bool>> {
+        if self.store.inspect(id)?.is_some() {
+            return Ok(Some(self.owned(id)?.0.background));
+        }
+        let live = LIVE.lock().unwrap_or_else(|error| error.into_inner());
+        ensure!(
+            live.get(&(self.store.root().to_path_buf(), id.into()))
+                .is_some_and(
+                    |run| run.native_command && run.runtime.endpoint.id == self.runtime.endpoint.id
+                ),
+            "No owned native preparation exists for {id}"
+        );
+        Ok(None)
     }
     pub async fn bind(root: &std::path::Path, lifecycle: &RuntimeStopOwner) -> Result<Self> {
         let root = root.to_path_buf();

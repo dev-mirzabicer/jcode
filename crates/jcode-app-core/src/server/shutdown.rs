@@ -24,6 +24,10 @@ pub struct RuntimeLifecycle {
     mutation: Mutex<()>,
     wake: Arc<Notify>,
     stopped: watch::Sender<Option<RuntimeExit>>,
+    // When even the durable diagnostic cannot be published, inspection must
+    // report that failure rather than an apparently healthy waiting operation.
+    driver_fault: std::sync::Mutex<Option<String>>,
+    control_epoch: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +45,9 @@ impl Drop for WakeMutation {
     }
 }
 
+#[cfg(test)]
+#[path = "shutdown_pending_tests.rs"]
+mod pending_tests;
 #[cfg(test)]
 #[path = "shutdown_tests.rs"]
 mod tests;
@@ -70,19 +77,71 @@ impl RuntimeLifecycle {
             mutation: Mutex::new(()),
             wake: Arc::new(Notify::new()),
             stopped: watch::channel(None).0,
+            driver_fault: std::sync::Mutex::new(None),
+            control_epoch: std::sync::atomic::AtomicU64::new(0),
         });
         let weak = Arc::downgrade(&lifecycle);
         let wake = lifecycle.wake.clone();
         tokio::spawn(async move {
+            let mut retry = false;
+            let mut failure: Option<(Option<OperationId>, u64, String)> = None;
+            let mut logged_failure = None;
             loop {
-                wake.notified().await;
+                if retry {
+                    tokio::select! {
+                        _ = wake.notified() => {}
+                        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    }
+                } else {
+                    wake.notified().await;
+                }
                 let Some(lifecycle) = weak.upgrade() else {
                     return;
                 };
-                if let Err(error) = lifecycle.drive().await {
-                    // Storage failure is not successful Stop. The existing
-                    // durable intent stays fenced and inspection remains live.
-                    crate::logging::error(&format!("Runtime shutdown driver: {error:#}"));
+                if let Some((operation, epoch, error)) = &failure {
+                    match lifecycle
+                        .report_driver_failure(*operation, *epoch, error)
+                        .await
+                    {
+                        Ok(again) => {
+                            retry = again;
+                            failure = None;
+                        }
+                        Err(report) => {
+                            lifecycle.set_driver_fault(Some(format!(
+                                "{error}; durable failure report is unavailable: {report:#}"
+                            )));
+                            retry = true;
+                        }
+                    }
+                    // Retry observation/reporting, never a failed Stop attempt
+                    // whose Blocked receipt could not yet be written.
+                    continue;
+                }
+                let operation = lifecycle
+                    .owner
+                    .status()
+                    .ok()
+                    .and_then(|status| status.operation.map(|operation| operation.id));
+                let epoch = lifecycle
+                    .control_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                match lifecycle.drive().await {
+                    Ok(()) => {
+                        lifecycle.set_driver_fault(None);
+                        logged_failure = None;
+                        retry = false;
+                    }
+                    Err(error) => {
+                        let error = format!("Runtime shutdown observation failed: {error:#}");
+                        if logged_failure.as_ref() != Some(&error) {
+                            crate::logging::error(&error);
+                            logged_failure = Some(error.clone());
+                        }
+                        lifecycle.set_driver_fault(Some(error.clone()));
+                        failure = Some((operation, epoch, error));
+                        retry = true;
+                    }
                 }
                 if lifecycle.stopped.borrow().is_some() {
                     return;
@@ -94,6 +153,63 @@ impl RuntimeLifecycle {
 
     pub fn stopped(&self) -> watch::Receiver<Option<RuntimeExit>> {
         self.stopped.subscribe()
+    }
+
+    fn set_driver_fault(&self, issue: Option<String>) {
+        *self
+            .driver_fault
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = issue;
+    }
+
+    async fn report_driver_failure(
+        &self,
+        failed: Option<OperationId>,
+        epoch: u64,
+        issue: &str,
+    ) -> Result<bool> {
+        let _mutation = self.mutation.lock().await;
+        let Some(current) = self.owner.status()?.operation else {
+            self.set_driver_fault(None);
+            return Ok(false);
+        };
+        if failed.is_some_and(|id| id != current.id)
+            || epoch != self.control_epoch.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // Cancel/Change may have superseded the observation. Never attach
+            // its failure to a different reviewed intent.
+            self.set_driver_fault(None);
+            return Ok(!current.phase.terminal() && current.phase != ShutdownPhase::Blocked);
+        }
+        match current.phase {
+            ShutdownPhase::WaitingForCurrent => {
+                let issues = vec![issue.to_owned()];
+                if current.issues != issues {
+                    self.owner.observe(
+                        current.id,
+                        current.revision,
+                        current.remaining,
+                        current.preserved,
+                        issues,
+                    )?;
+                }
+                self.set_driver_fault(None);
+                // Waiting remains cancellable. A fresh successful observation
+                // clears the issue, without another human mutation or effects.
+                Ok(true)
+            }
+            ShutdownPhase::Stopping => {
+                self.owner
+                    .block(current.id, current.revision, vec![issue.to_owned()])?;
+                self.set_driver_fault(None);
+                Ok(false)
+            }
+            ShutdownPhase::Stopped | ShutdownPhase::Forced => Ok(true),
+            _ => {
+                self.set_driver_fault(None);
+                Ok(false)
+            }
+        }
     }
 
     async fn work(&self) -> Result<Vec<RuntimeWork>> {
@@ -126,6 +242,19 @@ impl RuntimeLifecycle {
         // reply cannot strand that accepted operation without its driver.
         let _wake = WakeMutation(kick.then(|| self.wake.clone()));
         let _mutation = self.mutation.lock().await;
+        if matches!(
+            &request,
+            RuntimeRequest::Status {} | RuntimeRequest::Inspect { .. }
+        ) {
+            let fault = self
+                .driver_fault
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            if let Some(fault) = fault {
+                anyhow::bail!("{fault}; shutdown is not confirmed complete");
+            }
+        }
         let response = match request {
             RuntimeRequest::Status {} => {
                 let mut status = self.owner.status()?;
@@ -187,6 +316,10 @@ impl RuntimeLifecycle {
         };
         // Notify retains a permit if this races the driver retiring an attempt.
         // Repeated requests never create another shutdown or provider turn.
+        if kick {
+            self.control_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(response)
     }
 
@@ -280,7 +413,7 @@ impl RuntimeLifecycle {
                     if operation.review.options.independent == IndependentTasks::KeepSupported {
                         for work in self.executions.inventory().await? {
                             if work.supported_survivor
-                                && self.executions.is_background(&work.id)?
+                                && self.executions.background_state(&work.id)? == Some(true)
                                 && !preserved.iter().any(|item| item.id == work.id)
                             {
                                 match self

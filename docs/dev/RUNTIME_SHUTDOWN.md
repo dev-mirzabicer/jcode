@@ -36,6 +36,21 @@ waiting or blocked.
   Pending native setup must establish its handoff or block preservation. A failed
   handoff never silently becomes cancellation.
 
+Inventory deliberately includes native preparation before its SQLite execution
+row exists. `OwnedExecutions::background_state` represents that owned interval as
+pending, not unavailable or completed. The Finish driver continues observing it;
+published foreground work finishes naturally, while eligible background work can
+complete its existing handoff. Tests hold a real SQLite writer at this boundary.
+
+An unexpected driver observation error cannot silently retire an active operation.
+Waiting errors retain the last known work and a durable issue without closing
+cancellation, then retry observation. Stopping errors become Blocked, not an
+automatic new Stop attempt. If writing the diagnostic also fails, live inspection
+reports an unconfirmed driver fault and the owner retries reporting before further
+progress. Terminal confirmation retries only flush the original receipt. Successful
+external controls invalidate earlier in-flight failure reports, and identical
+persistent errors do not repeatedly fill logs. No path replays producer effects.
+
 Cancellation reopens admission only while the operation is still cancellable.
 `ReviewChange` binds a waiting/blocked operation and exact revision, then normal
 Begin adopts that new review atomically. The old operation becomes Superseded and

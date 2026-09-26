@@ -64,6 +64,13 @@ deadline; `--quiescence-seconds` on a review applies only after entering Stoppin
 A wait timeout is a client wait result, not evidence the runtime stopped. Verified
 Stopped is distinct from still-owned coordinator cleanup and from Forced.
 
+Native commands admitted before their execution record is published remain
+pending work. Finish/Keep waits through that preparation without cancelling or
+repeating it. An observation failure is reported while waiting remains cancellable;
+the runtime retries observation automatically. If the diagnostic itself cannot be
+persisted, live inspection reports the storage failure rather than healthy waiting.
+Repairing observation/storage does not replay a command or automatically escalate Stop.
+
 ## Cancel, change, retry and escalate
 
 Inspection returns the current operation revision. Controls bind to it:
