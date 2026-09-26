@@ -116,6 +116,25 @@ in owned subprocesses with a deliberately retained blocking owner. Platform-nati
 acceptance is macOS arm64, not a claim of other service-platform parity, adversarial
 same-user containment or remote-provider cancellation.
 
+`scripts/test_runtime_work.py` runs through `scripts/run_isolated_test.py` with an
+explicit `--binary` and owned `--artifact-dir`. It exercises Finish/Cancel and
+durable input, reviewed option change, foreground/background preservation across
+actual daemon exit, background cancellation, retained output and one-effect cwd
+checks. It emits stage/progress files, bounds its run and cleanup separately, and
+uses native typed cleanup independently of the CLI option syntax being tested.
+Use an outer verification deadline too. A failed result or cleanup is not a pass,
+and a printed result is not proof the fixture's entire process group has exited.
+
+The opt-in app-core test
+`execution::shutdown::tests::actual_predecessor_worker_survives_and_accepts_compatible_stop`
+requires isolated test state and `JCODE_WP08_PREDECESSOR_BINARY` pointing to an
+explicit immutable v2-worker binary. Select it with `--ignored --exact --nocapture`.
+It uses the actual old executable, verifies its control version, preserves the
+same execution across parent exit and explicit Start, checks its checkout lease,
+and exercises natural completion and version-adapted cancellation. Ordinary builds
+have no worker-binary override. This does not adopt unrelated or provenance-less
+legacy workers into a runtime's authority.
+
 The work-package acceptance ledger must still reconcile final CLI/SDK/TUI journeys,
-old-worker compatibility, the activated immutable binary and Mirza's implementation
-review before claiming complete R30/R31 delivery.
+legacy ownership boundaries, the activated immutable binary and Mirza's
+implementation review before claiming complete R30/R31 delivery.

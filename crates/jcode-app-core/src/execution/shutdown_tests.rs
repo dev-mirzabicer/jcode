@@ -153,14 +153,24 @@ async fn wait_child(child: &mut Child) -> Result<()> {
     .context("Fixture runtime did not finish handoff")?
 }
 
-async fn survival_case(root: &std::path::Path, background: bool) -> Result<()> {
+async fn survival_case(
+    root: &std::path::Path,
+    background: bool,
+    legacy: Option<&std::path::Path>,
+) -> Result<()> {
     let work = tempfile::tempdir()?;
     #[cfg(target_os = "macos")]
     let (workspace, location) = crate::workspace::test_support::registered_checkout(
         &crate::storage::durable_state_dir(),
         work.path(),
     );
-    let mut parent = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    if let Some(path) = legacy {
+        command.env("JCODE_WP08_LEGACY_WORKER", path);
+    } else {
+        command.env_remove("JCODE_WP08_LEGACY_WORKER");
+    }
+    let mut parent = command
         .args([
             "--exact",
             "execution::shutdown::tests::parent_fixture",
@@ -187,6 +197,7 @@ async fn survival_case(root: &std::path::Path, background: bool) -> Result<()> {
         let original = std::fs::read_to_string(work.path().join("parent-owner"))?;
         ensure!(!store.runtime_endpoint(&original)?.context("Original owner missing")?.has_live_lease()?, "Original runtime lease is still live");
         let before = store.inspect(&id)?.context("Survivor missing")?;
+        if legacy.is_some() { ensure!(store.runtime_endpoint(&before.owner)?.context("Legacy endpoint missing")?.protocol_version == 2, "Fixture did not exercise a v2 predecessor worker"); }
         ensure!(before.background && !before.state.terminal() && before.stop_cause.is_none(), "Worker was stopped instead of preserved");
         let lifecycle = stop_store(root)?;
         #[cfg(target_os = "macos")]
@@ -200,16 +211,22 @@ async fn survival_case(root: &std::path::Path, background: bool) -> Result<()> {
         let owned = OwnedExecutions::bind(root, &owner).await?;
         ensure!(owned.inventory().await?.iter().any(|run| run.id == id && run.supported_survivor), "Start did not recover the original native identity");
         ensure!(owned.preserve(&id, Duration::from_secs(2)).await?.is_some(), "Idempotent survivor review lost work");
-        std::fs::write(work.path().join("release"), b"release")?;
+        let legacy_stop = legacy.is_some() && background;
+        if legacy_stop {
+            owned.stop(&id, false, Duration::from_secs(10)).await?;
+        } else {
+            std::fs::write(work.path().join("release"), b"release")?;
+        }
         let reply = tokio::time::timeout(Duration::from_secs(10), runtime::control_in_store(&store, &id, ControlOperation::Wait)).await??;
-        ensure!(matches!(reply, ControlReply::Snapshot { ref record } if record.state == RunState::Completed), "Survivor did not complete");
+        ensure!(matches!(reply, ControlReply::Snapshot { ref record } if record.state == if legacy_stop { RunState::Cancelled } else { RunState::Completed }), "Survivor did not reach its actual terminal state");
         let record = store.inspect(&id)?.context("Terminal survivor missing")?;
         let output = store.result(&record, NonZeroUsize::new(2000).unwrap())?;
-        ensure!(output.output.contains("before") && output.output.contains("after"), "Survivor lost output");
+        ensure!(output.output.contains("before") && (legacy_stop || output.output.contains("after")), "Survivor lost output");
+        if legacy_stop { ensure!(record.stop_cause == Some(StopCause::HumanCancellation), "Old transport did not receive its supported cancellation cause"); }
         ensure!(std::fs::read(work.path().join("effects"))? == b"x", "Native work ran more than once");
         let mut ctx = context(work.path(), background);
         ctx.session_id = invocation.session_id.clone(); ctx.message_id = invocation.message_id.clone(); ctx.tool_call_id = invocation.call_path[0].clone();
-        execute(invocation, ctx, NonZeroUsize::new(2000).unwrap(), Box::new(|_| Box::pin(async { anyhow::bail!("Producer replayed") }))).await?;
+        if !legacy_stop { execute(invocation, ctx, NonZeroUsize::new(2000).unwrap(), Box::new(|_| Box::pin(async { anyhow::bail!("Producer replayed") }))).await?; }
         ensure!(std::fs::read(work.path().join("effects"))? == b"x", "Transport replay repeated effects");
         runtime::end_test_listener(&owned.runtime).await;
         Ok::<_, anyhow::Error>(())
@@ -270,12 +287,12 @@ async fn survival_case(root: &std::path::Path, background: bool) -> Result<()> {
 #[test]
 fn native_foreground_handoff_survives_parent_exit_and_explicit_start() -> Result<()> {
     let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
-    tokio::runtime::Runtime::new()?.block_on(survival_case(sandbox.root(), false))
+    tokio::runtime::Runtime::new()?.block_on(survival_case(sandbox.root(), false, None))
 }
 #[test]
 fn native_background_handoff_survives_parent_exit_and_explicit_start() -> Result<()> {
     let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
-    tokio::runtime::Runtime::new()?.block_on(survival_case(sandbox.root(), true))
+    tokio::runtime::Runtime::new()?.block_on(survival_case(sandbox.root(), true, None))
 }
 
 #[test]
@@ -437,4 +454,38 @@ fn damaged_native_handoff_blocks_preservation_without_destructive_fallback() -> 
         runtime::end_test_listener(&owned.runtime).await;
         outcome
     })
+}
+
+#[test]
+#[ignore = "requires an explicit immutable predecessor binary and isolated state"]
+fn actual_predecessor_worker_survives_and_accepts_compatible_stop() -> Result<()> {
+    ensure!(
+        std::env::var_os("JCODE_TEST_STATE_ROOT").is_some(),
+        "Use isolated test launcher"
+    );
+    let binary = PathBuf::from(
+        std::env::var_os("JCODE_WP08_PREDECESSOR_BINARY")
+            .context("Set the exact predecessor binary")?,
+    )
+    .canonicalize()?;
+    let version = Command::new(&binary).arg("--version").output()?;
+    ensure!(version.status.success(), "Predecessor is not executable");
+    println!(
+        "WP08_PREDECESSOR_WORKER {} {}",
+        binary.display(),
+        String::from_utf8_lossy(&version.stdout)
+    );
+    for background in [false, true] {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+        tokio::runtime::Runtime::new()?.block_on(survival_case(
+            sandbox.root(),
+            background,
+            Some(&binary),
+        ))?;
+        println!(
+            "WP08_PREDECESSOR_CLEANUP {}",
+            std::fs::read_to_string(sandbox.root().join("shutdown-fixture-cleanup.json"))?
+        );
+    }
+    Ok(())
 }

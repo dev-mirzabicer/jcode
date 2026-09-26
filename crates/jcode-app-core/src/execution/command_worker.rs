@@ -56,6 +56,15 @@ pub fn register_current_executable() -> Result<()> {
 fn worker_program(id: &str) -> Result<std::process::Command> {
     #[cfg(test)]
     {
+        if let Some(executable) = std::env::var_os("JCODE_WP08_LEGACY_WORKER") {
+            ensure!(
+                std::env::var_os("JCODE_TEST_STATE_ROOT").is_some(),
+                "Legacy worker fixture requires isolated test state"
+            );
+            let mut program = std::process::Command::new(executable);
+            program.arg(WORKER_ARGUMENT).arg(id);
+            return Ok(program);
+        }
         let mut program = std::process::Command::new(std::env::current_exe()?);
         program
             .args([
