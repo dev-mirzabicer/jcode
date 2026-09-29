@@ -784,6 +784,9 @@ jcode-base = { path = "crates/jcode-base", features = ["test-support"] }
 # Used by tests/context_window_matrix.rs to assert the shared context-window
 # resolution invariants directly, without going through a live provider.
 jcode-provider-core = { path = "crates/jcode-provider-core" }
+# INT-01/WP-02 live acceptance (src/cli/reasoning_live_tests.rs) checks the
+# thinking-binding chain with the formatter crate's fingerprint.
+jcode-provider-anthropic = { path = "crates/jcode-provider-anthropic" }
 # Enables the downstream test-support helpers (storage::lock_test_env,
 # auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, the
 # ExternalAuthReviewCandidate read accessors) for the root crate's own cli test
