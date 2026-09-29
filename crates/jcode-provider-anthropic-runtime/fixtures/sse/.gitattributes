@@ -1,0 +1,3 @@
+# Raw provider SSE responses: every event ends with a blank line, and the bytes
+# are kept exactly as streamed.
+*.sse -whitespace

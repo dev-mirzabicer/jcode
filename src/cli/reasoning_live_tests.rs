@@ -81,7 +81,11 @@ async fn claude_child_route_replays_signed_thinking_under_error() -> anyhow::Res
     let provider = roster
         .resolve(&ModelRosterRequest::alias("wp02-live"), &catalog)?
         .provider;
-    assert_eq!(provider.name(), "anthropic", "the concrete runtime a child uses");
+    assert_eq!(
+        provider.name(),
+        "anthropic",
+        "the concrete runtime a child uses"
+    );
     assert_eq!(
         provider.reasoning_replay_kind(),
         Some(ContextReasoningBlockKind::AnthropicThinking)
