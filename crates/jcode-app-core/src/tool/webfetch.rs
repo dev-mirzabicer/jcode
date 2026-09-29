@@ -70,6 +70,10 @@ impl Tool for WebFetchTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<WebFetchInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: WebFetchInput = serde_json::from_value(input)?;
 

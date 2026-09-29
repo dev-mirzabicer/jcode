@@ -582,6 +582,43 @@ impl Registry {
         registry
     }
 
+    /// Every built-in tool jcode can advertise in some session kind: the
+    /// ordinary set plus the self-dev, ambient and MCP-management tools.
+    /// External MCP server tools are not included. Provider-parity tests and
+    /// the Claude OAuth contract probe use this so that no session-specific
+    /// tool escapes them. MCP configuration is read, but nothing connects.
+    pub async fn builtin_tool_surface(provider: Arc<dyn Provider>) -> Self {
+        let registry = Self::new(provider).await;
+        registry.register_selfdev_tools().await;
+        registry.register_ambient_tools().await;
+        let manager = Arc::new(RwLock::new(crate::mcp::McpManager::new_for_dir(None)));
+        registry
+            .register(
+                "mcp".to_string(),
+                Arc::new(mcp::McpManagementTool::new(manager)),
+            )
+            .await;
+        registry
+    }
+
+    /// Decode `input` for tool `name` the way [`Registry::execute`] does
+    /// before execution (alias resolution, framework fields, the tool's own
+    /// decoder) without executing anything.
+    #[cfg(test)]
+    pub(crate) async fn decode_input(&self, name: &str, input: Value) -> Result<()> {
+        let resolved = Self::resolve_tool_name(name);
+        let tool = self
+            .tools
+            .read()
+            .await
+            .get(resolved)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
+        let bound = self.bound_tool(resolved, tool);
+        let (input, _) = bound.input.decode(input)?;
+        bound.tool.decode_input(&input)
+    }
+
     /// Get all tool definitions for the API
     pub async fn definitions(
         &self,

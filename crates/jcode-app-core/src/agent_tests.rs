@@ -3826,6 +3826,10 @@ impl crate::tool::Tool for FakeMcpTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
+    fn decode_input(&self, _input: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn execute(
         &self,
         _input: serde_json::Value,
@@ -5030,6 +5034,10 @@ impl crate::tool::Tool for NativeSdkProbe {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{}})
     }
+    fn decode_input(&self, _input: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn execute(
         &self,
         _: serde_json::Value,

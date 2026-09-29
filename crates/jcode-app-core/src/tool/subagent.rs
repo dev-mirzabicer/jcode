@@ -98,6 +98,14 @@ impl Tool for DelegationTool {
             ..Default::default()
         })
     }
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        if self.catalog {
+            crate::delegation::decode_catalog_input(input.clone()).map(drop)
+        } else {
+            SubagentRequest::decode_tool_input(input).map_err(anyhow::Error::msg)
+        }
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let host = self
             .host

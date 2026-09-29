@@ -69,6 +69,10 @@ impl Tool for PatchTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<PatchInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         super::mutation_output::check_stop(&ctx)?;
         let params: PatchInput = serde_json::from_value(input)?;

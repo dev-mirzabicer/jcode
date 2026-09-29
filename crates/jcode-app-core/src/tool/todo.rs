@@ -851,6 +851,10 @@ impl Tool for TodoTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<TodoInput>(&normalize_todo_input(input.clone()))
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();

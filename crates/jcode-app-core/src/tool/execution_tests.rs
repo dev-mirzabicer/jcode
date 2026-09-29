@@ -286,6 +286,10 @@ impl Tool for FixtureTool {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object","properties":{}})
     }
+    fn decode_input(&self, _input: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         self.count.fetch_add(1, Ordering::SeqCst);
         let _marker = DropMarker(self.dropped.clone());
@@ -391,6 +395,10 @@ impl Tool for WrappedEcho {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object","properties":{"output_size":{"type":"boolean"},"arguments":{"type":"string"}}})
     }
+    fn decode_input(&self, _input: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn execute(&self, input: Value, _: ToolContext) -> anyhow::Result<ToolOutput> {
         anyhow::ensure!(
             input["output_size"] == true && input["arguments"] == "producer-owned",

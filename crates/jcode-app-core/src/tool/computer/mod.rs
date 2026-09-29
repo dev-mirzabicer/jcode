@@ -244,6 +244,10 @@ impl Tool for ComputerTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<ComputerInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         if ctx.invocation.identity.is_none() {
             let registry = super::Registry::empty();

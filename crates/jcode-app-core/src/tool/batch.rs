@@ -302,6 +302,10 @@ impl Tool for BatchTool {
         generic_batch_schema()
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<BatchInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input = self.prepare_input(input).await?;
         let params: BatchInput = serde_json::from_value(input)?;

@@ -125,6 +125,10 @@ impl Tool for MemoryTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<MemoryInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         use crate::memory;
         use crate::memory_types::{MemoryEventKind, MemoryState};

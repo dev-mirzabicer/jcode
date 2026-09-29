@@ -99,6 +99,10 @@ impl Tool for GmailTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<GmailInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: GmailInput = serde_json::from_value(input)?;
         let _attachment_use = if matches!(params.action.as_str(), "draft" | "send") {

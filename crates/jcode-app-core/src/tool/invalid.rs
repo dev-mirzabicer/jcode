@@ -46,6 +46,10 @@ impl Tool for InvalidTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<InvalidInput>(input)
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: InvalidInput = serde_json::from_value(input)?;
         Ok(ToolOutput::new(format!(

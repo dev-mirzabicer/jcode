@@ -499,6 +499,10 @@ impl Tool for BgTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<BgInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: BgInput = serde_json::from_value(input)?;
         if params

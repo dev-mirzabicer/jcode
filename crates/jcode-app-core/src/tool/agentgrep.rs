@@ -254,6 +254,10 @@ impl Tool for AgentGrepTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<AgentGrepInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: AgentGrepInput = serde_json::from_value(input)?;
         // The search shells out to ripgrep and walks/reads files (and for

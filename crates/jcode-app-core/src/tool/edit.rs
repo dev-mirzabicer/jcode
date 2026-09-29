@@ -76,6 +76,10 @@ impl Tool for EditTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<EditInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         super::mutation_output::check_stop(&ctx)?;
         let params: EditInput = serde_json::from_value(input)?;

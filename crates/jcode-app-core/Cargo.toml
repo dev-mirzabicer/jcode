@@ -136,6 +136,8 @@ async-stream = "0.3"
 # test/bench/example builds, not to a normal `cargo build`.
 jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 jcode-context-core = { path = "../jcode-context-core" }
+# Provider-parity tests format the real registry through the Anthropic builder.
+jcode-provider-anthropic = { path = "../jcode-provider-anthropic" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

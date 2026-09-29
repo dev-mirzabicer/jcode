@@ -585,6 +585,10 @@ impl Tool for SelfDevTool {
         SelfDevTool::schema_for(false)
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<SelfDevInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SelfDevInput = serde_json::from_value(input)?;
         let action = params.action.clone();

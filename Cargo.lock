@@ -3439,6 +3439,7 @@ dependencies = [
  "jcode-overnight-core",
  "jcode-pdf",
  "jcode-plan",
+ "jcode-provider-anthropic",
  "jcode-provider-core",
  "jcode-provider-openrouter-runtime",
  "jcode-schema-dialect",
@@ -4355,6 +4356,7 @@ dependencies = [
  "jcode-background-types",
  "jcode-message-types",
  "jcode-tool-types",
+ "serde",
  "serde_json",
  "tokio",
 ]

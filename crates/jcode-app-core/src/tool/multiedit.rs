@@ -86,6 +86,10 @@ impl Tool for MultiEditTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<MultiEditInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         super::mutation_output::check_stop(&ctx)?;
         let params: MultiEditInput = serde_json::from_value(input)?;

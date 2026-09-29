@@ -80,6 +80,10 @@ impl Tool for WebSearchTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<WebSearchInput>(input)
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: WebSearchInput = serde_json::from_value(input)?;
         let num_results = params.num_results.unwrap_or(8).min(20);

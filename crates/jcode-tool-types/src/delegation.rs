@@ -149,6 +149,14 @@ struct Input {
 }
 
 impl SubagentRequest {
+    /// Decode the model-facing fields (names, types, unknown-field rejection)
+    /// without applying the creation and follow-up rules that
+    /// [`Self::from_tool_input`] enforces on top of them.
+    pub fn decode_tool_input(value: &serde_json::Value) -> Result<(), String> {
+        Input::deserialize(value).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn from_tool_input(value: serde_json::Value) -> Result<Self, String> {
         let input: Input = serde_json::from_value(value).map_err(|e| e.to_string())?;
         let _ = input.intent;

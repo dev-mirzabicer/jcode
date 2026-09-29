@@ -76,6 +76,10 @@ impl Tool for SidePanelTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<SidePanelInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SidePanelInput = serde_json::from_value(input)?;
         let action_label = params.action.clone();

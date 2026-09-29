@@ -292,6 +292,10 @@ impl Tool for BrowserTool {
         ]))
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<BrowserInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         #[cfg(unix)]
         if ctx.invocation.identity.is_none() {

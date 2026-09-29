@@ -2,6 +2,13 @@ use anyhow::{Result, bail, ensure};
 use jcode_tool_types::presentation::OutputSize;
 use serde_json::{Value, json};
 
+/// Decode tool input as `T`, the type the tool's `execute` deserializes, and
+/// discard the value. The body of most [`crate::Tool::decode_input`] impls.
+pub fn decode_as<T: serde::de::DeserializeOwned>(input: &Value) -> Result<()> {
+    T::deserialize(input)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputBinding {
     Flat,

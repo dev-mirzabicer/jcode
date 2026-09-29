@@ -85,6 +85,10 @@ impl Tool for McpManagementTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<McpToolInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: McpToolInput = serde_json::from_value(input)?;
         let started = std::time::Instant::now();

@@ -12,6 +12,9 @@ mod swarm_retirement;
 #[path = "execution_tests.rs"]
 mod reliable_execution;
 
+#[path = "provider_parity_tests.rs"]
+mod provider_parity;
+
 #[cfg(target_os = "macos")]
 #[path = "native_scope_tests.rs"]
 mod native_scope;
@@ -184,6 +187,10 @@ impl Tool for BareSchemaTool {
                 "command": {"type": "string"}
             }
         })
+    }
+
+    fn decode_input(&self, _input: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
     }
 
     async fn execute(&self, _input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
@@ -1330,6 +1337,10 @@ impl Tool for BigOutputTool {
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    fn decode_input(&self, _input: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
     }
 
     async fn execute(&self, _input: Value, _ctx: ToolContext) -> Result<ToolOutput> {

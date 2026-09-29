@@ -71,6 +71,10 @@ impl Tool for DebugSocketTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<DebugSocketInput>(input)
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: DebugSocketInput = serde_json::from_value(input)?;
         let timeout_secs = params.timeout_secs.unwrap_or(30);

@@ -514,6 +514,10 @@ impl Tool for DiscoverToolsTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<DiscoverToolsInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let started_at = Instant::now();
         let request_id = uuid::Uuid::new_v4().to_string();

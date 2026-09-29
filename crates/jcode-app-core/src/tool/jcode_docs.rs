@@ -80,6 +80,10 @@ impl Tool for JcodeDocsTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<JcodeDocsInput>(input)
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: JcodeDocsInput = serde_json::from_value(input)?;
         let output = match params.action.as_str() {

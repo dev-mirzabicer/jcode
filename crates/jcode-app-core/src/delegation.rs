@@ -67,19 +67,10 @@ impl Host {
         Ok(())
     }
 
-    pub(crate) async fn catalog(&self, mut input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+    pub(crate) async fn catalog(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         self.authorize_parent(&ctx.session_id)?;
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct CatalogInput {
-            working_dir: Option<PathBuf>,
-        }
-        let object = input
-            .as_object_mut()
-            .context("Catalog input must be an object")?;
-        object.remove("intent");
-        let input: CatalogInput = serde_json::from_value(input)?;
-        let cwd = resolve_working_dir(input.working_dir, ctx.working_dir.as_deref())?;
+        let working_dir = decode_catalog_input(input)?;
+        let cwd = resolve_working_dir(working_dir, ctx.working_dir.as_deref())?;
         let _location_use = self.workspace.acquire_location_use(Some(&cwd), &[])?;
         check_stop(&ctx)?;
         let composer = SystemPromptComposer::from_repository_service(self.repositories.clone());
@@ -570,6 +561,23 @@ fn mark_ready(
         .mark_child(receipt);
     Ok(())
 }
+
+/// Decode `get_catalog` input: an optional working directory and the display
+/// intent. Shared by execution and the tool's `decode_input`.
+pub(crate) fn decode_catalog_input(mut input: Value) -> Result<Option<PathBuf>> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CatalogInput {
+        working_dir: Option<PathBuf>,
+    }
+    let object = input
+        .as_object_mut()
+        .context("Catalog input must be an object")?;
+    object.remove("intent");
+    let input: CatalogInput = serde_json::from_value(input)?;
+    Ok(input.working_dir)
+}
+
 fn resolve_working_dir(requested: Option<PathBuf>, caller: Option<&Path>) -> Result<PathBuf> {
     let path = match requested {
         Some(path) if path.is_absolute() => path,

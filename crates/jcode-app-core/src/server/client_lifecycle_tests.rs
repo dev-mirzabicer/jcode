@@ -1280,6 +1280,10 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({"type":"object","properties":{}})
             }
+            fn decode_input(&self, _input: &serde_json::Value) -> anyhow::Result<()> {
+                Ok(())
+            }
+
             async fn execute(
                 &self,
                 _: serde_json::Value,

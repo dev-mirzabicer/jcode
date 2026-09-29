@@ -131,6 +131,10 @@ impl Tool for OpenTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<OpenInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         anyhow::ensure!(
             !ctx.graceful_shutdown_signal

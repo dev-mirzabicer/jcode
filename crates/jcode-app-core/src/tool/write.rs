@@ -65,6 +65,10 @@ impl Tool for WriteTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<WriteInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         super::mutation_output::check_stop(&ctx)?;
         let params: WriteInput = serde_json::from_value(input)?;

@@ -753,6 +753,10 @@ impl Tool for BashTool {
         destructive_gate::bash_parameters_schema()
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<BashInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         #[cfg(unix)]
         if ctx.invocation.identity.is_none() {

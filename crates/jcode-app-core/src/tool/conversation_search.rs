@@ -90,6 +90,10 @@ impl Tool for ConversationSearchTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<SearchInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SearchInput = serde_json::from_value(input)?;
         let session = load_session(&ctx.session_id);

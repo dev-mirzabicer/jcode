@@ -2224,6 +2224,10 @@ impl Tool for CommunicateTool {
         schema
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<CommunicateInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         crate::config::require_swarm()?;
         let mut params: CommunicateInput = serde_json::from_value(input)?;

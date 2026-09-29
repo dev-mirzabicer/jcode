@@ -50,6 +50,12 @@ impl Tool for McpTool {
         jcode_tool_core::input::InputBinding::for_external_schema(&self.tool_def.input_schema)
     }
 
+    /// The MCP server owns validation of its own arguments; jcode forwards them
+    /// unchanged, so there is no local decoder that could drift.
+    fn decode_input(&self, _input: &Value) -> Result<()> {
+        Ok(())
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let mut input = if input.is_null() {
             Value::Object(serde_json::Map::new())

@@ -10,6 +10,31 @@ pub(super) enum InspectionTool {
     ExpandTool,
 }
 impl InspectionTool {
+    /// Decode model input into a request whose action is this tool's identity.
+    fn request(&self, mut input: Value) -> Result<InspectionRequest> {
+        let object = input
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Inspection input must be an object"))?;
+        ensure!(
+            !object.contains_key("action"),
+            "Inspection tool action is fixed by its tool identity"
+        );
+        object.remove("intent");
+        object.retain(|_, value| !value.is_null());
+        object.insert(
+            "action".into(),
+            Value::String(
+                match self {
+                    Self::Outline => "outline",
+                    Self::Transcript => "transcript",
+                    Self::ExpandTool => "expand_tool",
+                }
+                .into(),
+            ),
+        );
+        Ok(serde_json::from_value(input)?)
+    }
+
     pub fn all() -> [Self; 3] {
         [Self::Outline, Self::Transcript, Self::ExpandTool]
     }
@@ -71,28 +96,12 @@ impl Tool for InspectionTool {
             ..Default::default()
         })
     }
-    async fn execute(&self, mut input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let object = input
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("Inspection input must be an object"))?;
-        ensure!(
-            !object.contains_key("action"),
-            "Inspection tool action is fixed by its tool identity"
-        );
-        object.remove("intent");
-        object.retain(|_, value| !value.is_null());
-        object.insert(
-            "action".into(),
-            Value::String(
-                match self {
-                    Self::Outline => "outline",
-                    Self::Transcript => "transcript",
-                    Self::ExpandTool => "expand_tool",
-                }
-                .into(),
-            ),
-        );
-        let request: InspectionRequest = serde_json::from_value(input)?;
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        self.request(input.clone()).map(drop)
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let request = self.request(input)?;
         ensure!(
             !ctx.graceful_shutdown_signal
                 .as_ref()

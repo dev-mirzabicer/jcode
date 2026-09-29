@@ -84,6 +84,10 @@ impl Tool for SkillTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<SkillInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SkillInput = serde_json::from_value(input)?;
         let action_label = params.action.clone();

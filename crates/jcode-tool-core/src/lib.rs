@@ -293,6 +293,16 @@ pub trait Tool: Send + Sync {
         Ok(ExecutionPolicy::default())
     }
 
+    /// Decode `input` (after the registry removed framework fields) into this
+    /// tool's input exactly as [`Tool::execute`] does, without executing
+    /// anything. Rules over combinations of fields that the flat advertised
+    /// schema describes only in prose, such as an action's own argument or
+    /// creation-only settings, stay with `execute`.
+    ///
+    /// The provider-parity test decodes every tool's schema-minimal input
+    /// through this, so an advertised schema cannot drift from the decoder.
+    fn decode_input(&self, input: &Value) -> Result<()>;
+
     /// Execute the tool with the given input.
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;
 

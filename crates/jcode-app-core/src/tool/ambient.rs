@@ -194,6 +194,10 @@ impl Tool for EndAmbientCycleTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<EndCycleInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: EndCycleInput = serde_json::from_value(input)?;
         let active_context_transactions = crate::session::Session::load(&ctx.session_id)
@@ -331,6 +335,10 @@ impl Tool for ScheduleAmbientTool {
                 }
             }
         })
+    }
+
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<ScheduleInput>(input)
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
@@ -635,6 +643,10 @@ impl Tool for RequestPermissionTool {
         })
     }
 
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<RequestPermissionInput>(input)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         ensure_ambient_session(&ctx)?;
 
@@ -880,6 +892,10 @@ impl Tool for ScheduleTool {
                 }
             }
         })
+    }
+
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        jcode_tool_core::input::decode_as::<ScheduleToolInput>(input)
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
@@ -1183,6 +1199,15 @@ impl SendChannelMessageTool {
     }
 }
 
+/// `send_message` input: the required message text and an optional channel.
+fn send_message_args(args: &Value) -> Result<(&str, Option<&str>)> {
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing required parameter: message"))?;
+    Ok((message, args.get("channel").and_then(|v| v.as_str())))
+}
+
 #[async_trait]
 impl Tool for SendChannelMessageTool {
     fn name(&self) -> &str {
@@ -1211,13 +1236,12 @@ impl Tool for SendChannelMessageTool {
         })
     }
 
-    async fn execute(&self, args: Value, _context: ToolContext) -> Result<ToolOutput> {
-        let message = args
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing required parameter: message"))?;
+    fn decode_input(&self, input: &Value) -> Result<()> {
+        send_message_args(input).map(drop)
+    }
 
-        let channel_name = args.get("channel").and_then(|v| v.as_str());
+    async fn execute(&self, args: Value, _context: ToolContext) -> Result<ToolOutput> {
+        let (message, channel_name) = send_message_args(&args)?;
 
         let config = crate::config::config();
         let registry = crate::channel::ChannelRegistry::from_config(&config.safety);
