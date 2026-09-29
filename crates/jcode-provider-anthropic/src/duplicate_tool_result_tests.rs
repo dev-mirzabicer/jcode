@@ -77,7 +77,7 @@ fn placeholder_then_real_output_keeps_only_the_real_output() {
         tool_result("toolu_1", "real output", None),
     ];
 
-    let formatted = format_messages(&messages, false);
+    let formatted = format_messages(&messages);
     assert_unique_tool_results(&formatted);
 
     let kept: Vec<&str> = formatted
@@ -103,7 +103,7 @@ fn real_output_then_placeholder_keeps_the_real_output() {
         tool_result("toolu_1", TOOL_OUTPUT_MISSING_TEXT, Some(true)),
     ];
 
-    let formatted = format_messages(&messages, false);
+    let formatted = format_messages(&messages);
     assert_unique_tool_results(&formatted);
     assert!(
         formatted.iter().flat_map(|m| &m.content).any(|b| matches!(
@@ -122,7 +122,7 @@ fn duplicate_real_outputs_keep_the_first() {
         tool_result("toolu_1", "second", None),
     ];
 
-    let formatted = format_messages(&messages, false);
+    let formatted = format_messages(&messages);
     assert_unique_tool_results(&formatted);
     assert!(formatted.iter().flat_map(|m| &m.content).any(|b| matches!(
         b,
@@ -140,7 +140,7 @@ fn distinct_tool_ids_are_untouched() {
         tool_result("toolu_2", "b", None),
     ];
 
-    let formatted = format_messages(&messages, false);
+    let formatted = format_messages(&messages);
     assert_unique_tool_results(&formatted);
     let count = formatted
         .iter()
@@ -163,7 +163,7 @@ fn message_left_empty_by_dedupe_is_dropped_and_roles_stay_valid() {
         text_msg(Role::User, "next"),
     ];
 
-    let formatted = format_messages(&messages, false);
+    let formatted = format_messages(&messages);
     assert_unique_tool_results(&formatted);
     assert!(formatted.iter().all(|m| !m.content.is_empty()));
     let roles: Vec<&str> = formatted.iter().map(|m| m.role.as_str()).collect();
@@ -186,7 +186,7 @@ fn synthetic_interrupt_placeholder_text_is_also_treated_as_a_placeholder() {
         tool_result("toolu_1", "real output", None),
     ];
 
-    let formatted = format_messages(&messages, false);
+    let formatted = format_messages(&messages);
     assert_unique_tool_results(&formatted);
     assert!(
         formatted.iter().flat_map(|m| &m.content).any(|b| matches!(

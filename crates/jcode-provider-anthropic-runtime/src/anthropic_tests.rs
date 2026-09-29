@@ -492,6 +492,7 @@ fn test_anthropic_opus_48_fast_mode_service_tier_serializes_priority() {
         system: None,
         messages: vec![],
         tools: None,
+        tool_choice: None,
         metadata: None,
         thinking: None,
         output_config: None,
@@ -654,13 +655,10 @@ fn test_anthropic_thinking_sse_events() {
 #[test]
 fn test_anthropic_signed_thinking_replayed_in_request_blocks() {
     let provider = AnthropicProvider::new();
-    let blocks = provider.format_content_blocks(
-        &[ContentBlock::AnthropicThinking {
-            thinking: "reasoning text".to_string(),
-            signature: "signed".to_string(),
-        }],
-        false,
-    );
+    let blocks = provider.format_content_blocks(&[ContentBlock::AnthropicThinking {
+        thinking: "reasoning text".to_string(),
+        signature: "signed".to_string(),
+    }]);
 
     let value = serde_json::to_value(&blocks).expect("serialize content blocks");
     assert_eq!(
@@ -783,7 +781,7 @@ async fn test_dangling_tool_use_repair() {
         // Missing tool_results for tool_123 and tool_456!
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages);
 
     // Should have 3 messages:
     // 1. User: "Hello"
@@ -857,7 +855,7 @@ async fn test_no_repair_when_tool_results_present() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages);
 
     // Should have exactly 3 messages (no synthetic ones added)
     assert_eq!(formatted.len(), 3);
@@ -939,7 +937,7 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
         make_image_result("tool_c", "c.png"),
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages);
 
     // assistant message + merged user tool_result message
     assert_eq!(formatted.len(), 2);
@@ -1480,7 +1478,7 @@ async fn test_sanitize_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages);
 
     let sanitized_id = "chatcmpl-BF2xX_tool_call_0";
     for msg in &formatted {
@@ -1525,7 +1523,7 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages);
 
     let sanitized_id = "call_with_dots";
     for msg in &formatted {

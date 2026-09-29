@@ -15,6 +15,7 @@ pub mod reasoning;
 pub mod request_lifetime;
 pub mod retry_after;
 pub mod selection;
+pub mod tool_name_policy;
 pub mod transport;
 pub mod usage_accounting;
 
@@ -22,10 +23,10 @@ pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
-    AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
-    anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
-    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_stainless_arch,
-    anthropic_stainless_os, anthropic_strip_1m_suffix,
+    AnthropicReasoningCaps, anthropic_context_mode, anthropic_decode_legacy_oauth_tool_name,
+    anthropic_effectively_1m, anthropic_is_1m_model, anthropic_oauth_beta_headers,
+    anthropic_reasoning_caps, anthropic_stainless_arch, anthropic_stainless_os,
+    anthropic_strip_1m_suffix, anthropic_tool_name_is_valid,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -68,6 +69,9 @@ pub use selection::{
     dedupe_model_routes, explicit_model_provider_prefix, fallback_sequence,
     model_name_for_provider, parse_provider_hint, provider_from_model_key, provider_key,
     provider_label, strip_own_model_prefix,
+};
+pub use tool_name_policy::{
+    ANTHROPIC_TOOL_NAME_POLICY, ProviderToolNameEntry, ProviderToolNamePolicy,
 };
 pub use usage_accounting::effective_context_tokens_from_usage;
 

@@ -38,11 +38,11 @@ use jcode_message_types::{Message, StreamEvent, ToolDefinition};
 use jcode_provider_anthropic::{ApiContentBlock, ToolResultContent, ToolResultContentBlock};
 use jcode_provider_anthropic::{
     ApiMessage, ApiMetadata, ApiOutputConfig, ApiRequest, ApiSystem, ApiThinking, ApiTool,
+    ApiToolChoice,
 };
 use jcode_provider_core::{
-    anthropic_is_1m_model as is_1m_model,
-    anthropic_map_tool_name_from_oauth as map_tool_name_from_oauth,
-    anthropic_strip_1m_suffix as strip_1m_suffix,
+    ANTHROPIC_TOOL_NAME_POLICY, anthropic_decode_legacy_oauth_tool_name,
+    anthropic_is_1m_model as is_1m_model, anthropic_strip_1m_suffix as strip_1m_suffix,
 };
 use reqwest::Client;
 use serde::Serialize;
@@ -979,24 +979,49 @@ impl AnthropicProvider {
 
     /// Convert our Message type to Anthropic API format
     /// Also repairs dangling tool_uses by injecting synthetic tool_results
-    fn format_messages(&self, messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
-        jcode_provider_anthropic::format_messages(messages, is_oauth)
+    fn format_messages(&self, messages: &[Message]) -> Vec<ApiMessage> {
+        jcode_provider_anthropic::format_messages(messages)
     }
 
     /// Convert our ContentBlock to Anthropic API format
     #[cfg(test)]
-    fn format_content_blocks(
-        &self,
-        blocks: &[ContentBlock],
-        is_oauth: bool,
-    ) -> Vec<ApiContentBlock> {
-        jcode_provider_anthropic::format_content_blocks(blocks, is_oauth)
+    fn format_content_blocks(&self, blocks: &[ContentBlock]) -> Vec<ApiContentBlock> {
+        jcode_provider_anthropic::format_content_blocks(blocks)
     }
 
-    /// Convert tool definitions to Anthropic API format
-    /// Adds cache_control to the last tool for prompt caching
-    fn format_tools(&self, tools: &[ToolDefinition], is_oauth: bool) -> Vec<ApiTool> {
-        jcode_provider_anthropic::format_tools(tools, is_oauth, is_cache_ttl_1h())
+    /// Convert tool definitions to Anthropic API format. OAuth and API-key
+    /// requests carry the same registry tools.
+    fn format_tools(&self, tools: &[ToolDefinition]) -> Vec<ApiTool> {
+        jcode_provider_anthropic::format_tools(tools, is_cache_ttl_1h())
+    }
+
+    /// Build the Messages request shared by `complete` and `complete_split`,
+    /// which differ only in how the system prompt is split.
+    fn build_api_request(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: Option<ApiSystem>,
+        is_oauth: bool,
+    ) -> ApiRequest {
+        let api_tools = self.format_tools(tools);
+        let (thinking, output_config, temperature) =
+            self.build_reasoning_request_parts(model, is_oauth);
+        ApiRequest {
+            model: strip_1m_suffix(model).to_string(),
+            max_tokens: self.max_tokens_for(model),
+            system,
+            messages: format_messages_with_identity(self.format_messages(messages), is_oauth),
+            tool_choice: ApiToolChoice::for_tools(&api_tools),
+            tools: (!api_tools.is_empty()).then_some(api_tools),
+            metadata: is_oauth.then(|| oauth_request_metadata(&self.oauth_session_id)),
+            thinking,
+            output_config,
+            temperature,
+            service_tier: self.current_service_tier_for_model(model),
+            stream: true,
+        }
     }
 }
 
@@ -1029,6 +1054,7 @@ fn log_anthropic_canonical_input(
         "system": system_value.as_ref(),
         "messages": messages_value,
         "tools": tools_value.as_ref(),
+        "tool_choice": &request.tool_choice,
         "thinking": &request.thinking,
         "output_config": &request.output_config,
         "temperature": request.temperature,
@@ -1077,35 +1103,13 @@ impl Provider for AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
-        let api_model = strip_1m_suffix(&model).to_string();
-
-        // Format request
-        let api_messages = self.format_messages(messages, is_oauth);
-        let api_tools = self.format_tools(tools, is_oauth);
-        let (thinking, output_config, temperature) =
-            self.build_reasoning_request_parts(&model, is_oauth);
-
-        let request = ApiRequest {
-            model: api_model,
-            max_tokens: self.max_tokens_for(&model),
-            system: build_system_param(system, is_oauth),
-            messages: format_messages_with_identity(api_messages, is_oauth),
-            tools: if api_tools.is_empty() {
-                None
-            } else {
-                Some(api_tools)
-            },
-            metadata: if is_oauth {
-                Some(oauth_request_metadata(&self.oauth_session_id))
-            } else {
-                None
-            },
-            thinking,
-            output_config,
-            temperature,
-            service_tier: self.current_service_tier_for_model(&model),
-            stream: true,
-        };
+        let request = self.build_api_request(
+            &model,
+            messages,
+            tools,
+            build_system_param(system, is_oauth),
+            is_oauth,
+        );
 
         log_anthropic_canonical_input(&model, "anthropic_messages", &request, is_oauth, false);
 
@@ -1405,35 +1409,9 @@ impl Provider for AnthropicProvider {
             context_projection_validation_report,
         };
 
-        let builder_result = match self.credential_mode_snapshot() {
-            AnthropicCredentialMode::OAuth => {
-                jcode_provider_anthropic::validate_projected_messages(messages, true)
-            }
-            AnthropicCredentialMode::ApiKey => {
-                jcode_provider_anthropic::validate_projected_messages(messages, false)
-            }
-            AnthropicCredentialMode::Auto => {
-                let mut api_key =
-                    jcode_provider_anthropic::validate_projected_messages(messages, false);
-                match (
-                    api_key.as_mut(),
-                    jcode_provider_anthropic::validate_projected_messages(messages, true),
-                ) {
-                    (Ok(api_key), Ok(oauth)) => {
-                        api_key.normalized_item_count = api_key
-                            .normalized_item_count
-                            .max(oauth.normalized_item_count);
-                        api_key.normalization_notes.push(
-                            "Anthropic credential mode is auto; both API-key and OAuth message formatter variants passed validation."
-                                .to_string(),
-                        );
-                        Ok(api_key.clone())
-                    }
-                    (Err(error), _) => Err(error.clone()),
-                    (_, Err(error)) => Err(error),
-                }
-            }
-        };
+        // OAuth and API-key requests share one message formatter, so a single
+        // validation covers every credential mode.
+        let builder_result = jcode_provider_anthropic::validate_projected_messages(messages);
 
         context_projection_validation_report(
             ContextProviderValidationIdentity {
@@ -1507,35 +1485,13 @@ impl Provider for AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
-        let api_model = strip_1m_suffix(&model).to_string();
-
-        // Format request
-        let api_messages = self.format_messages(messages, is_oauth);
-        let api_tools = self.format_tools(tools, is_oauth);
-        let (thinking, output_config, temperature) =
-            self.build_reasoning_request_parts(&model, is_oauth);
-
-        let request = ApiRequest {
-            model: api_model,
-            max_tokens: self.max_tokens_for(&model),
-            system: build_system_param_split(system_static, system_dynamic, is_oauth),
-            messages: format_messages_with_identity(api_messages, is_oauth),
-            tools: if api_tools.is_empty() {
-                None
-            } else {
-                Some(api_tools)
-            },
-            metadata: if is_oauth {
-                Some(oauth_request_metadata(&self.oauth_session_id))
-            } else {
-                None
-            },
-            thinking,
-            output_config,
-            temperature,
-            service_tier: self.current_service_tier_for_model(&model),
-            stream: true,
-        };
+        let request = self.build_api_request(
+            &model,
+            messages,
+            tools,
+            build_system_param_split(system_static, system_dynamic, is_oauth),
+            is_oauth,
+        );
 
         log_anthropic_canonical_input(&model, "anthropic_messages_split", &request, is_oauth, true);
 
@@ -2443,11 +2399,12 @@ fn process_sse_event(
                         events.push(StreamEvent::ThinkingStart);
                     }
                     ApiContentBlockStart::ToolUse { id, name } => {
-                        let mapped_name = if is_oauth {
-                            map_tool_name_from_oauth(&name)
-                        } else {
-                            name.clone()
-                        };
+                        let registry_name = ANTHROPIC_TOOL_NAME_POLICY.registry_name(&name);
+                        let mapped_name = is_oauth
+                            .then(|| anthropic_decode_legacy_oauth_tool_name(registry_name))
+                            .flatten()
+                            .unwrap_or(registry_name)
+                            .to_string();
                         // Start accumulating tool use
                         state.current_tool_use = Some(ToolUseAccumulator {
                             input_json: String::new(),

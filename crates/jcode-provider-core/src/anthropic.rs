@@ -364,24 +364,16 @@ pub fn anthropic_reasoning_caps(model: &str) -> AnthropicReasoningCaps {
     }
 }
 
-pub fn anthropic_map_tool_name_for_oauth(name: &str) -> String {
-    match name {
-        "bash" => "Bash",
-        "read" => "Read",
-        "write" => "Write",
-        "edit" => "Edit",
-        "glob" => "Glob",
-        "grep" => "Grep",
-        "subagent" => "Agent",
-        "schedule" => "ScheduleWakeup",
-        "skill_manage" => "Skill",
-        _ => name,
-    }
-    .to_string()
-}
-
-pub fn anthropic_map_tool_name_from_oauth(name: &str) -> String {
-    match name {
+/// Decode a Claude Code tool name that jcode advertised over Claude OAuth
+/// before INT-01/WP-01 (`Bash`, `Agent`, ...).
+///
+/// Claude now receives registry names unchanged (see
+/// [`crate::tool_name_policy`]). This decoder keeps a response streamed for a
+/// request built by the previous release resolving to the right tool. It is
+/// kept for one release after v0.75 and then removed together with the matching
+/// aliases in `jcode_tool_types::resolve_tool_name`.
+pub fn anthropic_decode_legacy_oauth_tool_name(name: &str) -> Option<&'static str> {
+    Some(match name {
         "Bash" => "bash",
         "Read" => "read",
         "Write" => "write",
@@ -391,9 +383,17 @@ pub fn anthropic_map_tool_name_from_oauth(name: &str) -> String {
         "Agent" => "subagent",
         "ScheduleWakeup" => "schedule",
         "Skill" => "skill_manage",
-        _ => name,
-    }
-    .to_string()
+        _ => return None,
+    })
+}
+
+/// Whether `name` satisfies the Messages API tool-name rule
+/// `^[a-zA-Z0-9_-]{1,128}$`.
+pub fn anthropic_tool_name_is_valid(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 pub fn anthropic_stainless_arch() -> &'static str {
@@ -441,18 +441,29 @@ mod tests {
     }
 
     #[test]
-    fn oauth_tool_name_mapping_is_reversible_for_known_tools() {
-        for (local, oauth) in [
-            ("bash", "Bash"),
-            ("read", "Read"),
-            ("subagent", "Agent"),
-            ("schedule", "ScheduleWakeup"),
-            ("skill_manage", "Skill"),
+    fn legacy_oauth_names_decode_to_registry_tools() {
+        for (legacy, local) in [
+            ("Bash", "bash"),
+            ("Read", "read"),
+            ("Agent", "subagent"),
+            ("ScheduleWakeup", "schedule"),
+            ("Skill", "skill_manage"),
         ] {
-            assert_eq!(anthropic_map_tool_name_for_oauth(local), oauth);
-            assert_eq!(anthropic_map_tool_name_from_oauth(oauth), local);
+            assert_eq!(anthropic_decode_legacy_oauth_tool_name(legacy), Some(local));
         }
-        assert_eq!(anthropic_map_tool_name_for_oauth("custom"), "custom");
+        assert_eq!(anthropic_decode_legacy_oauth_tool_name("bash"), None);
+        assert_eq!(anthropic_decode_legacy_oauth_tool_name("custom"), None);
+    }
+
+    #[test]
+    fn tool_name_rule_matches_the_messages_api_pattern() {
+        assert!(anthropic_tool_name_is_valid("bash"));
+        assert!(anthropic_tool_name_is_valid("mcp__server__tool-name_2"));
+        assert!(anthropic_tool_name_is_valid(&"a".repeat(128)));
+        assert!(!anthropic_tool_name_is_valid(""));
+        assert!(!anthropic_tool_name_is_valid(&"a".repeat(129)));
+        assert!(!anthropic_tool_name_is_valid("functions.bash"));
+        assert!(!anthropic_tool_name_is_valid("has space"));
     }
 
     #[test]

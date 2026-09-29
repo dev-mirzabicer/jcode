@@ -571,7 +571,7 @@ closed.
 
 | Provider family/route | Current validation and operation boundary |
 |---|---|
-| Native Anthropic | Validates both API-key and OAuth formatter variants as applicable. Signed `AnthropicThinking` can be suppressed only as a complete block. Tool/result and image normalization must still pass. |
+| Native Anthropic | Validates the Anthropic message formatter, which is identical for the API-key and OAuth routes. Signed `AnthropicThinking` can be suppressed only as a complete block. Tool/result and image normalization must still pass. |
 | OpenAI Responses | Validates through the Responses input builder. Complete `OpenAIReasoning` items can be suppressed. Every historical context revision clears persistent WebSocket/`previous_response_id` continuation before the next full request. |
 | ChatGPT web conversation route | Projected-history operations are disabled because this route does not use the Responses input builder and has no dedicated validation adapter. |
 | OpenRouter and named OpenAI-compatible routes | Validates with the exact model-dependent chat formatter options. Generic `Reasoning` is removable only when that route actually replays it. Locked model state fails closed rather than assuming a fallback shape. |

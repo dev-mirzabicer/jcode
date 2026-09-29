@@ -69,15 +69,15 @@ fn thinking_tool_fixture(include_thinking: bool) -> Vec<Message> {
 fn retained_and_suppressed_signed_thinking_both_validate_around_parallel_tools() {
     let retained = thinking_tool_fixture(true);
     let retained_validation =
-        validate_projected_messages(&retained, false).expect("retained thinking must validate");
-    let retained_json = serde_json::to_value(format_messages(&retained, false)).unwrap();
+        validate_projected_messages(&retained).expect("retained thinking must validate");
+    let retained_json = serde_json::to_value(format_messages(&retained)).unwrap();
     assert_eq!(retained_validation.normalized_item_count, 4);
     assert!(retained_json.to_string().contains("signed-thinking-state"));
 
     let suppressed = thinking_tool_fixture(false);
-    let suppressed_validation = validate_projected_messages(&suppressed, false)
+    let suppressed_validation = validate_projected_messages(&suppressed)
         .expect("complete thinking-block suppression must keep the tool turn valid");
-    let suppressed_json = serde_json::to_value(format_messages(&suppressed, false)).unwrap();
+    let suppressed_json = serde_json::to_value(format_messages(&suppressed)).unwrap();
     assert_eq!(suppressed_validation.normalized_item_count, 4);
     assert!(!suppressed_json.to_string().contains("thinking"));
     assert_eq!(
@@ -113,7 +113,7 @@ fn thinking_without_signature_is_rejected_with_precise_diagnostic() {
         Message::user("Continue."),
     ];
 
-    let error = validate_projected_messages(&messages, false).unwrap_err();
+    let error = validate_projected_messages(&messages).unwrap_err();
     assert!(error.contains("without a complete non-empty signature"));
 }
 
@@ -127,7 +127,7 @@ fn selected_summary_replacing_complete_thinking_and_tool_range_validates() {
         Message::user("Implement the next change."),
     ];
 
-    let validation = validate_projected_messages(&projected, true)
+    let validation = validate_projected_messages(&projected)
         .expect("summary replacing the complete range must remain sendable");
     assert_eq!(validation.normalized_item_count, 3);
 }
@@ -169,6 +169,6 @@ fn normalized_tool_id_collisions_are_rejected() {
         ),
     ];
 
-    let error = validate_projected_messages(&messages, false).unwrap_err();
+    let error = validate_projected_messages(&messages).unwrap_err();
     assert!(error.contains("duplicate normalized tool_use id 'call_a'"));
 }

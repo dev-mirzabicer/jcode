@@ -268,10 +268,11 @@ pub fn resolve_tool_name(name: &str) -> &str {
         // models trained on or resuming from the old vocabulary still emit it.
         "discover_tools" => "integration_tools",
         "todoread" | "todowrite" | "todo_read" | "todo_write" | "todos" => "todo",
-        // The Anthropic OAuth surface advertises PascalCase tool names and
-        // reverse-maps them provider-side for top-level calls, but nested
-        // `batch` subcall names bypass that mapping and resolve here (issue
-        // #486). Keep these in sync with anthropic_map_tool_name_from_oauth.
+        // Claude Code names the Anthropic OAuth surface advertised before
+        // INT-01/WP-01. Claude now sees registry names, but a nested `batch`
+        // subcall from a response built by the previous release bypasses the
+        // provider-side decoder and resolves here (issue #486). Kept for one
+        // release together with anthropic_decode_legacy_oauth_tool_name.
         "Bash" => "bash",
         "Read" => "read",
         "Write" => "write",
@@ -304,8 +305,8 @@ mod tests {
 
     #[test]
     fn resolve_tool_name_maps_pascalcase_oauth_aliases() {
-        // Anthropic OAuth advertises PascalCase names; batch subcalls resolve
-        // through here rather than the provider-side reverse map (issue #486).
+        // Legacy OAuth names from the previous release; batch subcalls resolve
+        // through here rather than the provider-side decoder (issue #486).
         assert_eq!(resolve_tool_name("Read"), "read");
         assert_eq!(resolve_tool_name("Bash"), "bash");
         assert_eq!(resolve_tool_name("Write"), "write");

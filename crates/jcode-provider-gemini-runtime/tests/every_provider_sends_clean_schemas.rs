@@ -247,7 +247,7 @@ fn anthropic_sends_a_schema_without_a_top_level_combiner() {
         }),
     }];
 
-    let built = jcode_provider_anthropic::format_tools(&combiner_tool, false, false);
+    let built = jcode_provider_anthropic::format_tools(&combiner_tool, false);
     let wire = serde_json::to_value(&built).expect("serialize");
     let schema = &wire[0]["input_schema"];
 
@@ -282,9 +282,8 @@ fn anthropic_sends_a_schema_without_a_top_level_combiner() {
         description: "probe".to_string(),
         input_schema: serde_json::json!({}),
     }];
-    let bare_wire =
-        serde_json::to_value(jcode_provider_anthropic::format_tools(&bare, false, false))
-            .expect("serialize");
+    let bare_wire = serde_json::to_value(jcode_provider_anthropic::format_tools(&bare, false))
+        .expect("serialize");
     assert_eq!(bare_wire[0]["input_schema"]["type"], "object");
     assert_eq!(
         bare_wire[0]["input_schema"]["properties"],
@@ -335,9 +334,8 @@ fn a_keyword_no_deny_list_has_ever_heard_of_reaches_no_provider() {
         "openai forwarded it: {openai}"
     );
 
-    let anthropic =
-        serde_json::to_value(jcode_provider_anthropic::format_tools(&novel, false, false))
-            .expect("serialize");
+    let anthropic = serde_json::to_value(jcode_provider_anthropic::format_tools(&novel, false))
+        .expect("serialize");
     assert!(
         !contains_key(&anthropic, NOVEL),
         "anthropic forwarded it: {anthropic}"

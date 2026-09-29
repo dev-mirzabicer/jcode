@@ -1,11 +1,11 @@
 use jcode_message_types::{
     ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition, sanitize_tool_id,
 };
-use jcode_provider_core::{
-    ContextRequestBuilderValidation, anthropic_map_tool_name_for_oauth as map_tool_name_for_oauth,
-};
+use jcode_provider_core::{ANTHROPIC_TOOL_NAME_POLICY, ContextRequestBuilderValidation};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 /// Claude Code billing attribution text observed in the official CLI's system
 /// prompt blocks.
@@ -17,7 +17,7 @@ const CLAUDE_CODE_IDENTITY: &str = "You are a Claude agent, built on Anthropic's
 /// on an assistant message, which Anthropic rejects on non-prefill models.
 pub(crate) const CONTINUATION_USER_TURN: &str = "Continue.";
 
-pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
+pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
     use std::collections::HashSet;
 
     // Pre-pass: drop duplicate tool_results for the same tool_use_id.
@@ -69,7 +69,7 @@ pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> 
             Role::Assistant => "assistant",
         };
 
-        let content = format_content_blocks(&msg.content, is_oauth);
+        let content = format_content_blocks(&msg.content);
 
         if !content.is_empty() {
             result.push(ApiMessage {
@@ -292,7 +292,7 @@ fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
 }
 
 /// Convert our ContentBlock to Anthropic API format
-pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<ApiContentBlock> {
+pub fn format_content_blocks(blocks: &[ContentBlock]) -> Vec<ApiContentBlock> {
     let mut result: Vec<ApiContentBlock> = Vec::new();
     for block in blocks {
         match block {
@@ -334,11 +334,7 @@ pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<Api
             } => {
                 result.push(ApiContentBlock::ToolUse {
                     id: sanitize_tool_id(id),
-                    name: if is_oauth {
-                        map_tool_name_for_oauth(name)
-                    } else {
-                        name.clone()
-                    },
+                    name: ANTHROPIC_TOOL_NAME_POLICY.wire_name(name).to_string(),
                     input: if input.is_object() {
                         input.clone()
                     } else {
@@ -401,11 +397,10 @@ pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<Api
 /// deduplication, image association, and dangling-result repair have run.
 pub fn validate_projected_messages(
     messages: &[Message],
-    is_oauth: bool,
 ) -> Result<ContextRequestBuilderValidation, String> {
     use std::collections::HashSet;
 
-    let formatted = format_messages(messages, is_oauth);
+    let formatted = format_messages(messages);
     if formatted.is_empty() {
         return Err(
             "Projected history normalizes to no Anthropic request messages; the request would not contain a valid conversation turn."
@@ -492,31 +487,6 @@ pub fn validate_projected_messages(
     Ok(ContextRequestBuilderValidation::new(formatted.len()))
 }
 
-/// Convert tool definitions to Anthropic API format
-/// Adds cache_control to the last tool for prompt caching
-/// Local tool names that are represented by the curated Claude-Code builtin
-/// definitions in OAuth mode. These keep their hand-tuned schemas/descriptions
-/// (which the Anthropic subscription endpoint expects) instead of the raw
-/// registry definitions; every other tool is forwarded as-is (see #409).
-/// Local tool names that already have a hand-tuned curated OAuth definition
-/// above, so the registry pass must not forward them a second time.
-///
-/// `schedule` is deliberately absent: its curated `ScheduleWakeup` schema had
-/// drifted from the real tool (it advertised `delaySeconds`/`reason`/`prompt`
-/// while the handler requires `task` + `wake_in_minutes`/`wake_at`), so every
-/// call failed with "task is required for action=create" (#706). Forwarding the
-/// real schema under the remapped name keeps the two in sync by construction.
-const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
-    "subagent",
-    "bash",
-    "edit",
-    "glob",
-    "grep",
-    "read",
-    "skill_manage",
-    "write",
-];
-
 /// Normalize a tool schema for Anthropic's `input_schema`.
 ///
 /// Anthropic accepts JSON Schema combinators inside object properties but
@@ -528,148 +498,56 @@ const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
 /// Widening a top-level combiner loses the per-branch constraint, which is
 /// intended: runtime tool deserialization remains the authority on which
 /// combination is actually valid.
-fn anthropic_input_schema(schema: &Value) -> Value {
+pub fn anthropic_input_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::ANTHROPIC)
 }
 
-pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool) -> Vec<ApiTool> {
-    if is_oauth {
-        // A curated builtin may only be advertised when at least one backing
-        // local tool is actually registered. Otherwise the model calls e.g.
-        // `Agent`/`Glob`, the reverse mapping resolves to `subagent`/`glob`,
-        // and the registry lookup fails with "Unknown tool" (see #572).
-        let has_backing = |candidates: &[&str]| {
-            candidates
-                .iter()
-                .any(|candidate| tools.iter().any(|tool| tool.name == *candidate))
-        };
-        // Curated Claude-Code builtin tool definitions. These remain hand-tuned
-        // because the Anthropic OAuth (subscription) endpoint expects the
-        // builtin names with compatible schemas. Anything not represented here
-        // is appended from the real registry below so OAuth users keep the full
-        // toolset (websearch, webfetch, browser, codesearch, memory, ...).
-        let curated: Vec<(&[&str], ApiTool)> = vec![
-            (
-                &["subagent"],
-                ApiTool {
-                    name: "Agent".to_string(),
-                    description: "Launch a new agent to handle complex, multi-step tasks."
-                        .to_string(),
-                    input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["bash"],
-                ApiTool {
-                    name: "Bash".to_string(),
-                    description: "Executes a given bash command and returns its output."
-                        .to_string(),
-                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"},"justification":{"type":"string","description":"Only when re-issuing a command the destructive gate refused; explain which user request it serves."}},"required":["command"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["edit"],
-                ApiTool {
-                    name: "Edit".to_string(),
-                    description: "Performs exact string replacements in files.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["glob"],
-                ApiTool {
-                    name: "Glob".to_string(),
-                    description: "Fast file pattern matching tool.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["grep"],
-                ApiTool {
-                    name: "Grep".to_string(),
-                    description: "A powerful search tool built on ripgrep.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["read"],
-                ApiTool {
-                    name: "Read".to_string(),
-                    description: "Reads a file from the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["skill_manage"],
-                ApiTool {
-                    name: "Skill".to_string(),
-                    description: "Execute a skill within the main conversation".to_string(),
-                    input_schema: json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["write"],
-                ApiTool {
-                    name: "Write".to_string(),
-                    description: "Writes a file to the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-        ];
-        let mut out: Vec<ApiTool> = curated
-            .into_iter()
-            .filter(|(backing, _)| has_backing(backing))
-            .map(|(_, tool)| tool)
-            .collect();
-
-        // Forward every other registered tool, remapping its name to the
-        // OAuth-accepted form. This restores websearch/webfetch/browser/
-        // codesearch/memory/swarm/multiedit/open/etc. for subscription users,
-        // matching the documented "remap names, keep the full toolset" behavior
-        // and the (deprecated) Claude CLI transport.
-        for tool in tools {
-            if OAUTH_BUILTIN_LOCAL_TOOLS.contains(&tool.name.as_str()) {
-                continue;
-            }
-            out.push(ApiTool {
-                name: map_tool_name_for_oauth(&tool.name),
-                description: tool.description.clone(),
-                input_schema: anthropic_input_schema(&tool.input_schema),
-                cache_control: None,
-            });
-        }
-
-        // Move the prompt-cache breakpoint to the final tool in the list.
-        if let Some(last) = out.last_mut() {
-            last.cache_control = Some(CacheControlParam::ephemeral(cache_ttl_1h));
-        }
-
-        return out;
-    }
-
+/// Convert registry tool definitions to Anthropic tools.
+///
+/// OAuth and API-key requests carry the same tools: every registry tool, under
+/// its registry name (or its [`ANTHROPIC_TOOL_NAME_POLICY`] entry), with its
+/// registry description and the Anthropic dialect of its schema. There are no
+/// provider-authored stand-ins (INT-01 D3, D12). The final tool carries the
+/// tools prompt-cache breakpoint.
+pub fn format_tools(tools: &[ToolDefinition], cache_ttl_1h: bool) -> Vec<ApiTool> {
     let len = tools.len();
     tools
         .iter()
         .enumerate()
         .map(|(i, tool)| ApiTool {
-            name: tool.name.clone(),
+            name: ANTHROPIC_TOOL_NAME_POLICY.wire_name(&tool.name).to_string(),
             description: tool.description.clone(),
             input_schema: anthropic_input_schema(&tool.input_schema),
-            cache_control: if i == len - 1 {
+            cache_control: if i + 1 == len {
                 Some(CacheControlParam::ephemeral(cache_ttl_1h))
             } else {
                 None
             },
         })
         .collect()
+}
+
+/// Tool-choice policy for every request that carries tools.
+///
+/// jcode's `batch` tool is the parallelism mechanism for every provider, so
+/// native parallel tool calls are disabled, matching GPT's
+/// `parallel_tool_calls: false` (INT-01 D1). It is sent identically on every
+/// request with tools because a changed `tool_choice` invalidates the cached
+/// message prefix.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ApiToolChoice {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    disable_parallel_tool_use: bool,
+}
+
+impl ApiToolChoice {
+    pub fn for_tools(tools: &[ApiTool]) -> Option<Self> {
+        (!tools.is_empty()).then_some(Self {
+            kind: "auto",
+            disable_parallel_tool_use: true,
+        })
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -681,6 +559,8 @@ pub struct ApiRequest {
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ApiTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ApiToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ApiMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1062,7 +942,7 @@ mod cache_prefix_invariant_tests {
     }
 
     fn formatted_with_breakpoints(messages: &[Message]) -> Vec<ApiMessage> {
-        let mut api = format_messages(messages, false);
+        let mut api = format_messages(messages);
         add_message_cache_breakpoint(&mut api, false);
         api
     }
@@ -1144,14 +1024,6 @@ mod cache_prefix_invariant_tests {
         }
     }
 
-    fn tool_def(name: &str) -> ToolDefinition {
-        ToolDefinition {
-            name: name.to_string(),
-            description: format!("{name} description"),
-            input_schema: json!({"type":"object","properties":{}}),
-        }
-    }
-
     #[test]
     fn format_tools_removes_top_level_combinators_for_anthropic_api() {
         let tool = ToolDefinition {
@@ -1176,7 +1048,7 @@ mod cache_prefix_invariant_tests {
             }),
         };
 
-        let formatted = format_tools(&[tool], false, false);
+        let formatted = format_tools(&[tool], false);
         let schema = &formatted[0].input_schema;
         for keyword in ["oneOf", "anyOf", "allOf"] {
             assert!(
@@ -1196,94 +1068,11 @@ mod cache_prefix_invariant_tests {
         );
         assert_eq!(schema["required"], json!(["action", "intent"]));
     }
-
-    #[test]
-    fn oauth_format_tools_keeps_full_custom_toolset() {
-        // Registry includes builtins (remapped) plus extra tools that must survive.
-        let registry = vec![
-            tool_def("bash"),
-            tool_def("read"),
-            tool_def("write"),
-            tool_def("edit"),
-            tool_def("glob"),
-            tool_def("grep"),
-            tool_def("subagent"),
-            tool_def("websearch"),
-            tool_def("webfetch"),
-            tool_def("browser"),
-            tool_def("codesearch"),
-            tool_def("memory"),
-        ];
-
-        let formatted = format_tools(&registry, true, false);
-        let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
-
-        // Curated builtins are present under their OAuth names.
-        for builtin in ["Bash", "Read", "Agent", "Write", "Edit", "Glob", "Grep"] {
-            assert!(
-                names.contains(&builtin),
-                "missing builtin {builtin} in {names:?}"
-            );
-        }
-        // The previously-dropped custom tools are now forwarded.
-        for custom in ["websearch", "webfetch", "browser", "codesearch", "memory"] {
-            assert!(
-                names.contains(&custom),
-                "custom tool {custom} was dropped on OAuth; got {names:?}"
-            );
-        }
-        // No duplicate Agent/Bash/Read from the registry remap.
-        assert_eq!(names.iter().filter(|n| **n == "Agent").count(), 1);
-        assert_eq!(names.iter().filter(|n| **n == "Bash").count(), 1);
-        assert_eq!(names.iter().filter(|n| **n == "Read").count(), 1);
-    }
-
-    #[test]
-    fn oauth_format_tools_drops_builtins_missing_from_registry() {
-        // subagent and glob no longer exist in the registry, so the curated
-        // Agent/Glob builtins must not be advertised (see #572).
-        let registry = vec![
-            tool_def("bash"),
-            tool_def("read"),
-            tool_def("write"),
-            tool_def("edit"),
-            tool_def("agentgrep"),
-        ];
-        let formatted = format_tools(&registry, true, false);
-        let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
-
-        for ghost in ["Agent", "Glob", "Grep", "Skill"] {
-            assert!(
-                !names.contains(&ghost),
-                "advertised ghost builtin {ghost} without a backing registry tool: {names:?}"
-            );
-        }
-        for present in ["Bash", "Read", "Write", "Edit", "agentgrep"] {
-            assert!(names.contains(&present), "missing {present} in {names:?}");
-        }
-    }
-
-    #[test]
-    fn oauth_format_tools_places_single_cache_breakpoint_on_last_tool() {
-        let registry = vec![tool_def("bash"), tool_def("websearch")];
-        let formatted = format_tools(&registry, true, false);
-        let with_cache: Vec<&str> = formatted
-            .iter()
-            .filter(|t| t.cache_control.is_some())
-            .map(|t| t.name.as_str())
-            .collect();
-        assert_eq!(with_cache.len(), 1, "expected exactly one cache breakpoint");
-        assert_eq!(
-            formatted.last().map(|t| t.name.as_str()),
-            with_cache.first().copied(),
-            "cache breakpoint must be on the final tool"
-        );
-    }
 }
 
 #[cfg(test)]
-#[path = "oauth_tool_schema_tests.rs"]
-mod oauth_tool_schema_tests;
+#[path = "tool_surface_tests.rs"]
+mod tool_surface_tests;
 
 #[cfg(test)]
 #[path = "trailing_assistant_repair_tests.rs"]

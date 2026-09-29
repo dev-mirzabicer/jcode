@@ -158,7 +158,7 @@ fn synthetic_startup_messages_are_accepted_by_every_primary_structured_provider_
         .map(StoredMessage::to_message)
         .collect::<Vec<_>>();
 
-    jcode_provider_anthropic::validate_projected_messages(&messages, false)
+    jcode_provider_anthropic::validate_projected_messages(&messages)
         .expect("Anthropic startup messages");
     jcode_provider_openai::validate_projected_messages(&messages)
         .expect("OpenAI Responses startup messages");
@@ -194,7 +194,7 @@ fn explicit_range_summary_can_include_startup_messages_without_mutating_source()
 
     assert_eq!(serde_json::to_vec(&raw).unwrap(), raw_before);
     assert_eq!(projection.messages.len(), 3);
-    jcode_provider_anthropic::validate_projected_messages(&projection.messages, false)
+    jcode_provider_anthropic::validate_projected_messages(&projection.messages)
         .expect("Anthropic startup summary");
     jcode_provider_openai::validate_projected_messages(&projection.messages)
         .expect("OpenAI startup summary");
@@ -259,7 +259,7 @@ fn combined_real_projection_is_accepted_by_every_primary_structured_provider_bui
         })
     }));
 
-    jcode_provider_anthropic::validate_projected_messages(&projection.messages, false)
+    jcode_provider_anthropic::validate_projected_messages(&projection.messages)
         .expect("Anthropic builder");
     jcode_provider_openai::validate_projected_messages(&projection.messages)
         .expect("OpenAI Responses builder");
@@ -305,7 +305,7 @@ fn real_range_summary_projection_replacing_complete_tool_pair_is_provider_valid(
             )
         })
     }));
-    jcode_provider_anthropic::validate_projected_messages(&projection.messages, true)
+    jcode_provider_anthropic::validate_projected_messages(&projection.messages)
         .expect("Anthropic summary projection");
     jcode_provider_openai::validate_projected_messages(&projection.messages)
         .expect("OpenAI summary projection");

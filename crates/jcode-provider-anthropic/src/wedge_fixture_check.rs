@@ -8,7 +8,7 @@ fn real_wedged_session_becomes_sendable() {
     };
     let raw = std::fs::read_to_string(path).expect("fixture");
     let messages: Vec<Message> = serde_json::from_str(&raw).expect("parse");
-    let formatted = format_messages(&messages, false);
+    let formatted = format_messages(&messages);
 
     let mut seen = std::collections::HashSet::new();
     for m in &formatted {
