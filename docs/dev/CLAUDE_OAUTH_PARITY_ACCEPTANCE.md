@@ -330,6 +330,16 @@ requests, each served by `claude-opus-5-5`, carrying the production binding
 control. All tool results succeeded (`b.txt` holds `ALPHA`), and the server
 logged no INV-1 event or input transformation.
 
+## WP-02 acceptance
+
+Accepted by Mirza on 2026-09-29, around 18:59Z, on candidate `ff4d975e8`.
+Activated runtime `ed379c006-dirty-10c2f7c6f4fe`, with running, current and
+shared-server channels equal and the canary passed; the source differs from
+the runtime only by documentation commits. Top-level Claude replay remains off
+until WP-05. Until WP-03 moves per-turn reminders out of `system`, a Claude
+child's follow-up turn can drop its earlier thinking under `drop_block`, which
+is logged as an INV-1 defect with a status notice.
+
 ## WP-02 deterministic evidence
 
 - `jcode-provider-anthropic` `binding::tests`: digest determinism under the
