@@ -3857,12 +3857,14 @@ dependencies = [
 name = "jcode-provider-anthropic"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "jcode-logging",
  "jcode-message-types",
  "jcode-provider-core",
  "jcode-schema-dialect",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

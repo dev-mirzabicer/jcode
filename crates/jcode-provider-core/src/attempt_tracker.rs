@@ -39,6 +39,7 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::GeneratedImage { .. }
         | StreamEvent::ThinkingDelta(_)
         | StreamEvent::ThinkingSignatureDelta(_)
+        | StreamEvent::ReplayableReasoning(_)
         | StreamEvent::OpenAIReasoning { .. }
         | StreamEvent::MessageEnd { .. }
         | StreamEvent::NativeToolCall { .. } => true,

@@ -1209,8 +1209,12 @@ impl crate::tui::TuiState for App {
                         ContentBlock::AnthropicThinking {
                             thinking,
                             signature,
+                            ..
                         } => {
                             asst_chars += thinking.len() + signature.len();
+                        }
+                        ContentBlock::AnthropicRedactedThinking { data, .. } => {
+                            asst_chars += data.len();
                         }
                         ContentBlock::OpenAIReasoning {
                             id,

@@ -1222,10 +1222,15 @@ fn curator_block_payload(
         ContentBlock::AnthropicThinking {
             thinking,
             signature,
+            ..
         } => json!({
             "kind": "anthropic_thinking",
             "thinking": thinking,
             "signature_present": !signature.is_empty()
+        }),
+        ContentBlock::AnthropicRedactedThinking { .. } => json!({
+            "kind": "anthropic_redacted_thinking",
+            "encrypted_data_present": true
         }),
         ContentBlock::OpenAIReasoning {
             id,
@@ -3098,6 +3103,11 @@ mod tests {
                 ContentBlock::AnthropicThinking {
                     thinking: "anthropic reasoning needed for the summary".to_string(),
                     signature: anthropic_signature.to_string(),
+                    binding: Some(crate::message::AnthropicThinkingBinding {
+                        model: "claude-test".to_string(),
+                        prefix_digest: "anthropic-prefix-v1:test".to_string(),
+                        predecessor: None,
+                    }),
                 },
                 ContentBlock::OpenAIReasoning {
                     id: "reasoning".to_string(),

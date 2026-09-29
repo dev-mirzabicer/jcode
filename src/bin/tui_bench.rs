@@ -647,6 +647,7 @@ fn stored_message_visible_text(message: &jcode::session::StoredMessage) -> Strin
             }
             ContentBlock::OpenAICompaction { .. }
             | ContentBlock::AnthropicThinking { .. }
+            | ContentBlock::AnthropicRedactedThinking { .. }
             | ContentBlock::ReasoningTrace { .. }
             | ContentBlock::OpenAIReasoning { .. } => {}
         }

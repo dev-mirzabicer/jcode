@@ -659,7 +659,8 @@ struct NativeClaudeStreamOutcome {
     /// reasoning text, which we must classify as `opaque`/`none`, not `streamed`.
     reasoning_text_len: usize,
     /// Saw an *opaque* reasoning signal: a `thought_signature` (Gemini-3), a
-    /// `ThinkingSignatureDelta`, or an `OpenAIReasoning` item. This is the
+    /// `ThinkingSignatureDelta`, a signed Anthropic block
+    /// (`ReplayableReasoning`), or an `OpenAIReasoning` item. This is the
     /// evidence that the model reasoned even though it never streamed the text.
     saw_reasoning_signal: bool,
     /// Total stream events observed, for diagnosing empty/odd streams.
@@ -722,8 +723,9 @@ impl NativeClaudeStreamOutcome {
     /// Classify how this turn exposed the model's reasoning:
     /// - `streamed`: streamed visible reasoning text (`ThinkingDelta`).
     /// - `opaque`: no reasoning text, but an opaque reasoning signal was present
-    ///   (a `thought_signature`, a `ThinkingSignatureDelta`, or an
-    ///   `OpenAIReasoning` item). Legitimate and common (Gemini-3, OpenAI).
+    ///   (a `thought_signature`, a `ThinkingSignatureDelta`, a signed
+    ///   Anthropic block, or an `OpenAIReasoning` item). Legitimate and common
+    ///   (Gemini-3, OpenAI, Claude under `display: "omitted"`).
     /// - `none`: neither was observed.
     ///
     /// All three are valid; the reasoning checkpoint records the classification
@@ -782,7 +784,7 @@ async fn consume_native_stream(
                         outcome.saw_reasoning_signal = true;
                     }
                 }
-                StreamEvent::OpenAIReasoning { .. } => {
+                StreamEvent::OpenAIReasoning { .. } | StreamEvent::ReplayableReasoning(_) => {
                     outcome.saw_reasoning_signal = true;
                 }
                 StreamEvent::ToolUseStart { id, name } => {

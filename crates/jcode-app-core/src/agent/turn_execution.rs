@@ -1675,6 +1675,7 @@ impl Agent {
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::AnthropicRedactedThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");

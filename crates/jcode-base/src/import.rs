@@ -460,6 +460,7 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
             ContentBlock::Reasoning { .. }
             | ContentBlock::ReasoningTrace { .. }
             | ContentBlock::AnthropicThinking { .. }
+            | ContentBlock::AnthropicRedactedThinking { .. }
             | ContentBlock::OpenAIReasoning { .. }
             | ContentBlock::OpenAICompaction { .. } => {
                 changed = true;

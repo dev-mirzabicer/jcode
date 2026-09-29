@@ -84,6 +84,11 @@ fn raw_tool_fixture() -> Vec<StoredMessage> {
                 ContentBlock::AnthropicThinking {
                     thinking: "signed Anthropic thinking".to_string(),
                     signature: "anthropic-signature".to_string(),
+                    binding: Some(jcode_message_types::AnthropicThinkingBinding {
+                        model: "claude-test".to_string(),
+                        prefix_digest: "anthropic-prefix-v1:test".to_string(),
+                        predecessor: None,
+                    }),
                 },
                 ContentBlock::OpenAIReasoning {
                     id: "rs_projected".to_string(),

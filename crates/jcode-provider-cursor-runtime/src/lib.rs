@@ -55,6 +55,7 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
                 ContentBlock::Reasoning { .. }
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
+                | ContentBlock::AnthropicRedactedThinking { .. }
                 | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::ToolUse { name, input, .. } => {
                     out.push_str("[tool_use ");
@@ -130,6 +131,7 @@ fn validate_projected_messages(
             ContentBlock::Reasoning { .. }
             | ContentBlock::ReasoningTrace { .. }
             | ContentBlock::AnthropicThinking { .. }
+            | ContentBlock::AnthropicRedactedThinking { .. }
             | ContentBlock::OpenAIReasoning { .. }
             | ContentBlock::OpenAICompaction { .. } => false,
         })

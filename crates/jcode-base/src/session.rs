@@ -2646,6 +2646,7 @@ impl Session {
                     ContentBlock::AnthropicThinking { thinking, .. } => {
                         *thinking = crate::message::redact_secrets(thinking);
                     }
+                    ContentBlock::AnthropicRedactedThinking { .. } => {}
                     ContentBlock::OpenAIReasoning { summary, .. } => {
                         for item in summary {
                             *item = crate::message::redact_secrets(item);

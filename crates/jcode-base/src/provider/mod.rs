@@ -126,21 +126,46 @@ pub use stream_timeout::{
     stream_idle_timeout_for_effort, stream_idle_timeout_multiplier_for_effort,
 };
 
-/// Whether reasoning deltas should be persisted in session history for later
-/// provider context reconstruction.
+/// The reasoning kind an assistant turn keeps for replay when `provider` will
+/// receive the next request, or `None` to keep reasoning as history-only
+/// traces.
 ///
-/// Display is controlled separately by `display.show_thinking`. Persist only
-/// when a provider request builder can safely send the stored block back in
-/// the provider-native shape. Anthropic is included only because we preserve
-/// its thinking signatures in `ContentBlock::AnthropicThinking`.
-pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
+/// It comes from the runtime the request dispatches to
+/// ([`Provider::reasoning_replay_kind`]), gated by the
+/// `provider.preserve_reasoning_context` setting. Display is controlled
+/// separately by `display.show_thinking`.
+pub fn stored_reasoning_replay_kind(
+    provider: &dyn Provider,
+) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
     if !crate::config::config().provider.preserve_reasoning_context {
-        return false;
+        return None;
     }
-    matches!(
-        provider_name.to_ascii_lowercase().as_str(),
-        "openrouter" | "anthropic" | "openai"
-    )
+    provider.reasoning_replay_kind()
+}
+
+/// Whether top-level Claude sessions (dispatched through [`MultiProvider`])
+/// replay Anthropic thinking.
+///
+/// INT-01 activates top-level replay only in WP-05, after append-only delivery
+/// (WP-03) and the context-control rule (WP-04) exist; until then they keep
+/// thinking as history-only traces, as before INT-01. Children created through
+/// the model roster talk to the concrete Anthropic runtime and replay already.
+/// This is an internal switch, not configuration, and it is removed at the
+/// INT-01 closeout (DESIGN §8).
+const TOP_LEVEL_ANTHROPIC_THINKING_REPLAY: bool = false;
+
+fn top_level_replay_kind(
+    runtime_kind: Option<jcode_provider_core::ContextReasoningBlockKind>,
+    anthropic_replay_enabled: bool,
+) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
+    match runtime_kind {
+        Some(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking)
+            if !anthropic_replay_enabled =>
+        {
+            None
+        }
+        kind => kind,
+    }
 }
 
 // Keep inactive direct profiles on the same 15-minute soft-refresh cadence as
@@ -2298,21 +2323,16 @@ impl Provider for MultiProvider {
     }
 
     fn invalidate_context_continuation(&self, reason: &str) {
-        let provider = match self.active_provider() {
-            ActiveProvider::Claude => self.anthropic_provider().or_else(|| self.claude_provider()),
-            ActiveProvider::OpenAI => self.openai_provider(),
-            ActiveProvider::Copilot => self.copilot_provider(),
-            ActiveProvider::Antigravity => self.antigravity_provider(),
-            ActiveProvider::Gemini => self.gemini_provider(),
-            ActiveProvider::Cursor => self.cursor_provider(),
-            ActiveProvider::Bedrock => self
-                .bedrock_provider()
-                .map(|provider| provider as Arc<dyn Provider>),
-            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
-        };
-        if let Some(provider) = provider {
+        if let Some(provider) = self.runtime_for(self.active_provider()) {
             provider.invalidate_context_continuation(reason);
         }
+    }
+
+    fn reasoning_replay_kind(&self) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
+        let runtime_kind = self
+            .runtime_for(self.active_provider())?
+            .reasoning_replay_kind();
+        top_level_replay_kind(runtime_kind, TOP_LEVEL_ANTHROPIC_THINKING_REPLAY)
     }
 
     fn validate_projected_context(
@@ -2321,19 +2341,7 @@ impl Provider for MultiProvider {
         operations: &[ContextProjectionValidationOperation],
     ) -> ContextProjectionValidationReport {
         let active = self.active_provider();
-        let provider = match active {
-            ActiveProvider::Claude => self.anthropic_provider().or_else(|| self.claude_provider()),
-            ActiveProvider::OpenAI => self.openai_provider(),
-            ActiveProvider::Copilot => self.copilot_provider(),
-            ActiveProvider::Antigravity => self.antigravity_provider(),
-            ActiveProvider::Gemini => self.gemini_provider(),
-            ActiveProvider::Cursor => self.cursor_provider(),
-            ActiveProvider::Bedrock => self
-                .bedrock_provider()
-                .map(|provider| provider as Arc<dyn Provider>),
-            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
-        };
-        if let Some(provider) = provider {
+        if let Some(provider) = self.runtime_for(active) {
             return provider.validate_projected_context(messages, operations);
         }
 

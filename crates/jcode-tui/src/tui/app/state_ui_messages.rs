@@ -51,12 +51,14 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
         match block {
             ContentBlock::Text { text, .. }
             | ContentBlock::Reasoning { text }
-            | ContentBlock::ReasoningTrace { text } => {
+            | ContentBlock::ReasoningTrace { text }
+            | ContentBlock::AnthropicThinking { thinking: text, .. } => {
                 if !text.trim().is_empty() {
                     parts.push(text.trim().to_string());
                 }
             }
-            ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
+            ContentBlock::AnthropicRedactedThinking { .. }
+            | ContentBlock::OpenAIReasoning { .. } => {}
             ContentBlock::ToolUse { name, input, .. } => {
                 parts.push(format!("[tool:{} {}]", name, input));
             }

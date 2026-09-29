@@ -85,8 +85,17 @@ mod tests {
                 let original=format!("  {}  ",serde_json::json!({"type":"tool_result","tool_use_id":tool.id,"extra":"keep","content":[{"type":"image","source":{"media_type":"image/png","data":"eA=="}}]}));
                 let received=crate::execution::received_sdk_result(&tool.id,body.clone(),false,Some(original.clone()));
                 if checkpoint {
-                    app.checkpoint_partial_local_provider_output("partial","","",&[],std::slice::from_ref(&tool),&std::collections::HashMap::from([(tool.id.clone(),received)]),&[],false).await?;
+                    let mut turn=crate::message::AssistantTurnAssembler::new();
+                    turn.reasoning_started();
+                    turn.reasoning_delta("plan");
+                    turn.replayable_reasoning(crate::message::ReplayableReasoningBlock::AnthropicThinking{thinking:"plan".into(),signature:"sig".into(),binding:crate::message::AnthropicThinkingBinding{model:"claude-opus-5-5".into(),prefix_digest:"anthropic-prefix-v1:test".into(),predecessor:None}});
+                    turn.reasoning_ended();
+                    turn.text("partial");
+                    turn.tool_use_started(&tool.id);
+                    app.checkpoint_partial_local_provider_output(&turn,std::slice::from_ref(&tool),&std::collections::HashMap::from([(tool.id.clone(),received)]),&[],Some(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking)).await?;
                     assert!(app.partial_output_persistence_error.is_none());
+                    let assistant=app.session.messages.iter().find(|message|message.role==Role::Assistant).expect("checkpointed assistant turn");
+                    assert!(matches!(assistant.content.as_slice(),[ContentBlock::AnthropicThinking{signature,..},ContentBlock::Text{text,..},ContentBlock::ToolUse{id,..}] if signature=="sig" && text=="partial" && id==&tool.id),"the checkpoint keeps stream order: {:?}",assistant.content);
                 } else {
                     let message=app.session.add_message(Role::Assistant,vec![ContentBlock::ToolUse{id:tool.id.clone(),name:tool.name.clone(),input:tool.input.clone(),thought_signature:None}]);
                     app.record_local_sdk_result(&tool,&message,received).await?;

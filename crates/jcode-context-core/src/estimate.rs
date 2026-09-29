@@ -28,13 +28,19 @@ pub fn estimate_content_block_chars(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => text.len(),
         ContentBlock::ReasoningTrace { .. } => 0,
+        // Thinking stored without a binding record is never replayed.
+        ContentBlock::AnthropicThinking { binding: None, .. } => 0,
         ContentBlock::AnthropicThinking {
             thinking,
             signature,
+            binding: Some(_),
         } => thinking
             .len()
             .saturating_add(signature.len())
             .saturating_add(token_overhead_chars(4)),
+        ContentBlock::AnthropicRedactedThinking { data, .. } => {
+            data.len().saturating_add(token_overhead_chars(4))
+        }
         ContentBlock::OpenAIReasoning {
             id,
             summary,
@@ -93,12 +99,16 @@ pub fn estimate_content_block_tokens(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => text_tokens(text),
         ContentBlock::ReasoningTrace { .. } => 0,
+        // Thinking stored without a binding record is never replayed.
+        ContentBlock::AnthropicThinking { binding: None, .. } => 0,
         ContentBlock::AnthropicThinking {
             thinking,
             signature,
+            binding: Some(_),
         } => text_tokens(thinking)
             .saturating_add(text_tokens(signature))
             .saturating_add(4),
+        ContentBlock::AnthropicRedactedThinking { data, .. } => text_tokens(data).saturating_add(4),
         ContentBlock::OpenAIReasoning {
             id,
             summary,

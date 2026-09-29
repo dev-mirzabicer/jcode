@@ -114,6 +114,7 @@ fn render_conversation(messages: &[Message]) -> String {
                 ContentBlock::Reasoning { .. }
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
+                | ContentBlock::AnthropicRedactedThinking { .. }
                 | ContentBlock::OpenAIReasoning { .. } => {}
             }
         }

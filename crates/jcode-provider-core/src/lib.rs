@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod anthropic_binding_diagnostics;
 pub mod attempt_tracker;
 pub mod auth_mode;
 pub mod catalog_refresh;
@@ -23,10 +24,11 @@ pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
-    AnthropicReasoningCaps, anthropic_context_mode, anthropic_decode_legacy_oauth_tool_name,
-    anthropic_effectively_1m, anthropic_is_1m_model, anthropic_oauth_beta_headers,
-    anthropic_reasoning_caps, anthropic_stainless_arch, anthropic_stainless_os,
-    anthropic_strip_1m_suffix, anthropic_tool_name_is_valid,
+    AnthropicReasoningCaps, ReasoningBinding, anthropic_context_mode,
+    anthropic_decode_legacy_oauth_tool_name, anthropic_effectively_1m, anthropic_is_1m_model,
+    anthropic_oauth_beta_headers, anthropic_reasoning_binding, anthropic_reasoning_caps,
+    anthropic_stainless_arch, anthropic_stainless_os, anthropic_strip_1m_suffix,
+    anthropic_tool_name_is_valid,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -442,6 +444,17 @@ pub trait Provider: Send + Sync {
     /// finish auth without an arbitrary debounce delay.
     fn auth_model_refresh_pending(&self) -> bool {
         false
+    }
+
+    /// The provider-native reasoning block kind this runtime replays in later
+    /// requests, or `None` when it replays none.
+    ///
+    /// This is the single decision for storing replayable reasoning: an
+    /// assistant turn keeps its replay blocks only when the runtime that will
+    /// receive them reports their kind. Orchestrators delegate to the runtime
+    /// they would dispatch to.
+    fn reasoning_replay_kind(&self) -> Option<ContextReasoningBlockKind> {
+        None
     }
 
     /// Get the reasoning effort level (if applicable).

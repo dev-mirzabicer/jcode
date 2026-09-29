@@ -212,57 +212,32 @@ impl Agent {
             .is_some_and(|context| context.provider_output_started)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "partial-output checkpoint mirrors the provider stream accumulators exactly"
-    )]
     pub(super) async fn checkpoint_partial_provider_output(
         &mut self,
-        text: &str,
-        reasoning: &str,
-        reasoning_signature: &str,
-        openai_reasoning_items: &[ContentBlock],
+        turn: &crate::message::AssistantTurnAssembler,
         tool_calls: &[ToolCall],
         sdk_tool_results: &std::collections::HashMap<String, crate::tool::ToolOutput>,
         generated_image_contexts: &[Vec<ContentBlock>],
-        store_reasoning_content: bool,
+        replay_kind: Option<jcode_provider_core::ContextReasoningBlockKind>,
         token_usage: Option<crate::session::StoredTokenUsage>,
     ) -> Result<()> {
         if !self.provider_output_started() && sdk_tool_results.is_empty() {
             return Ok(());
         }
 
-        let mut assistant_blocks = Vec::new();
-        if !text.is_empty() {
-            assistant_blocks.push(ContentBlock::Text {
-                text: text.to_string(),
-                cache_control: None,
-            });
-        }
-        crate::message::push_reasoning_blocks(
-            &mut assistant_blocks,
-            self.provider.name(),
-            reasoning,
-            Some(reasoning_signature),
-            store_reasoning_content,
-        );
-        if store_reasoning_content {
-            assistant_blocks.extend(openai_reasoning_items.iter().cloned());
-        }
-
-        let mut received_results = Vec::new();
-        for tool_call in tool_calls {
-            let Some(output) = sdk_tool_results.get(&tool_call.id) else {
-                continue;
-            };
-            assistant_blocks.push(ContentBlock::ToolUse {
-                id: tool_call.id.clone(),
-                name: tool_call.name.clone(),
-                input: tool_call.input.clone(),
-                thought_signature: tool_call.thought_signature.clone(),
-            });
-            received_results.push((tool_call, output));
-        }
+        // Only calls whose results were already received are kept; the turn
+        // otherwise keeps the order the provider produced.
+        let assistant_blocks = turn.content_blocks_with(replay_kind, tool_calls, |tool_call| {
+            sdk_tool_results.contains_key(&tool_call.id)
+        });
+        let received_results: Vec<_> = tool_calls
+            .iter()
+            .filter_map(|tool_call| {
+                sdk_tool_results
+                    .get(&tool_call.id)
+                    .map(|output| (tool_call, output))
+            })
+            .collect();
 
         let checkpointed = !assistant_blocks.is_empty()
             || !received_results.is_empty()

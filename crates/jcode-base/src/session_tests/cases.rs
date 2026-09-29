@@ -1799,6 +1799,57 @@ fn test_render_messages_renders_reasoning_before_answer_in_stored_order() {
 }
 
 #[test]
+fn test_render_messages_renders_signed_thinking_text_once() {
+    use jcode_render_core::REASONING_SENTINEL;
+
+    let _env_lock = lock_env();
+    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
+    crate::config::invalidate_config_cache();
+
+    let mut session = Session::create_with_id(
+        "session_render_signed_thinking_test".to_string(),
+        None,
+        Some("render signed thinking test".to_string()),
+    );
+    let binding = crate::message::AnthropicThinkingBinding {
+        model: "claude-opus-5-5".to_string(),
+        prefix_digest: "anthropic-prefix-v1:test".to_string(),
+        predecessor: None,
+    };
+    session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::AnthropicThinking {
+                thinking: "signed step".to_string(),
+                signature: "sig".to_string(),
+                binding: Some(binding.clone()),
+            },
+            ContentBlock::AnthropicRedactedThinking {
+                data: "opaque".to_string(),
+                binding,
+            },
+            ContentBlock::Text {
+                text: "Here is the answer.".to_string(),
+                cache_control: None,
+            },
+        ],
+    );
+
+    let rendered = render_messages(&session);
+    assert_eq!(rendered.len(), 1);
+    let content = &rendered[0].content;
+    assert_eq!(
+        content
+            .matches(&format!("*{0}signed step{0}*", REASONING_SENTINEL))
+            .count(),
+        1,
+        "signed thinking carries its own readable text: {content:?}"
+    );
+    assert!(!content.contains("opaque") && !content.contains("sig\n"));
+    assert!(content.find("signed step").unwrap() < content.find("Here is the answer.").unwrap());
+}
+
+#[test]
 fn test_render_messages_renders_persisted_reasoning() {
     use jcode_render_core::REASONING_SENTINEL;
 

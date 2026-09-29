@@ -9,14 +9,17 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub use jcode_message_types::{
-    CacheControl, ConnectionPhase, ContentBlock, InputShellResult, Message, Role, StreamEvent,
-    TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition, cache_relevant_message_hashes,
-    cache_relevant_message_value, cache_relevant_messages, ends_with_fresh_user_turn,
-    extend_stable_hash, messages_with_dynamic_system_context, sanitize_tool_id,
-    stable_message_hash,
+    AnthropicThinkingBinding, CacheControl, ConnectionPhase, ContentBlock, InputShellResult,
+    Message, ReplayableReasoningBlock, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall,
+    ToolDefinition, cache_relevant_message_hashes, cache_relevant_message_value,
+    cache_relevant_messages, ends_with_fresh_user_turn, extend_stable_hash,
+    messages_with_dynamic_system_context, sanitize_tool_id, stable_message_hash,
 };
 
+mod assistant_turn;
 mod notifications;
+
+pub use assistant_turn::AssistantTurnAssembler;
 
 pub use notifications::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
@@ -217,55 +220,6 @@ pub fn redact_secrets(text: &str) -> String {
 
 pub const GENERATED_IMAGE_TOOL_NAME: &str = "image_generation";
 pub const GENERATED_IMAGE_MAX_AUTO_VISION_BYTES: u64 = 20 * 1024 * 1024;
-
-/// Persist the model's reasoning for an assistant turn.
-///
-/// This always keeps a readable, history-only copy of the reasoning in the
-/// transcript (`ContentBlock::ReasoningTrace`) so the thinking can be recalled
-/// or debugged later. When `store_replay_context` is set, it *additionally*
-/// stores the provider-specific replay block (`AnthropicThinking` /
-/// `Reasoning`) that the provider needs echoed back on subsequent turns. To
-/// avoid storing the same readable text twice, the history trace is skipped
-/// when the replay block already captured the identical readable reasoning.
-pub fn push_reasoning_blocks(
-    blocks: &mut Vec<ContentBlock>,
-    provider_name: &str,
-    reasoning_content: &str,
-    reasoning_signature: Option<&str>,
-    store_replay_context: bool,
-) {
-    if reasoning_content.is_empty() {
-        return;
-    }
-
-    // Whether the replay block we stored already contains the readable text.
-    let mut readable_replay_stored = false;
-    if store_replay_context {
-        if provider_name.eq_ignore_ascii_case("anthropic") {
-            if let Some(signature) = reasoning_signature.filter(|s| !s.is_empty()) {
-                blocks.push(ContentBlock::AnthropicThinking {
-                    thinking: reasoning_content.to_string(),
-                    signature: signature.to_string(),
-                });
-                readable_replay_stored = true;
-            }
-        } else if provider_name.eq_ignore_ascii_case("openai") {
-            // OpenAI native reasoning items carry encrypted content, not readable
-            // text, so a separate history trace is still required below.
-        } else {
-            blocks.push(ContentBlock::Reasoning {
-                text: reasoning_content.to_string(),
-            });
-            readable_replay_stored = true;
-        }
-    }
-
-    if !readable_replay_stored {
-        blocks.push(ContentBlock::ReasoningTrace {
-            text: reasoning_content.to_string(),
-        });
-    }
-}
 
 pub fn generated_image_tool_input(
     path: &str,

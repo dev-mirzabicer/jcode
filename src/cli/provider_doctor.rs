@@ -5,7 +5,9 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result, anyhow};
 
 use crate::live_tests::LiveVerificationStageStatus;
-use jcode_provider_doctor::claude_contract::{CLAUDE_OAUTH_CONTRACT, run_claude_oauth_contract};
+use jcode_provider_doctor::claude_contract::{
+    CLAUDE_OAUTH_CONTRACT, capture_claude_sse_fixtures, run_claude_oauth_contract,
+};
 use jcode_provider_doctor::{
     DoctorReport, DoctorTier, NativeProviderKind, native_doctor_supports_provider,
     run_antigravity_native_e2e, run_claude_native_e2e, run_generic_native_e2e, run_provider_e2e,
@@ -92,6 +94,7 @@ pub async fn run_provider_contract_command(
     contract: &str,
     model: Option<&str>,
     out: Option<std::path::PathBuf>,
+    capture_sse: Option<std::path::PathBuf>,
 ) -> Result<()> {
     use crate::provider::Provider;
     use jcode_provider_anthropic_runtime::AnthropicProvider;
@@ -115,6 +118,12 @@ pub async fn run_provider_contract_command(
         crate::tool::Registry::builtin_tool_surface(std::sync::Arc::new(AnthropicProvider::new()))
             .await;
     let tools = registry.definitions(None).await;
+    if let Some(dir) = capture_sse {
+        for path in capture_claude_sse_fixtures(&runtime, &tools, &dir).await? {
+            println!("Captured {}", path.display());
+        }
+        return Ok(());
+    }
     let report = run_claude_oauth_contract(&runtime, &tools).await?;
 
     let path = match out {
@@ -147,6 +156,9 @@ pub async fn run_provider_contract_command(
             "  [{:<8}] {:<29} {} observed={:?} gate0={:?}\n             {}",
             verdict, probe.id, probe.status, probe.observed, probe.gate0, probe.summary
         );
+    }
+    for note in &report.notes {
+        println!("  note: {note}");
     }
     println!("Report: {}", path.display());
     let drift = report.drift();

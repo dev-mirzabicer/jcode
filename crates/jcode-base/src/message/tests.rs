@@ -878,77 +878,39 @@ fn parse_background_task_notification_markdown_extracts_fields() -> Result<()> {
 }
 
 #[test]
-fn push_reasoning_blocks_always_captures_history() {
-    // seal/claude-api (replay disabled) must still persist a history trace.
-    let mut blocks = Vec::new();
-    push_reasoning_blocks(&mut blocks, "anthropic", "thinking about X", None, false);
-    assert_eq!(blocks.len(), 1);
-    match &blocks[0] {
-        ContentBlock::ReasoningTrace { text } => assert_eq!(text, "thinking about X"),
-        other => panic!("expected ReasoningTrace, got {other:?}"),
-    }
+fn anthropic_reasoning_blocks_round_trip_through_persistence_byte_exact() {
+    let binding = AnthropicThinkingBinding {
+        model: "claude-sonnet-5-5".to_string(),
+        prefix_digest: "anthropic-prefix-v1:abc".to_string(),
+        predecessor: Some("def".to_string()),
+    };
+    let blocks = vec![
+        ContentBlock::AnthropicThinking {
+            thinking: String::new(),
+            signature: "sig\u{1F512}/+=".to_string(),
+            binding: Some(binding.clone()),
+        },
+        ContentBlock::AnthropicRedactedThinking {
+            data: "opaque==".to_string(),
+            binding,
+        },
+    ];
+    let json = serde_json::to_string(&blocks).expect("serialize");
+    let parsed: Vec<ContentBlock> = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(serde_json::to_string(&parsed).expect("reserialize"), json);
+    assert!(
+        json.contains("\"type\":\"anthropic_redacted_thinking\""),
+        "json={json}"
+    );
 }
 
 #[test]
-fn push_reasoning_blocks_anthropic_signed_replay() {
-    let mut blocks = Vec::new();
-    push_reasoning_blocks(
-        &mut blocks,
-        "anthropic",
-        "signed thought",
-        Some("sig"),
-        true,
-    );
-    // Signed thinking is replayable AND readable, so no extra trace is needed.
-    assert_eq!(blocks.len(), 1);
-    match &blocks[0] {
-        ContentBlock::AnthropicThinking {
-            thinking,
-            signature,
-        } => {
-            assert_eq!(thinking, "signed thought");
-            assert_eq!(signature, "sig");
-        }
+fn thinking_stored_before_bindings_decodes_without_one() {
+    let legacy = r#"{"type":"anthropic_thinking","thinking":"old","signature":"s1s2"}"#;
+    match serde_json::from_str::<ContentBlock>(legacy).expect("legacy block decodes") {
+        ContentBlock::AnthropicThinking { binding, .. } => assert!(binding.is_none()),
         other => panic!("expected AnthropicThinking, got {other:?}"),
     }
-}
-
-#[test]
-fn push_reasoning_blocks_anthropic_unsigned_falls_back_to_trace() {
-    let mut blocks = Vec::new();
-    // Replay requested but no signature: cannot replay, must still keep history.
-    push_reasoning_blocks(&mut blocks, "anthropic", "unsigned thought", None, true);
-    assert_eq!(blocks.len(), 1);
-    assert!(matches!(blocks[0], ContentBlock::ReasoningTrace { .. }));
-}
-
-#[test]
-fn push_reasoning_blocks_openai_keeps_readable_trace() {
-    let mut blocks = Vec::new();
-    // OpenAI native reasoning is encrypted/unreadable, so a readable trace is
-    // always added for history regardless of replay setting.
-    push_reasoning_blocks(&mut blocks, "openai", "openai reasoning", None, true);
-    assert_eq!(blocks.len(), 1);
-    match &blocks[0] {
-        ContentBlock::ReasoningTrace { text } => assert_eq!(text, "openai reasoning"),
-        other => panic!("expected ReasoningTrace, got {other:?}"),
-    }
-}
-
-#[test]
-fn push_reasoning_blocks_openrouter_replay_is_readable() {
-    let mut blocks = Vec::new();
-    push_reasoning_blocks(&mut blocks, "openrouter", "or reasoning", None, true);
-    // OpenRouter stores a readable Reasoning block, which doubles as history.
-    assert_eq!(blocks.len(), 1);
-    assert!(matches!(blocks[0], ContentBlock::Reasoning { .. }));
-}
-
-#[test]
-fn push_reasoning_blocks_skips_empty() {
-    let mut blocks = Vec::new();
-    push_reasoning_blocks(&mut blocks, "anthropic", "", None, false);
-    assert!(blocks.is_empty());
 }
 
 #[test]

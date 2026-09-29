@@ -106,6 +106,7 @@ impl SnapshotRead {
                     ContentBlock::ToolResult{tool_use_id,is_error,..}=>serde_json::json!({"type":"tool_result","provider_tool_use_id":tool_use_id,"is_error":is_error,"detail":"expand the snapshot-bound tool reference"}),
                     ContentBlock::Reasoning{text}|ContentBlock::ReasoningTrace{text}=>serde_json::json!({"type":"reasoning","characters":text.chars().count(),"detail":"read transcript for stored content"}),
                     ContentBlock::AnthropicThinking{thinking,..}=>serde_json::json!({"type":"signed_reasoning","characters":thinking.chars().count()}),
+                    ContentBlock::AnthropicRedactedThinking{..}=>serde_json::json!({"type":"signed_reasoning","encrypted_payload_present":true}),
                     ContentBlock::OpenAIReasoning{summary,encrypted_content,..}=>serde_json::json!({"type":"reasoning","summary":summary,"encrypted_payload_present":encrypted_content.is_some()}),
                     ContentBlock::Image{media_type,..}=>serde_json::json!({"type":"image","media_type":media_type,"detail":"stored payload available in transcript"}),
                     ContentBlock::OpenAICompaction{..}=>serde_json::json!({"type":"encrypted_compaction","text_unavailable":true}),

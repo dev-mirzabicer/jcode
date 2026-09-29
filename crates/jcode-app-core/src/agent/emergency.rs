@@ -535,6 +535,7 @@ fn is_replayed_reasoning(block: &ContentBlock) -> bool {
         block,
         ContentBlock::Reasoning { .. }
             | ContentBlock::AnthropicThinking { .. }
+            | ContentBlock::AnthropicRedactedThinking { .. }
             | ContentBlock::OpenAIReasoning { .. }
     )
 }

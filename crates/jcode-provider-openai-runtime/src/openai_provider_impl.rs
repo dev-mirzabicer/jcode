@@ -682,6 +682,10 @@ impl Provider for OpenAIProvider {
         "openai"
     }
 
+    fn reasoning_replay_kind(&self) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
+        Some(jcode_provider_core::ContextReasoningBlockKind::OpenAiReasoning)
+    }
+
     fn on_auth_changed(&self) {
         self.reload_credentials_now();
     }

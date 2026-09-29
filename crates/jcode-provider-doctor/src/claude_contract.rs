@@ -7,7 +7,7 @@
 //! headers, and compares each outcome with the Gate 0 observation so that a
 //! provider change shows up as recorded drift rather than as a field failure.
 //!
-//! Every request spends subscription quota (roughly fifteen requests, a few
+//! Every request spends subscription quota (roughly seventeen requests, a few
 //! of them carrying the complete tool surface). The credential never leaves
 //! the runtime; the returned report carries responses with signatures
 //! replaced by their length.
@@ -24,13 +24,6 @@ use serde_json::{Value, json};
 
 pub const CLAUDE_OAUTH_CONTRACT: &str = "claude-oauth";
 
-const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
-
-/// Models Gate 0 measured as binding signed thinking to the preceding
-/// conversation. It is observation data for comparing outcomes, not policy:
-/// the runtime's binding policy is owned elsewhere (INT-01 D11).
-const GATE0_PREFIX_BOUND_MODELS: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5"];
-
 /// Models Gate 0 measured at all. Others have no recorded expectation.
 const GATE0_MEASURED_MODELS: &[&str] = &[
     "claude-opus-5-5",
@@ -40,6 +33,10 @@ const GATE0_MEASURED_MODELS: &[&str] = &[
 ];
 
 const PROBE_SYSTEM: &str = "You are a probe assistant for an API compatibility test. Follow the user's instructions exactly and keep answers minimal.";
+
+/// A second step that needs fresh reasoning and another tool call, so the
+/// conversation holds two turns of signed thinking (probe `T8`).
+const FOLLOW_UP_TASK: &str = "Now think it through again: after arriving, the train continues 97 km at 83 km/h. Compute the new exact arrival time (HH:MM, rounded down), then use the bash tool to run exactly `echo parity-probe-2 <HH:MM>` with your answer.";
 
 const THINKING_TASK: &str = "Think it through step by step before acting: a train leaves at 14:37 and travels 283 km at 91 km/h, then waits 17 minutes, then travels 146 km at 73 km/h. Compute the exact arrival time (HH:MM, rounded down), then use the bash tool to run exactly `echo parity-probe <HH:MM>` with your answer. After you see the result, reply with exactly: DONE";
 
@@ -80,6 +77,9 @@ pub struct ContractReport {
     pub tools: Vec<String>,
     pub strict_candidate_tools: Vec<String>,
     pub probes: Vec<ContractProbe>,
+    /// Probes that could not run because the model did not produce the turn
+    /// they need.
+    pub notes: Vec<String>,
 }
 
 impl ContractReport {
@@ -126,11 +126,10 @@ impl Runner<'_> {
         question: &'static str,
         gate0: Expect,
         body: &Value,
-        extra_beta: Option<&str>,
     ) -> Result<Value> {
         let (status, response) = self
             .provider
-            .send_contract_request_for_doctor(body, extra_beta)
+            .send_contract_request_for_doctor(body)
             .await
             .with_context(|| format!("probe {id}"))?;
         let observed = classify(status, &response);
@@ -163,9 +162,9 @@ fn classify(status: u16, response: &Value) -> Gate0Expectation {
         .get("input_transformations")
         .and_then(Value::as_array)
         .is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| item.to_string().contains("prefix_binding_mismatch"))
+            items.iter().any(|item| {
+                item["type"] == "thinking_dropped" && item["reason"] == "prefix_binding_mismatch"
+            })
         });
     if dropped {
         Gate0Expectation::ThinkingDropped
@@ -183,7 +182,10 @@ pub async fn run_claude_oauth_contract(
     let model = provider.model();
     let mut runner = Runner {
         provider,
-        prefix_bound: GATE0_PREFIX_BOUND_MODELS.contains(&model.as_str()),
+        // The runtime's per-model binding policy (INT-01 D11) decides which
+        // outcomes the binding probes expect.
+        prefix_bound: jcode_provider_core::anthropic_reasoning_binding(&model)
+            == jcode_provider_core::ReasoningBinding::PrefixBound,
         measured: GATE0_MEASURED_MODELS.contains(&model.as_str()),
         probes: Vec::new(),
     };
@@ -199,7 +201,6 @@ pub async fn run_claude_oauth_contract(
             "G0.1/G0.6/R02: the production request (every tool under its registry name, full schemas, parallel calls disabled) is accepted",
             Expect::Always(Gate0Expectation::Accepted),
             &surface,
-            None,
         )
         .await?;
 
@@ -217,7 +218,6 @@ pub async fn run_claude_oauth_contract(
             "G0.7: strict:true on the bash tool's Anthropic schema (no strict normalization) is rejected",
             Expect::Always(Gate0Expectation::Rejected),
             &raw_strict,
-            None,
         )
         .await?;
 
@@ -228,7 +228,6 @@ pub async fn run_claude_oauth_contract(
             "R04: strict:true with the shared strict normalizer on exactly the tools GPT marks strict",
             Expect::Always(Gate0Expectation::Undetermined),
             &strict_surface,
-            None,
         )
         .await?;
 
@@ -240,7 +239,6 @@ pub async fn run_claude_oauth_contract(
             "G0.2: thinking.block_binding with the binding-controls beta is accepted",
             Expect::Always(Gate0Expectation::Accepted),
             &binding,
-            Some(BINDING_BETA),
         )
         .await?;
 
@@ -256,7 +254,6 @@ pub async fn run_claude_oauth_contract(
             "G0.5: temperature 1.0 with thinking omitted is tolerated",
             Expect::Always(Gate0Expectation::Accepted),
             &sampled,
-            None,
         )
         .await?;
 
@@ -271,7 +268,6 @@ pub async fn run_claude_oauth_contract(
             "an assistant turn with signed thinking before a tool_use is produced",
             Expect::Always(Gate0Expectation::Accepted),
             &t1,
-            None,
         )
         .await?;
     let assistant = first["content"].clone();
@@ -283,8 +279,13 @@ pub async fn run_claude_oauth_contract(
     let has_thinking = assistant
         .as_array()
         .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "thinking"));
+    let mut notes = Vec::new();
     if let (Some(tool_id), true) = (tool_id, has_thinking) {
-        replay_probes(&mut runner, &t1, &assistant, &tool_id).await?;
+        replay_probes(&mut runner, &t1, &assistant, &tool_id, &mut notes).await?;
+    } else {
+        notes.push(
+            "T1 produced no signed thinking before a tool_use; T2-T8 did not run".to_string(),
+        );
     }
 
     Ok(ContractReport {
@@ -296,7 +297,152 @@ pub async fn run_claude_oauth_contract(
         tools: tools.iter().map(|t| t.name.clone()).collect(),
         strict_candidate_tools,
         probes: runner.probes,
+        notes,
     })
+}
+
+/// Capture raw SSE responses for the runtime's reasoning-capture fixtures
+/// (INT-01/WP-02): the T1 thinking task with readable summaries, and again
+/// with the model's default `display: "omitted"`, where signed blocks carry
+/// empty text, and the next turn after the tool result. Each file holds only
+/// what the provider streamed; signatures are kept as opaque test data. Spends
+/// three requests.
+pub async fn capture_claude_sse_fixtures(
+    provider: &AnthropicProvider,
+    tools: &[ToolDefinition],
+    dir: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    let bash: Vec<ToolDefinition> = tools.iter().filter(|t| t.name == "bash").cloned().collect();
+    anyhow::ensure!(!bash.is_empty(), "the tool surface has no bash tool");
+    provider.set_reasoning_effort("high")?;
+    let summarized = provider
+        .contract_request_body_for_doctor(&[Message::user(THINKING_TASK)], &bash, PROBE_SYSTEM)
+        .await?;
+    let mut omitted = summarized.clone();
+    if let Some(thinking) = omitted.get_mut("thinking").and_then(Value::as_object_mut) {
+        thinking.remove("display");
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let model = provider.model();
+    let mut written = Vec::new();
+    let mut summarized_sse = String::new();
+    for (name, body) in [("summarized", &summarized), ("omitted", &omitted)] {
+        let (status, sse) = provider.stream_contract_request_for_doctor(body).await?;
+        anyhow::ensure!(
+            status == 200,
+            "capture `{name}` returned HTTP {status}: {sse}"
+        );
+        let path = dir.join(format!("{model}-thinking-{name}.sse"));
+        std::fs::write(&path, &sse).with_context(|| format!("writing {}", path.display()))?;
+        written.push(path);
+        if name == "summarized" {
+            summarized_sse = sse;
+        }
+    }
+
+    // The next turn, after the tool result: it replays the first turn exactly
+    // as streamed, under `prefix_mismatch_behavior: "error"`, so acceptance
+    // shows the replay is byte-exact. Between tool calls, current models
+    // return progress notes as further signed thinking blocks.
+    let assistant = assistant_content_from_sse(&summarized_sse)?;
+    let tool_id = assistant
+        .as_array()
+        .and_then(|blocks| blocks.iter().find(|b| b["type"] == "tool_use"))
+        .and_then(|block| block["id"].as_str())
+        .context("the captured turn has no tool_use")?
+        .to_string();
+    let mut follow_up = summarized.clone();
+    follow_up["thinking"]["block_binding"] = json!({"prefix_mismatch_behavior": "error"});
+    follow_up["messages"] = json!([
+        {"role": "user", "content": [{"type": "text", "text": THINKING_TASK}]},
+        {"role": "assistant", "content": assistant},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "parity-probe"},
+            {"type": "text", "text": FOLLOW_UP_TASK}
+        ]}
+    ]);
+    let (status, sse) = provider
+        .stream_contract_request_for_doctor(&follow_up)
+        .await?;
+    anyhow::ensure!(
+        status == 200,
+        "capture `follow-up` returned HTTP {status}: {sse}"
+    );
+    let path = dir.join(format!("{model}-thinking-follow-up.sse"));
+    std::fs::write(&path, sse).with_context(|| format!("writing {}", path.display()))?;
+    written.push(path);
+    Ok(written)
+}
+
+/// Rebuild an assistant turn's content from its SSE stream by concatenating
+/// each block's deltas, independently of the runtime's parser.
+fn assistant_content_from_sse(sse: &str) -> Result<Value> {
+    let mut blocks: Vec<Value> = Vec::new();
+    let mut tool_inputs: Vec<String> = Vec::new();
+    for line in sse.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let event: Value = serde_json::from_str(data.trim())?;
+        let index = event["index"].as_u64().unwrap_or_default() as usize;
+        match event["type"].as_str() {
+            Some("content_block_start") => {
+                let mut block = event["content_block"].clone();
+                if let Some(object) = block.as_object_mut() {
+                    object.remove("caller");
+                }
+                blocks.resize(index + 1, Value::Null);
+                tool_inputs.resize(index + 1, String::new());
+                blocks[index] = block;
+            }
+            Some("content_block_delta") => {
+                let delta = &event["delta"];
+                let block = &mut blocks[index];
+                match delta["type"].as_str() {
+                    Some("thinking_delta") => append(block, "thinking", &delta["thinking"]),
+                    Some("signature_delta") => append(block, "signature", &delta["signature"]),
+                    Some("text_delta") => append(block, "text", &delta["text"]),
+                    Some("input_json_delta") => {
+                        tool_inputs[index].push_str(delta["partial_json"].as_str().unwrap_or(""))
+                    }
+                    _ => {}
+                }
+            }
+            Some("content_block_stop") if blocks[index]["type"] == "tool_use" => {
+                let input = &tool_inputs[index];
+                blocks[index]["input"] = if input.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(input)?
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(Value::Array(blocks))
+}
+
+fn append(block: &mut Value, field: &str, text: &Value) {
+    let mut current = block[field].as_str().unwrap_or_default().to_string();
+    current.push_str(text.as_str().unwrap_or_default());
+    block[field] = json!(current);
+}
+
+/// The T1 body with `thinking.block_binding` removed. Production requests for
+/// prefix-bound models carry the control; the Gate 0 probes that ask what
+/// happens without it must not.
+fn without_binding(mut body: Value) -> Value {
+    if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut) {
+        thinking.remove("block_binding");
+    }
+    body
+}
+
+fn thinking_blocks(content: &Value) -> usize {
+    content
+        .as_array()
+        .map(|blocks| blocks.iter().filter(|b| b["type"] == "thinking").count())
+        .unwrap_or(0)
 }
 
 async fn replay_probes(
@@ -304,6 +450,7 @@ async fn replay_probes(
     t1: &Value,
     assistant: &Value,
     tool_id: &str,
+    notes: &mut Vec<String>,
 ) -> Result<()> {
     let replay = |user_text: &str, assistant: &Value| {
         let mut body = t1.clone();
@@ -326,7 +473,6 @@ async fn replay_probes(
             "unchanged replay of signed thinking is accepted",
             Expect::Always(Gate0Expectation::Accepted),
             &replay(THINKING_TASK, assistant),
-            None,
         )
         .await?;
     runner
@@ -334,8 +480,7 @@ async fn replay_probes(
             "T3",
             "an edited earlier message without a binding field is silently accepted (account not enforced)",
             Expect::Always(Gate0Expectation::Accepted),
-            &replay(&edited, assistant),
-            None,
+            &without_binding(replay(&edited, assistant)),
         )
         .await?;
     runner
@@ -344,7 +489,6 @@ async fn replay_probes(
             "the same edit with prefix_mismatch_behavior=error is rejected on prefix-bound models",
             Expect::IfPrefixBound(Gate0Expectation::Rejected),
             &with_binding(replay(&edited, assistant), "error"),
-            Some(BINDING_BETA),
         )
         .await?;
     runner
@@ -353,7 +497,6 @@ async fn replay_probes(
             "the same edit with drop_block reports the dropped thinking on prefix-bound models",
             Expect::IfPrefixBound(Gate0Expectation::ThinkingDropped),
             &with_binding(replay(&edited, assistant), "drop_block"),
-            Some(BINDING_BETA),
         )
         .await?;
 
@@ -373,7 +516,6 @@ async fn replay_probes(
             "a per-turn change appended to system invalidates earlier thinking on prefix-bound models",
             Expect::IfPrefixBound(Gate0Expectation::ThinkingDropped),
             &changed_system,
-            Some(BINDING_BETA),
         )
         .await?;
 
@@ -389,8 +531,7 @@ async fn replay_probes(
             "T4",
             "a doubled (spliced) signature is not rejected",
             Expect::Always(Gate0Expectation::Accepted),
-            &replay(THINKING_TASK, &spliced),
-            None,
+            &without_binding(replay(THINKING_TASK, &spliced)),
         )
         .await?;
 
@@ -403,8 +544,7 @@ async fn replay_probes(
             "T5",
             "thinking moved after tool_use is not rejected",
             Expect::Always(Gate0Expectation::Accepted),
-            &replay(THINKING_TASK, &json!(reordered)),
-            None,
+            &without_binding(replay(THINKING_TASK, &json!(reordered))),
         )
         .await?;
     runner
@@ -412,8 +552,57 @@ async fn replay_probes(
             "T6",
             "stripping every thinking block is accepted",
             Expect::Always(Gate0Expectation::Accepted),
-            &replay(THINKING_TASK, &json!(rest)),
-            None,
+            &without_binding(replay(THINKING_TASK, &json!(rest))),
+        )
+        .await?;
+
+    // T8: jcode treats a replayed block as valid when the thinking replayed
+    // before it is its recorded predecessor or it is the first one replayed
+    // (INT-01/WP-02, from the documented preserved-thinking rule). This checks
+    // the permissive half live: strip the first turn's thinking and replay the
+    // second turn's under `error`.
+    let mut follow_up = t1.clone();
+    follow_up["messages"] = json!([
+        {"role": "user", "content": [{"type": "text", "text": THINKING_TASK}]},
+        {"role": "assistant", "content": assistant},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "parity-probe"},
+            {"type": "text", "text": FOLLOW_UP_TASK}
+        ]}
+    ]);
+    let second = runner
+        .send(
+            "T8a",
+            "a second signed-thinking turn over an unchanged history is accepted",
+            Expect::Always(Gate0Expectation::Accepted),
+            &follow_up,
+        )
+        .await?;
+    let second_assistant = second["content"].clone();
+    let second_tool_id = second_assistant
+        .as_array()
+        .and_then(|blocks| blocks.iter().find(|b| b["type"] == "tool_use"))
+        .and_then(|block| block["id"].as_str())
+        .map(str::to_string);
+    let Some(second_tool_id) = second_tool_id.filter(|_| thinking_blocks(&second_assistant) > 0)
+    else {
+        notes.push("T8a produced no signed thinking before a tool_use; T8 did not run".to_string());
+        return Ok(());
+    };
+    let mut leading_stripped = with_binding(follow_up.clone(), "error");
+    leading_stripped["messages"][1]["content"] = json!(rest);
+    if let Some(messages) = leading_stripped["messages"].as_array_mut() {
+        messages.push(json!({"role": "assistant", "content": second_assistant}));
+        messages.push(json!({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": second_tool_id, "content": "parity-probe-2"}
+        ]}));
+    }
+    runner
+        .send(
+            "T8",
+            "stripping the first turn's thinking (a leading run) keeps the second turn's thinking valid under prefix_mismatch_behavior=error",
+            Expect::Always(Gate0Expectation::Accepted),
+            &leading_stripped,
         )
         .await?;
     Ok(())

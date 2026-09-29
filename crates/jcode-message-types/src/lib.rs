@@ -108,6 +108,70 @@ impl CacheControl {
     }
 }
 
+/// Where a signed Anthropic reasoning block was produced.
+///
+/// Anthropic binds a thinking block's signature to the conversation that
+/// produced it: the top-level `system`, the tool set and every earlier message,
+/// plus a chain to the previous thinking block. jcode records that binding at
+/// capture time so it can later tell, without asking the provider, whether a
+/// replay would still be accepted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AnthropicThinkingBinding {
+    /// The model that produced the block, as the provider reported it.
+    pub model: String,
+    /// Digest of the provider prefix the block was produced under, including
+    /// its scheme label (see `jcode_provider_anthropic::binding`).
+    pub prefix_digest: String,
+    /// Fingerprint of the thinking block that preceded this one in the
+    /// request the provider saw, or `None` when it was the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<String>,
+}
+
+/// A complete provider-signed reasoning block, emitted once the provider has
+/// finished streaming it. `StreamEvent::ThinkingDelta` drives live display;
+/// this is the stored, replayable form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayableReasoningBlock {
+    AnthropicThinking {
+        thinking: String,
+        signature: String,
+        binding: AnthropicThinkingBinding,
+    },
+    AnthropicRedactedThinking {
+        data: String,
+        binding: AnthropicThinkingBinding,
+    },
+}
+
+impl ReplayableReasoningBlock {
+    /// The readable reasoning this block carries (empty for redacted blocks
+    /// and for thinking the provider did not display).
+    pub fn readable_text(&self) -> &str {
+        match self {
+            Self::AnthropicThinking { thinking, .. } => thinking,
+            Self::AnthropicRedactedThinking { .. } => "",
+        }
+    }
+
+    pub fn into_content_block(self) -> ContentBlock {
+        match self {
+            Self::AnthropicThinking {
+                thinking,
+                signature,
+                binding,
+            } => ContentBlock::AnthropicThinking {
+                thinking,
+                signature,
+                binding: Some(binding),
+            },
+            Self::AnthropicRedactedThinking { data, binding } => {
+                ContentBlock::AnthropicRedactedThinking { data, binding }
+            }
+        }
+    }
+}
+
 /// Content block within a message
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -130,10 +194,21 @@ pub enum ContentBlock {
         text: String,
     },
     /// Anthropic signed thinking content. Anthropic requires the signature when
-    /// replaying thinking blocks in future request context.
+    /// replaying thinking blocks in future request context. The text and
+    /// signature are stored exactly as streamed and never edited or merged.
     AnthropicThinking {
         thinking: String,
         signature: String,
+        /// The conversation the block was produced in. Blocks stored before
+        /// jcode recorded bindings have none and are never replayed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<AnthropicThinkingBinding>,
+    },
+    /// Anthropic `redacted_thinking`: encrypted reasoning that is replayed
+    /// unchanged and has no readable text.
+    AnthropicRedactedThinking {
+        data: String,
+        binding: AnthropicThinkingBinding,
     },
     /// OpenAI Responses reasoning item. When `store=false`, OpenAI returns
     /// encrypted reasoning content so clients can replay reasoning state in
@@ -173,6 +248,18 @@ pub enum ContentBlock {
     OpenAICompaction {
         encrypted_content: String,
     },
+}
+
+impl ContentBlock {
+    /// The binding of an Anthropic reasoning block that jcode may replay.
+    /// Blocks stored before bindings were recorded return `None`.
+    pub fn anthropic_thinking_binding(&self) -> Option<&AnthropicThinkingBinding> {
+        match self {
+            Self::AnthropicThinking { binding, .. } => binding.as_ref(),
+            Self::AnthropicRedactedThinking { binding, .. } => Some(binding),
+            _ => None,
+        }
+    }
 }
 
 impl Message {
@@ -386,13 +473,22 @@ pub fn cache_relevant_message_value(message: &Message) -> serde_json::Value {
                 block.get("type").and_then(|kind| kind.as_str()) != Some("reasoning_trace")
             });
             for block in blocks.iter_mut() {
-                if let serde_json::Value::Object(block) = block
-                    && block.get("type").and_then(|kind| kind.as_str()) == Some("text")
-                {
+                let serde_json::Value::Object(block) = block else {
+                    continue;
+                };
+                match block.get("type").and_then(|kind| kind.as_str()) {
                     // The ephemeral cache breakpoint marker hops to the newest
                     // message each turn; it marks where caching ends, not the
                     // cached content itself.
-                    block.remove("cache_control");
+                    Some("text") => {
+                        block.remove("cache_control");
+                    }
+                    // jcode's own record of where a block was produced is
+                    // never sent to the provider.
+                    Some("anthropic_thinking" | "anthropic_redacted_thinking") => {
+                        block.remove("binding");
+                    }
+                    _ => {}
                 }
             }
         }
@@ -701,8 +797,12 @@ pub enum StreamEvent {
     ThinkingStart,
     /// Extended thinking delta (reasoning content)
     ThinkingDelta(String),
-    /// Provider signature for the current thinking block.
+    /// Opaque reasoning signal from a provider whose reasoning is not stored
+    /// as a replayable block (Gemini and Antigravity thought signatures).
     ThinkingSignatureDelta(String),
+    /// A provider-signed reasoning block, complete and in stream order. It is
+    /// emitted when the provider finishes the block, after its display deltas.
+    ReplayableReasoning(ReplayableReasoningBlock),
     /// Native OpenAI Responses reasoning item for future-turn replay.
     OpenAIReasoning {
         id: String,

@@ -360,10 +360,15 @@ impl ProviderMessageMemoryStats {
                 crate::message::ContentBlock::AnthropicThinking {
                     thinking,
                     signature,
+                    ..
                 } => {
                     let bytes = thinking.len() + signature.len();
                     self.reasoning_bytes += bytes;
                     self.record_bytes(bytes);
+                }
+                crate::message::ContentBlock::AnthropicRedactedThinking { data, .. } => {
+                    self.reasoning_bytes += data.len();
+                    self.record_bytes(data.len());
                 }
                 crate::message::ContentBlock::OpenAIReasoning {
                     id,

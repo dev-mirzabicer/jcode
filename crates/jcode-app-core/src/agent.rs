@@ -1287,8 +1287,11 @@ impl Agent {
                         md.push_str(&format!("*Thinking:* {}\n\n", text));
                     }
                     ContentBlock::AnthropicThinking { thinking, .. } => {
-                        md.push_str(&format!("*Thinking:* {}\n\n", thinking));
+                        if !thinking.is_empty() {
+                            md.push_str(&format!("*Thinking:* {}\n\n", thinking));
+                        }
                     }
+                    ContentBlock::AnthropicRedactedThinking { .. } => {}
                     ContentBlock::OpenAIReasoning { summary, .. } => {
                         if !summary.is_empty() {
                             md.push_str(&format!("*Thinking:* {}\n\n", summary.join("\n")));

@@ -464,7 +464,6 @@ impl App {
                 api_start.elapsed().as_secs_f64()
             ));
 
-            let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
@@ -478,12 +477,8 @@ impl App {
             let provider_ingress = invocation.capture.clone();
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
-            let provider_name = self.provider.name().to_string();
-            let store_reasoning_content =
-                crate::provider::stores_reasoning_content_for_context(&provider_name);
-            let mut reasoning_content = String::new();
-            let mut reasoning_signature = String::new();
-            let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            let replay_kind = crate::provider::stored_reasoning_replay_kind(self.provider.as_ref());
+            let mut turn = crate::message::AssistantTurnAssembler::new();
 
             // Stream with input handling
             loop {
@@ -546,30 +541,12 @@ impl App {
                                         if let Some(tool) = current_tool.take() {
                                             tool_calls.push(tool);
                                         }
-                                        if !text_content.is_empty() || !tool_calls.is_empty() {
-                                            let mut content_blocks = Vec::new();
-                                            if !text_content.is_empty() {
-                                                content_blocks.push(ContentBlock::Text {
-                                                    text: format!("{}\n\n[generation interrupted by user]", text_content),
-                                                    cache_control: None,
-                                                });
+                                        if !turn.visible_text().is_empty() || !tool_calls.is_empty() {
+                                            if !turn.visible_text().is_empty() {
+                                                turn.text("\n\n[generation interrupted by user]");
                                             }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
-                                            if store_reasoning_content {
-                                                content_blocks.extend(openai_reasoning_items.iter().cloned());
-                                            }
-                                            for tc in &tool_calls {
-                                                content_blocks.push(ContentBlock::ToolUse {
-                                                    id: tc.id.clone(),
-                                                    name: tc.name.clone(),
-                                                    input: tc.input.clone(), thought_signature: None, });
-                                            }
+                                            let content_blocks =
+                                                turn.content_blocks(replay_kind, &tool_calls);
                                             if !content_blocks.is_empty() {
                                                 let content_clone = content_blocks.clone();
                                                 self.add_provider_message(Message {
@@ -609,35 +586,14 @@ impl App {
                                     // Check for interleave request (Shift+Enter)
                                     if let Some(interleave_msg) = self.interleave_message.take() {
                                         // Save partial assistant response if any
-                                        if !text_content.is_empty() || !tool_calls.is_empty() {
+                                        if !turn.visible_text().is_empty() || !tool_calls.is_empty() {
                                             // Complete any pending tool
                                             if let Some(tool) = current_tool.take() {
                                                 tool_calls.push(tool);
                                             }
                                             // Build content blocks for partial response
-                                            let mut content_blocks = Vec::new();
-                                            if !text_content.is_empty() {
-                                                content_blocks.push(ContentBlock::Text {
-                                                    text: text_content.clone(),
-                                                    cache_control: None,
-                                                });
-                                            }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
-                                            if store_reasoning_content {
-                                                content_blocks.extend(openai_reasoning_items.iter().cloned());
-                                            }
-                                            for tc in &tool_calls {
-                                                content_blocks.push(ContentBlock::ToolUse {
-                                                    id: tc.id.clone(),
-                                                    name: tc.name.clone(),
-                                                    input: tc.input.clone(), thought_signature: None, });
-                                            }
+                                            let content_blocks =
+                                                turn.content_blocks(replay_kind, &tool_calls);
                                             // Add partial assistant response to messages
                                             if !content_blocks.is_empty() {
                                                 self.add_provider_message(Message {
@@ -677,7 +633,6 @@ impl App {
                                         self.clear_streaming_render_state();
                                         self.streaming_tool_calls.clear();
                                         self.stream_buffer = StreamBuffer::new();
-                                        reasoning_content.clear();
                                         interleaved = true;
                                         // Continue to next iteration of outer loop (new API call)
                                         break;
@@ -752,7 +707,7 @@ impl App {
                                 match event {
                                     StreamEvent::TextDelta(text) => {
                                         self.status = ProcessingStatus::Streaming;
-                                        text_content.push_str(&text);
+                                        turn.text(&text);
                                         self.resume_streaming_tps();
                                         // The buffer queues a CloseReasoning marker ahead of real
                                         // output so any open reasoning region closes in order as
@@ -779,6 +734,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        turn.tool_use_started(&id);
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
                                         // running until the tool call has finished streaming; actual
@@ -965,18 +921,15 @@ impl App {
                                             "Retry rollback (attempt {}/{}): discarding partial streamed output ({} text chars, {} tool calls)",
                                             attempt,
                                             max,
-                                            text_content.len(),
+                                            turn.visible_text().len(),
                                             tool_calls.len(),
                                         ));
-                                        text_content.clear();
+                                        turn.reset();
                                         tool_calls.clear();
                                         current_tool = None;
                                         current_tool_input.clear();
                                         generated_image_contexts.clear();
                                         sdk_tool_results.clear();
-                                        reasoning_content.clear();
-                                        reasoning_signature.clear();
-                                        openai_reasoning_items.clear();
                                         saw_message_end = false;
                                         self.rollback_streaming_attempt();
                                         self.connection_phase_started = Some(Instant::now());
@@ -998,7 +951,7 @@ impl App {
                                     }
                                     StreamEvent::Error { message, .. } => {
                                         if provider_ingress.has_received_data(){self.mark_pending_provider_output_started();}
-                                        let no_partial_output = text_content.is_empty()
+                                        let no_partial_output = turn.visible_text().is_empty()
                                             && tool_calls.is_empty()
                                             && current_tool.is_none()
                                             && self.streaming.streaming_text.is_empty()
@@ -1027,20 +980,18 @@ impl App {
                                                 || is_context_limit_error(&message))
                                         {
                                             self.checkpoint_partial_local_provider_output(
-                                                &text_content,
-                                                &reasoning_content,
-                                                &reasoning_signature,
-                                                &openai_reasoning_items,
+                                                &turn,
                                                 &tool_calls,
                                                 &sdk_tool_results,
                                                 &generated_image_contexts,
-                                                store_reasoning_content,
+                                                replay_kind,
                                             ).await?;
                                         }
                                         memory_pending.restore_now();
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
                                     StreamEvent::ThinkingStart => {
+                                        turn.reasoning_started();
                                         let start = Instant::now();
                                         self.resume_streaming_tps();
                                         self.thinking_start = Some(start);
@@ -1053,10 +1004,9 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
-                                    StreamEvent::ThinkingSignatureDelta(signature) => {
-                                        if store_reasoning_content {
-                                            reasoning_signature.push_str(&signature);
-                                        }
+                                    StreamEvent::ThinkingSignatureDelta(_) => {}
+                                    StreamEvent::ReplayableReasoning(block) => {
+                                        turn.replayable_reasoning(block);
                                     }
                                     StreamEvent::ThinkingDelta(thinking_text) => {
                                         self.resume_streaming_tps();
@@ -1081,10 +1031,7 @@ impl App {
                                             let ops = self.stream_buffer.push_reasoning(&thinking_text);
                                             self.apply_stream_ops(ops);
                                         }
-                                        // Always capture reasoning text so it can be
-                                        // persisted as a history-only trace, regardless
-                                        // of provider replay support.
-                                        reasoning_content.push_str(&thinking_text);
+                                        turn.reasoning_delta(&thinking_text);
                                         // When reasoning text is hidden, the status flip to
                                         // "thinking…" is the only visible signal, so repaint
                                         // promptly on the first delta.
@@ -1093,6 +1040,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingEnd => {
+                                        turn.reasoning_ended();
                                         self.pause_streaming_tps(true);
                                         self.thinking_start = None;
                                         self.thinking_buffer.clear();
@@ -1115,14 +1063,12 @@ impl App {
                                         encrypted_content,
                                         status,
                                     } => {
-                                        if store_reasoning_content {
-                                            openai_reasoning_items.push(ContentBlock::OpenAIReasoning {
-                                                id,
-                                                summary,
-                                                encrypted_content,
-                                                status,
-                                            });
-                                        }
+                                        turn.openai_reasoning(ContentBlock::OpenAIReasoning {
+                                            id,
+                                            summary,
+                                            encrypted_content,
+                                            status,
+                                        });
                                     }
                                     StreamEvent::UpstreamProvider { provider } => {
                                         // Store the upstream provider (e.g., Fireworks, Together)
@@ -1135,7 +1081,7 @@ impl App {
                                             Err(error)=>{
                                                 if !tool_calls.iter().any(|tool|tool.id==tool_use_id){self.session.add_message(Role::User,vec![ContentBlock::Text{text:format!("[Provider result acquisition failed; no operation was repeated.]\n{}",crate::execution::sdk_failure_body(&output)),cache_control:None}]);}
                                                 sdk_tool_results.insert(tool_use_id.clone(),output);
-                                                self.checkpoint_partial_local_provider_output(&text_content,&reasoning_content,&reasoning_signature,&openai_reasoning_items,&tool_calls,&sdk_tool_results,&generated_image_contexts,store_reasoning_content).await?;
+                                                self.checkpoint_partial_local_provider_output(&turn,&tool_calls,&sdk_tool_results,&generated_image_contexts,replay_kind).await?;
                                                 self.session.save()?;return Err(error);
                                             }
                                         };
@@ -1244,7 +1190,7 @@ impl App {
                             }
                             Some(Err(e)) => {
                                         if provider_ingress.has_received_data(){self.mark_pending_provider_output_started();}
-                                let no_partial_output = text_content.is_empty()
+                                let no_partial_output = turn.visible_text().is_empty()
                                     && tool_calls.is_empty()
                                     && current_tool.is_none()
                                     && self.streaming.streaming_text.is_empty()
@@ -1274,21 +1220,18 @@ impl App {
                                         || is_context_limit_error(&error_text))
                                 {
                                     self.checkpoint_partial_local_provider_output(
-                                        &text_content,
-                                        &reasoning_content,
-                                        &reasoning_signature,
-                                        &openai_reasoning_items,
+                                        &turn,
                                         &tool_calls,
                                         &sdk_tool_results,
                                         &generated_image_contexts,
-                                        store_reasoning_content,
+                                        replay_kind,
                                     ).await?;
                                 }
                                 memory_pending.restore_now();
                                 return Err(e);
                             }
                             None => {
-                                let no_partial_output = text_content.is_empty()
+                                let no_partial_output = turn.visible_text().is_empty()
                                     && tool_calls.is_empty()
                                     && current_tool.is_none()
                                     && self.streaming.streaming_text.is_empty()
@@ -1330,14 +1273,11 @@ impl App {
                 &sdk_tool_results,
             ) {
                 self.checkpoint_partial_local_provider_output(
-                    &text_content,
-                    &reasoning_content,
-                    &reasoning_signature,
-                    &openai_reasoning_items,
+                    &turn,
                     &correlated,
                     &sdk_tool_results,
                     &generated_image_contexts,
-                    store_reasoning_content,
+                    replay_kind,
                 )
                 .await?;
                 drop(provider_ingress);
@@ -1348,32 +1288,9 @@ impl App {
                 );
             }
 
-            // Add assistant message to history
-            let mut content_blocks = Vec::new();
-            if !text_content.is_empty() {
-                content_blocks.push(ContentBlock::Text {
-                    text: text_content.clone(),
-                    cache_control: None,
-                });
-            }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
-            if store_reasoning_content {
-                content_blocks.extend(openai_reasoning_items.iter().cloned());
-            }
-            for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: None,
-                });
-            }
+            // Add assistant message to history, in the order the provider
+            // produced it.
+            let content_blocks = turn.content_blocks(replay_kind, &tool_calls);
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
@@ -1410,7 +1327,8 @@ impl App {
             }
 
             if tool_calls.is_empty() {
-                // No tool calls - display full text_content
+                // No tool calls - display the full visible text
+                let text_content = turn.visible_text();
                 if !text_content.is_empty() {
                     self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),

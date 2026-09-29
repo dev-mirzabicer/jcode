@@ -238,7 +238,6 @@ impl Agent {
                 model: Some(self.provider.model()),
             }));
 
-            let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut startup_acceptance_observed = false;
@@ -251,12 +250,8 @@ impl Agent {
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
-            let provider_name = self.provider.name().to_string();
-            let store_reasoning_content =
-                crate::provider::stores_reasoning_content_for_context(&provider_name);
-            let mut reasoning_content = String::new();
-            let mut reasoning_signature = String::new();
-            let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            let replay_kind = crate::provider::stored_reasoning_replay_kind(self.provider.as_ref());
+            let mut turn = crate::message::AssistantTurnAssembler::new();
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
@@ -274,14 +269,11 @@ impl Agent {
                                 ) || Self::is_context_limit_error(&err_str))
                         {
                             self.checkpoint_partial_provider_output(
-                                &text_content,
-                                &reasoning_content,
-                                &reasoning_signature,
-                                &openai_reasoning_items,
+                                &turn,
                                 &tool_calls,
                                 &sdk_tool_results,
                                 &generated_image_contexts,
-                                store_reasoning_content,
+                                replay_kind,
                                 None,
                             )
                             .await?;
@@ -335,24 +327,21 @@ impl Agent {
                     StreamEvent::ThinkingStart => {
                         // Track start but don't print - wait for ThinkingDone
                         _thinking_start = Some(Instant::now());
+                        turn.reasoning_started();
                     }
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Display reasoning content only if enabled
                         if print_output && crate::config::config().display.show_thinking {
                             crate::terminal_println!("💭 {}", thinking_text);
                         }
-                        // Always capture reasoning text so it can be persisted as a
-                        // history-only trace, regardless of provider replay support.
-                        reasoning_content.push_str(&thinking_text);
+                        turn.reasoning_delta(&thinking_text);
                     }
-                    StreamEvent::ThinkingSignatureDelta(signature) => {
-                        if store_reasoning_content {
-                            reasoning_signature.push_str(&signature);
-                        }
-                    }
+                    StreamEvent::ThinkingSignatureDelta(_) => {}
+                    StreamEvent::ReplayableReasoning(block) => turn.replayable_reasoning(block),
                     StreamEvent::ThinkingEnd => {
                         // Don't print here - ThinkingDone has accurate timing
                         _thinking_start = None;
+                        turn.reasoning_ended();
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         // Bridge provides accurate wall-clock timing
@@ -365,9 +354,10 @@ impl Agent {
                             crate::terminal_print!("{}", text);
                             io::stdout().flush()?;
                         }
-                        text_content.push_str(&text);
+                        turn.text(&text);
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        turn.tool_use_started(&id);
                         if trace {
                             eprintln!("\n[trace] tool_use_start name={} id={}", name, id);
                         }
@@ -461,14 +451,11 @@ impl Agent {
                                 }
                                 sdk_tool_results.insert(tool_use_id.clone(), output);
                                 self.checkpoint_partial_provider_output(
-                                    &text_content,
-                                    &reasoning_content,
-                                    &reasoning_signature,
-                                    &openai_reasoning_items,
+                                    &turn,
                                     &tool_calls,
                                     &sdk_tool_results,
                                     &generated_image_contexts,
-                                    store_reasoning_content,
+                                    replay_kind,
                                     None,
                                 )
                                 .await?;
@@ -589,14 +576,11 @@ impl Agent {
                     StreamEvent::RetryRollback { attempt, max } => {
                         if !sdk_tool_results.is_empty() {
                             self.checkpoint_partial_provider_output(
-                                &text_content,
-                                &reasoning_content,
-                                &reasoning_signature,
-                                &openai_reasoning_items,
+                                &turn,
                                 &tool_calls,
                                 &sdk_tool_results,
                                 &generated_image_contexts,
-                                store_reasoning_content,
+                                replay_kind,
                                 None,
                             )
                             .await?;
@@ -611,24 +595,21 @@ impl Agent {
                             "Mid-stream retry rollback (attempt {}/{}): discarding partial output ({} text chars, {} tool calls)",
                             attempt,
                             max,
-                            text_content.len(),
+                            turn.visible_text().len(),
                             tool_calls.len(),
                         ));
-                        if print_output && !text_content.is_empty() {
+                        if print_output && !turn.visible_text().is_empty() {
                             // Already-printed text can't be unprinted on a plain
                             // stdout stream; mark the discontinuity instead.
                             println!("\n[connection interrupted, retrying response from the top]");
                             io::stdout().flush()?;
                         }
-                        text_content.clear();
+                        turn.reset();
                         tool_calls.clear();
                         current_tool = None;
                         current_tool_input.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
-                        reasoning_content.clear();
-                        reasoning_signature.clear();
-                        openai_reasoning_items.clear();
                         saw_message_end = false;
                         stop_reason = None;
                     }
@@ -666,14 +647,12 @@ impl Agent {
                         encrypted_content,
                         status,
                     } => {
-                        if store_reasoning_content {
-                            openai_reasoning_items.push(ContentBlock::OpenAIReasoning {
-                                id,
-                                summary,
-                                encrypted_content,
-                                status,
-                            });
-                        }
+                        turn.openai_reasoning(ContentBlock::OpenAIReasoning {
+                            id,
+                            summary,
+                            encrypted_content,
+                            status,
+                        });
                     }
                     StreamEvent::NativeToolCall {
                         request_id,
@@ -729,14 +708,11 @@ impl Agent {
                                 ) || Self::is_context_limit_error(&message))
                         {
                             self.checkpoint_partial_provider_output(
-                                &text_content,
-                                &reasoning_content,
-                                &reasoning_signature,
-                                &openai_reasoning_items,
+                                &turn,
                                 &tool_calls,
                                 &sdk_tool_results,
                                 &generated_image_contexts,
-                                store_reasoning_content,
+                                replay_kind,
                                 None,
                             )
                             .await?;
@@ -792,14 +768,11 @@ impl Agent {
                 &sdk_tool_results,
             ) {
                 self.checkpoint_partial_provider_output(
-                    &text_content,
-                    &reasoning_content,
-                    &reasoning_signature,
-                    &openai_reasoning_items,
+                    &turn,
                     &correlated,
                     &sdk_tool_results,
                     &generated_image_contexts,
-                    store_reasoning_content,
+                    replay_kind,
                     None,
                 )
                 .await?;
@@ -880,39 +853,19 @@ impl Agent {
                 cache_creation_input_tokens: usage_cache_creation,
             };
 
-            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+            let mut text_content = turn.visible_text();
+            if self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls) {
+                turn.replace_visible_text(text_content.clone());
+            }
 
             let visible_text_is_empty = text_content.trim().is_empty();
 
-            // Add assistant message to history. Avoid persisting whitespace-only text as a
-            // successful visible answer: some OpenRouter/Kimi tool continuations can finish
-            // cleanly with only spaces despite non-zero output tokens. Persisting that makes the
-            // UI look like the agent stopped after tools with no explanation.
-            let mut content_blocks = Vec::new();
-            if !text_content.is_empty() && !visible_text_is_empty {
-                content_blocks.push(ContentBlock::Text {
-                    text: text_content.clone(),
-                    cache_control: None,
-                });
-            }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
-            if store_reasoning_content {
-                content_blocks.extend(openai_reasoning_items.iter().cloned());
-            }
-            for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: tc.thought_signature.clone(),
-                });
-            }
+            // Add assistant message to history, in the order the provider
+            // produced it. Whitespace-only text is not persisted as a visible
+            // answer: some OpenRouter/Kimi tool continuations finish cleanly with
+            // only spaces, which would make the UI look like the agent stopped
+            // after tools with no explanation.
+            let content_blocks = turn.content_blocks(replay_kind, &tool_calls);
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
@@ -978,7 +931,7 @@ impl Agent {
                 if let Some(notice) = Self::provider_guardrail_notice(
                     stop_reason.as_deref(),
                     visible_text_is_empty,
-                    !reasoning_content.trim().is_empty(),
+                    turn.has_readable_reasoning(),
                 ) {
                     logging::warn(&format!(
                         "{}: turn ended with no visible output (stop_reason={:?})",

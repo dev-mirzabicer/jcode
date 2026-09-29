@@ -1154,6 +1154,11 @@ mod tests {
                     ContentBlock::AnthropicThinking {
                         thinking: "thinking".to_string(),
                         signature: "signed".to_string(),
+                        binding: Some(jcode_message_types::AnthropicThinkingBinding {
+                            model: "claude-test".to_string(),
+                            prefix_digest: "anthropic-prefix-v1:test".to_string(),
+                            predecessor: None,
+                        }),
                     },
                     ContentBlock::Text {
                         text: "anthropic answer".to_string(),

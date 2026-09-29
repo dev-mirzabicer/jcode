@@ -493,6 +493,12 @@ pub(crate) enum Command {
         /// ~/.jcode/provider-contract/<contract>-<model>-<utc>.json.
         #[arg(long, value_name = "PATH", requires = "contract")]
         contract_out: Option<std::path::PathBuf>,
+
+        /// Instead of the contract probe, capture the raw SSE responses used as
+        /// reasoning-capture test fixtures into this directory. Spends three
+        /// requests.
+        #[arg(long, value_name = "DIR", requires = "contract")]
+        capture_sse: Option<std::path::PathBuf>,
     },
 
     /// Test authentication end-to-end: login (optional), credential probe, refresh, and provider smoke

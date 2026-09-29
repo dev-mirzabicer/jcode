@@ -5259,6 +5259,11 @@ mod orchestration_tests {
             vec![ContentBlock::AnthropicThinking {
                 thinking: "signed historical thinking".repeat(20),
                 signature: "signature".to_string(),
+                binding: Some(crate::message::AnthropicThinkingBinding {
+                    model: "claude-test".to_string(),
+                    prefix_digest: "anthropic-prefix-v1:test".to_string(),
+                    predecessor: None,
+                }),
             }],
         )];
         let suppression =

@@ -69,6 +69,23 @@ impl MultiProvider {
         ProviderRegistry::new(self).clear_active_compatible_profile();
     }
 
+    /// The concrete runtime a request for `provider` dispatches to, as
+    /// `complete_split_on_provider` chooses it.
+    pub(super) fn runtime_for(&self, provider: ActiveProvider) -> Option<Arc<dyn Provider>> {
+        match provider {
+            ActiveProvider::Claude => self.anthropic_provider().or_else(|| self.claude_provider()),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|provider| provider as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        }
+    }
+
     pub(super) fn has_claude_runtime(&self) -> bool {
         self.anthropic_provider().is_some() || self.claude_provider().is_some()
     }

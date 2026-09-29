@@ -125,6 +125,7 @@ impl ClaudeProvider {
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::AnthropicRedactedThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::Image { .. } => {}
                     ContentBlock::OpenAICompaction { .. } => {}

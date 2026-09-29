@@ -74,11 +74,17 @@ impl ContentBlockMemoryStats {
             ContentBlock::AnthropicThinking {
                 thinking,
                 signature,
+                ..
             } => {
                 self.reasoning_blocks += 1;
                 let bytes = thinking.len() + signature.len();
                 self.reasoning_bytes += bytes;
                 self.record_bytes(bytes);
+            }
+            ContentBlock::AnthropicRedactedThinking { data, .. } => {
+                self.reasoning_blocks += 1;
+                self.reasoning_bytes += data.len();
+                self.record_bytes(data.len());
             }
             ContentBlock::OpenAIReasoning {
                 id,

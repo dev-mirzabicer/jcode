@@ -224,6 +224,26 @@ pub struct AnthropicReasoningCaps {
     pub xhigh_effort: bool,
     /// Accepts the `max` effort level.
     pub max_effort: bool,
+    /// Whether a thinking block is invalidated by an edit to the conversation
+    /// before it (INT-01 D11).
+    pub reasoning_binding: ReasoningBinding,
+}
+
+/// Whether Anthropic binds a model's signed thinking to the conversation that
+/// produced it ("preserved thinking").
+///
+/// This is policy as data (INT-01 D11): every jcode mechanism that exists only
+/// because of binding reads this value and does nothing for `Unbound`. When
+/// Anthropic changes a model's behavior, the change is one evidence-cited
+/// entry in [`anthropic_reasoning_binding`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasoningBinding {
+    /// Editing the system prompt, the tool set or any earlier message
+    /// invalidates every later thinking block.
+    PrefixBound,
+    /// Edits before a block do not invalidate it.
+    #[default]
+    Unbound,
 }
 
 impl AnthropicReasoningCaps {
@@ -234,6 +254,7 @@ impl AnthropicReasoningCaps {
         manual_thinking: false,
         xhigh_effort: true,
         max_effort: true,
+        reasoning_binding: ReasoningBinding::Unbound,
     };
     /// `output_config` effort + adaptive thinking, but no `xhigh` level.
     const EFFORT_NO_XHIGH: Self = Self {
@@ -242,6 +263,7 @@ impl AnthropicReasoningCaps {
         manual_thinking: false,
         xhigh_effort: false,
         max_effort: true,
+        reasoning_binding: ReasoningBinding::Unbound,
     };
     /// `output_config` effort with manual thinking budgets (Opus 4.5).
     const MANUAL_WITH_EFFORT: Self = Self {
@@ -250,6 +272,7 @@ impl AnthropicReasoningCaps {
         manual_thinking: true,
         xhigh_effort: false,
         max_effort: false,
+        reasoning_binding: ReasoningBinding::Unbound,
     };
     /// Manual thinking budgets only (Claude 3.7 Sonnet).
     const MANUAL_ONLY: Self = Self {
@@ -258,6 +281,7 @@ impl AnthropicReasoningCaps {
         manual_thinking: true,
         xhigh_effort: false,
         max_effort: false,
+        reasoning_binding: ReasoningBinding::Unbound,
     };
     const NONE: Self = Self {
         output_effort: false,
@@ -265,6 +289,7 @@ impl AnthropicReasoningCaps {
         manual_thinking: false,
         xhigh_effort: false,
         max_effort: false,
+        reasoning_binding: ReasoningBinding::Unbound,
     };
 
     /// Whether any reasoning-effort control is available at all.
@@ -318,6 +343,58 @@ fn parse_claude_family_version(base: &str) -> (Option<&str>, Option<(u32, u32)>)
 /// gracefully while pessimism silently disables effort until someone probes
 /// the model and updates a table.
 pub fn anthropic_reasoning_caps(model: &str) -> AnthropicReasoningCaps {
+    AnthropicReasoningCaps {
+        reasoning_binding: anthropic_reasoning_binding(model),
+        ..anthropic_effort_caps(model)
+    }
+}
+
+/// Whether a Claude model binds signed thinking to its conversation prefix.
+///
+/// Each known entry cites its evidence. INT-01 Gate 0 (2026-09-29, Claude
+/// OAuth, `T3b`/`T3c`/`T7`) and its WP-01 reproduction measured the check on
+/// Opus 5.5 and Sonnet 5.5 and its absence on Opus 5 and Sonnet 5. Anthropic's
+/// documentation (preserved thinking, re-verified 2026-09-29) introduces the
+/// check with Fable 5.1 (not Fable 5) and exempts Mythos 5.1. Earlier
+/// generations predate it. An unknown future generation defaults to
+/// `PrefixBound`: over-suppression loses some reasoning but never produces
+/// rejections.
+pub fn anthropic_reasoning_binding(model: &str) -> ReasoningBinding {
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude") {
+        return ReasoningBinding::Unbound;
+    }
+    let (family, version) = parse_claude_family_version(&base);
+    let Some(version) = version else {
+        return ReasoningBinding::Unbound;
+    };
+    if version < (5, 0) {
+        return ReasoningBinding::Unbound;
+    }
+    let known = |bound: &[(u32, u32)], unbound: &[(u32, u32)]| {
+        if bound.contains(&version) {
+            ReasoningBinding::PrefixBound
+        } else if unbound.contains(&version) {
+            ReasoningBinding::Unbound
+        } else {
+            ReasoningBinding::PrefixBound
+        }
+    };
+    match family {
+        // Measured: Opus 5.5 bound, Opus 5 not.
+        Some("opus") => known(&[(5, 5)], &[(5, 0)]),
+        // Measured: Sonnet 5.5 bound, Sonnet 5 not.
+        Some("sonnet") => known(&[(5, 5)], &[(5, 0)]),
+        // Documented: introduced with Fable 5.1.
+        Some("fable") => known(&[(5, 1)], &[(5, 0)]),
+        // Documented: Mythos 5.1 does not run the check; Mythos 5 predates it.
+        Some("mythos") => known(&[], &[(5, 0), (5, 1)]),
+        _ => ReasoningBinding::PrefixBound,
+    }
+}
+
+/// Effort and thinking-shape capabilities, without the binding policy.
+fn anthropic_effort_caps(model: &str) -> AnthropicReasoningCaps {
     let base = normalized_claude_caps_key(model);
     if !base.starts_with("claude") {
         return AnthropicReasoningCaps::NONE;
@@ -608,15 +685,77 @@ mod tests {
             "claude-fable-6",
             "claude-nova-5",
         ] {
-            let caps = anthropic_reasoning_caps(model);
+            // Effort capabilities only: the binding policy is a separate,
+            // per-model entry (INT-01 D11).
             assert_eq!(
-                caps,
-                anthropic_reasoning_caps("claude-fable-5"),
+                anthropic_effort_caps(model),
+                anthropic_effort_caps("claude-fable-5"),
                 "{model} should default to the full modern ladder"
             );
         }
         // But old/unversioned ids stay conservative.
         assert!(!anthropic_reasoning_caps("claude-haiku-4-5").supports_reasoning_effort());
         assert!(!anthropic_reasoning_caps("claude-instant").supports_reasoning_effort());
+    }
+
+    #[test]
+    fn reasoning_binding_entries_follow_their_evidence() {
+        use ReasoningBinding::{PrefixBound, Unbound};
+        for (model, expected) in [
+            // Measured, INT-01 Gate 0 and WP-01 (Claude OAuth, 2026-09-29).
+            ("claude-opus-5-5", PrefixBound),
+            ("claude-opus-5-5[1m]", PrefixBound),
+            ("claude-sonnet-5-5", PrefixBound),
+            ("claude-opus-5", Unbound),
+            ("claude-sonnet-5", Unbound),
+            // Documented.
+            ("claude-fable-5-1", PrefixBound),
+            ("claude-fable-5", Unbound),
+            ("claude-mythos-5-1", Unbound),
+            ("claude-mythos-5", Unbound),
+            // Predate preserved thinking.
+            ("claude-opus-4-8", Unbound),
+            ("claude-sonnet-4-6", Unbound),
+            ("claude-haiku-4-5", Unbound),
+            ("claude-3-7-sonnet", Unbound),
+            // Unknown future generations default to PrefixBound.
+            ("claude-opus-6", PrefixBound),
+            ("claude-sonnet-5-7", PrefixBound),
+            ("claude-fable-5-2", PrefixBound),
+            ("claude-mythos-5-2", PrefixBound),
+            ("claude-haiku-5", PrefixBound),
+            // Not a Claude model.
+            ("gpt-5.6-sol", Unbound),
+        ] {
+            assert_eq!(anthropic_reasoning_binding(model), expected, "{model}");
+            assert_eq!(
+                anthropic_reasoning_caps(model).reasoning_binding,
+                expected,
+                "{model}: the capability entry and the table agree"
+            );
+        }
+    }
+
+    #[test]
+    fn the_binding_policy_does_not_change_effort_capabilities() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-mythos-5-1",
+            "claude-3-7-sonnet",
+        ] {
+            let caps = anthropic_reasoning_caps(model);
+            assert_eq!(
+                AnthropicReasoningCaps {
+                    reasoning_binding: ReasoningBinding::Unbound,
+                    ..caps
+                },
+                AnthropicReasoningCaps {
+                    reasoning_binding: ReasoningBinding::Unbound,
+                    ..anthropic_effort_caps(model)
+                },
+                "{model}"
+            );
+        }
     }
 }

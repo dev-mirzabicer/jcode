@@ -373,6 +373,10 @@ impl Provider for OpenRouterProvider {
         "openrouter"
     }
 
+    fn reasoning_replay_kind(&self) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
+        Some(jcode_provider_core::ContextReasoningBlockKind::GenericReasoning)
+    }
+
     fn display_name(&self) -> String {
         self.runtime_display_name()
     }

@@ -320,6 +320,7 @@ pub fn build_contents_with_signature_policy(
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::AnthropicRedactedThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::ToolUse {
                         id,

@@ -4470,6 +4470,7 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
 }
 
 include!("agent_tests/notification_queue.rs");
+include!("agent_tests/reasoning_capture.rs");
 
 #[derive(Clone, Copy)]
 enum SdkAfterResult {

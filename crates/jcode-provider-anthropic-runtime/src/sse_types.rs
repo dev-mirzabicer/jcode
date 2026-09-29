@@ -15,6 +15,22 @@ pub(crate) struct MessageStartMessage {
     #[serde(default)]
     pub(crate) model: Option<String>,
     pub(crate) usage: Option<UsageInfo>,
+    /// Present on every response when the binding-controls beta is sent.
+    #[serde(default)]
+    pub(crate) input_transformations: Option<Vec<InputTransformation>>,
+}
+
+/// One `input_transformations` entry. Every field is optional and free-form:
+/// later API checks add types and reasons, which must be recorded, not
+/// rejected.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InputTransformation {
+    #[serde(default, rename = "type")]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -34,15 +50,15 @@ pub(crate) enum ApiContentBlockStart {
     },
     #[serde(rename = "thinking")]
     Thinking {
-        #[serde(default, rename = "thinking")]
-        _thinking: String,
-        #[serde(default, rename = "signature")]
-        _signature: Option<String>,
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
     },
     #[serde(rename = "redacted_thinking")]
     RedactedThinking {
-        #[serde(default, rename = "data")]
-        _data: String,
+        #[serde(default)]
+        data: String,
     },
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
@@ -78,6 +94,8 @@ pub(crate) enum ApiDelta {
 pub(crate) struct MessageDeltaEvent {
     pub(crate) delta: MessageDeltaDelta,
     pub(crate) usage: Option<UsageInfo>,
+    #[serde(default)]
+    pub(crate) input_transformations: Option<Vec<InputTransformation>>,
 }
 
 #[derive(Deserialize)]

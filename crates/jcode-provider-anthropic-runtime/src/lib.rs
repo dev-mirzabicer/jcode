@@ -31,15 +31,18 @@ use jcode_base::provider::anthropic::{
 };
 #[cfg(test)]
 use jcode_base::provider::anthropic::{OAUTH_BETA_HEADERS, effectively_1m};
+use jcode_message_types::{
+    AnthropicThinkingBinding, Message, ReplayableReasoningBlock, StreamEvent, ToolDefinition,
+};
 #[cfg(test)]
 use jcode_message_types::{ContentBlock, Role};
-use jcode_message_types::{Message, StreamEvent, ToolDefinition};
+use jcode_provider_anthropic::binding::{RequestBinding, ThinkingPayload, thinking_fingerprint};
+use jcode_provider_anthropic::{
+    ApiBlockBinding, ApiMessage, ApiMetadata, ApiOutputConfig, ApiRequest, ApiSystem, ApiThinking,
+    ApiTool, ApiToolChoice, PrefixMismatchBehavior, THINKING_BINDING_CONTROLS_BETA,
+};
 #[cfg(test)]
 use jcode_provider_anthropic::{ApiContentBlock, ToolResultContent, ToolResultContentBlock};
-use jcode_provider_anthropic::{
-    ApiMessage, ApiMetadata, ApiOutputConfig, ApiRequest, ApiSystem, ApiThinking, ApiTool,
-    ApiToolChoice,
-};
 use jcode_provider_core::{
     ANTHROPIC_TOOL_NAME_POLICY, anthropic_decode_legacy_oauth_tool_name,
     anthropic_is_1m_model as is_1m_model, anthropic_strip_1m_suffix as strip_1m_suffix,
@@ -378,6 +381,8 @@ pub struct AnthropicProvider {
     max_tokens_override: Option<u32>,
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
+    /// Whether this provider already announced unreplayed legacy thinking.
+    unbound_thinking_noticed: Arc<AtomicBool>,
 }
 
 impl AnthropicProvider {
@@ -490,11 +495,7 @@ impl AnthropicProvider {
     /// Send one non-streaming Messages request with the production endpoint and
     /// headers, for the provider-contract probe. Returns the HTTP status and
     /// the parsed body. The credential never leaves this function.
-    pub async fn send_contract_request_for_doctor(
-        &self,
-        body: &Value,
-        extra_beta: Option<&str>,
-    ) -> Result<(u16, Value)> {
+    pub async fn send_contract_request_for_doctor(&self, body: &Value) -> Result<(u16, Value)> {
         let (token, is_oauth) = self.get_access_token().await?;
         if is_oauth {
             ensure_oauth_preflight(
@@ -514,9 +515,8 @@ impl AnthropicProvider {
             &token,
             is_oauth,
             model,
-            body.get("thinking").is_some(),
+            ThinkingBetas::of_body(body),
             &self.oauth_session_id,
-            extra_beta,
         )
         .header("accept", "application/json")
         .json(body)
@@ -527,6 +527,53 @@ impl AnthropicProvider {
         let text = response.text().await.unwrap_or_default();
         let parsed = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }));
         Ok((status, parsed))
+    }
+
+    /// Send one streaming Messages request with the production endpoint and
+    /// headers and return the HTTP status and the raw response body (the SSE
+    /// stream), for capturing provider fixtures. The credential never leaves
+    /// this function; the body holds only what the provider streamed.
+    pub async fn stream_contract_request_for_doctor(&self, body: &Value) -> Result<(u16, String)> {
+        let (token, is_oauth) = self.get_access_token().await?;
+        if is_oauth {
+            ensure_oauth_preflight(
+                &self.client,
+                &token,
+                &self.oauth_session_id,
+                &self.oauth_preflight_done,
+            )
+            .await?;
+        }
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .context("contract request has no model")?;
+        let mut body = body.clone();
+        body["stream"] = json!(true);
+        let response = messages_request(
+            &self.client,
+            &token,
+            is_oauth,
+            model,
+            ThinkingBetas::of_body(&body),
+            &self.oauth_session_id,
+        )
+        // The same accept header the production stream sends.
+        .header(
+            "accept",
+            if is_oauth {
+                "application/json"
+            } else {
+                "text/event-stream"
+            },
+        )
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to send contract stream request to Anthropic API")?;
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        Ok((status, text))
     }
 
     /// Fetch the live Anthropic model catalog using the resolved credential.
@@ -595,6 +642,7 @@ impl AnthropicProvider {
             max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
+            unbound_thinking_noticed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -806,7 +854,12 @@ impl AnthropicProvider {
         // Anthropic only streams thinking summaries when a thinking request is
         // present, so opting into the display must also opt into generating it.
         let show_thinking = jcode_base::config::config().display.show_thinking;
-        self.build_reasoning_request_parts_inner(model, is_oauth, show_thinking)
+        self.build_reasoning_request_parts_inner(
+            model,
+            is_oauth,
+            show_thinking,
+            prefix_mismatch_behavior(),
+        )
     }
 
     fn build_reasoning_request_parts_inner(
@@ -814,6 +867,7 @@ impl AnthropicProvider {
         model: &str,
         is_oauth: bool,
         show_thinking: bool,
+        mismatch_behavior: PrefixMismatchBehavior,
     ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
         let effort = self.effort_for_model(model);
         // An explicit "none" (user-configured or a model default) means
@@ -841,6 +895,7 @@ impl AnthropicProvider {
         let thinking = if Self::model_supports_adaptive_thinking(model) {
             (effort.is_some() || show_thinking).then_some(ApiThinking::Adaptive {
                 display: Some("summarized"),
+                block_binding: None,
             })
         } else if Self::model_supports_manual_thinking(model) {
             // Manual-thinking models need a concrete budget. Use the configured
@@ -849,10 +904,14 @@ impl AnthropicProvider {
             effort
                 .or(show_thinking.then_some("low"))
                 .and_then(|effort| Self::manual_thinking_budget(effort, self.max_tokens_for(model)))
-                .map(|budget_tokens| ApiThinking::Enabled { budget_tokens })
+                .map(|budget_tokens| ApiThinking::Enabled {
+                    budget_tokens,
+                    block_binding: None,
+                })
         } else {
             None
         };
+        let thinking = with_binding_control(thinking, model, mismatch_behavior);
 
         // Extended/adaptive thinking is incompatible with temperature. OAuth path
         // normally mirrors Claude Code's temperature=1.0, so omit it when thinking is active.
@@ -1150,75 +1209,8 @@ impl Provider for AnthropicProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let (token, is_oauth) = self.get_access_token().await?;
-        if is_oauth {
-            ensure_oauth_preflight(
-                &self.client,
-                &token,
-                &self.oauth_session_id,
-                &self.oauth_preflight_done,
-            )
-            .await?;
-        }
-        let selected_model = self
-            .model
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let model = self
-            .model_after_oauth_quota_check(&token, is_oauth, selected_model)
-            .await;
-        let request = self.build_api_request(
-            &model,
-            messages,
-            tools,
-            build_system_param(system, is_oauth),
-            is_oauth,
-        );
-
-        log_anthropic_canonical_input(&model, "anthropic_messages", &request, is_oauth, false);
-
-        jcode_base::logging::info(&format!(
-            "Anthropic transport: HTTPS SSE stream (oauth={})",
-            is_oauth
-        ));
-
-        // Create channel for streaming events
-        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
-
-        // Clone what we need for the async task
-        let client = self.client.clone();
-        let credentials = Arc::clone(&self.credentials);
-        let oauth_session_id = self.oauth_session_id.clone();
-        let model_state = Arc::clone(&self.model);
-
-        // Spawn task to handle streaming with retry logic.
-        // This includes forced OAuth refresh on auth failures.
-        jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
-            if tx
-                .send(Ok(StreamEvent::ConnectionType {
-                    connection: "https/sse".to_string(),
-                }))
-                .await
-                .is_err()
-            {
-                return;
-            }
-            run_stream_with_retries(
-                client,
-                token,
-                is_oauth,
-                request,
-                tx,
-                credentials,
-                model,
-                oauth_session_id,
-                model_state,
-            )
-            .await;
-        });
-
-        Ok(Box::pin(ReceiverStream::new(rx)))
+        self.start_stream(messages, tools, StreamSystem::Unified(system))
+            .await
     }
 
     fn model(&self) -> String {
@@ -1444,6 +1436,10 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn reasoning_replay_kind(&self) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
+        Some(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking)
+    }
+
     fn context_window(&self) -> usize {
         context_window::resolve(&self.model())
     }
@@ -1510,6 +1506,7 @@ impl Provider for AnthropicProvider {
             oauth_preflight_done: Arc::new(AtomicBool::new(
                 self.oauth_preflight_done.load(Ordering::Relaxed),
             )),
+            unbound_thinking_noticed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1532,6 +1529,35 @@ impl Provider for AnthropicProvider {
         system_dynamic: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.start_stream(
+            messages,
+            tools,
+            StreamSystem::Split {
+                system_static,
+                system_dynamic,
+            },
+        )
+        .await
+    }
+}
+
+/// How the caller supplied the system prompt.
+enum StreamSystem<'a> {
+    Unified(&'a str),
+    Split {
+        system_static: &'a str,
+        system_dynamic: &'a str,
+    },
+}
+
+impl AnthropicProvider {
+    /// Build the request, bind it, and start the streaming task.
+    async fn start_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: StreamSystem<'_>,
+    ) -> Result<EventStream> {
         let (token, is_oauth) = self.get_access_token().await?;
         if is_oauth {
             ensure_oauth_preflight(
@@ -1550,23 +1576,35 @@ impl Provider for AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
-        let request = self.build_api_request(
-            &model,
-            messages,
-            tools,
-            build_system_param_split(system_static, system_dynamic, is_oauth),
-            is_oauth,
-        );
+        let (system_param, label, split) = match system {
+            StreamSystem::Unified(system) => (
+                build_system_param(system, is_oauth),
+                "anthropic_messages",
+                false,
+            ),
+            StreamSystem::Split {
+                system_static,
+                system_dynamic,
+            } => (
+                build_system_param_split(system_static, system_dynamic, is_oauth),
+                "anthropic_messages_split",
+                true,
+            ),
+        };
+        let request = self.build_api_request(&model, messages, tools, system_param, is_oauth);
+        let request_binding = bind_request(&model, &request);
 
-        log_anthropic_canonical_input(&model, "anthropic_messages_split", &request, is_oauth, true);
+        log_anthropic_canonical_input(&model, label, &request, is_oauth, split);
 
         jcode_base::logging::info(&format!(
-            "Anthropic transport: HTTPS SSE split stream (oauth={})",
+            "Anthropic transport: HTTPS SSE {} (oauth={})",
+            if split { "split stream" } else { "stream" },
             is_oauth
         ));
 
         // Create channel for streaming events
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
+        let unbound_notice = self.unbound_thinking_notice(messages);
 
         // Clone what we need for the async task
         let client = self.client.clone();
@@ -1574,7 +1612,8 @@ impl Provider for AnthropicProvider {
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
 
-        // Spawn task to handle streaming with retry logic
+        // Spawn task to handle streaming with retry logic.
+        // This includes forced OAuth refresh on auth failures.
         jcode_provider_core::request_lifetime::spawn_request(tx.clone(), async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
@@ -1585,11 +1624,20 @@ impl Provider for AnthropicProvider {
             {
                 return;
             }
+            if let Some(detail) = unbound_notice
+                && tx
+                    .send(Ok(StreamEvent::StatusDetail { detail }))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
             run_stream_with_retries(
                 client,
                 token,
                 is_oauth,
                 request,
+                request_binding,
                 tx,
                 credentials,
                 model,
@@ -1601,6 +1649,115 @@ impl Provider for AnthropicProvider {
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
+
+    /// A one-time notice when this conversation holds Claude thinking stored
+    /// before jcode recorded bindings. Those blocks are never replayed
+    /// (INT-01 DESIGN §4.2, INV-4).
+    fn unbound_thinking_notice(&self, messages: &[Message]) -> Option<String> {
+        let count = jcode_provider_anthropic::unbound_thinking_block_count(messages);
+        if count == 0 || self.unbound_thinking_noticed.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        jcode_base::logging::warn(&format!(
+            "Anthropic: {count} stored thinking block(s) have no binding record and are not replayed"
+        ));
+        Some(format!(
+            "{count} earlier Claude thinking block(s) were stored without a binding record and are not replayed; later thinking is unaffected"
+        ))
+    }
+}
+
+/// Environment override for the binding control's mismatch behavior, used by
+/// verification runs that want a mismatch to fail loudly (Mirza's decision,
+/// INT-01/WP-02, 2026-09-29).
+const PREFIX_MISMATCH_ENV: &str = "JCODE_ANTHROPIC_PREFIX_MISMATCH";
+
+/// What the API does with a replayed thinking block whose prefix changed.
+///
+/// Every runtime build sends `drop_block`, so a missed edit degrades to lost
+/// reasoning plus a logged INV-1 defect instead of a failed turn. Unit tests,
+/// and any process started with `JCODE_ANTHROPIC_PREFIX_MISMATCH=error`,
+/// send `error` so a mismatch fails the run.
+fn prefix_mismatch_behavior() -> PrefixMismatchBehavior {
+    let default = if cfg!(test) {
+        PrefixMismatchBehavior::Error
+    } else {
+        PrefixMismatchBehavior::DropBlock
+    };
+    match std::env::var(PREFIX_MISMATCH_ENV) {
+        Ok(value) => match value.trim() {
+            "error" => PrefixMismatchBehavior::Error,
+            "drop_block" => PrefixMismatchBehavior::DropBlock,
+            other => {
+                jcode_base::logging::warn(&format!(
+                    "{PREFIX_MISMATCH_ENV}={other:?} is not `error` or `drop_block`; using the default"
+                ));
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
+/// Add `thinking.block_binding` for models whose `reasoning_binding` is
+/// `PrefixBound` (INT-01 D11, DESIGN §4.4); leave every other model's request
+/// unchanged.
+///
+/// Such a model always thinks, and omitting `thinking` means adaptive
+/// thinking with its default display, so a request without `thinking` gains
+/// `{type: adaptive}` carrying only the control. Because `thinking` is then
+/// present, no sampling temperature is sent.
+fn with_binding_control(
+    thinking: Option<ApiThinking>,
+    model: &str,
+    behavior: PrefixMismatchBehavior,
+) -> Option<ApiThinking> {
+    if jcode_provider_core::anthropic_reasoning_binding(model)
+        != jcode_provider_core::ReasoningBinding::PrefixBound
+    {
+        return thinking;
+    }
+    let block_binding = Some(ApiBlockBinding {
+        prefix_mismatch_behavior: behavior,
+    });
+    Some(match thinking {
+        Some(ApiThinking::Adaptive { display, .. }) => ApiThinking::Adaptive {
+            display,
+            block_binding,
+        },
+        Some(ApiThinking::Enabled { budget_tokens, .. }) => ApiThinking::Enabled {
+            budget_tokens,
+            block_binding,
+        },
+        None => ApiThinking::Adaptive {
+            display: None,
+            block_binding,
+        },
+    })
+}
+
+/// Bind a request before it is sent: the digest the blocks of its response
+/// will record, and a check of every thinking block it replays. An invalid
+/// replay on a prefix-bound model is an INV-1 defect; the API safety net
+/// (`thinking.block_binding`) decides what the provider does with it.
+fn bind_request(model: &str, request: &ApiRequest) -> RequestBinding {
+    let report = jcode_provider_anthropic::binding::analyze_request(request);
+    if jcode_provider_core::anthropic_reasoning_binding(model)
+        == jcode_provider_core::ReasoningBinding::PrefixBound
+    {
+        for block in report.invalid() {
+            jcode_provider_core::anthropic_binding_diagnostics::record_local_invalid_replay(
+                block.validity.label(),
+            );
+            jcode_base::logging::warn(&format!(
+                "INV-1: replayed Claude thinking at {} is {} (produced by {})",
+                block.path,
+                block.validity.label(),
+                block.model
+            ));
+        }
+    }
+    report.binding
 }
 
 #[expect(
@@ -1612,6 +1769,7 @@ async fn run_stream_with_retries(
     initial_token: String,
     is_oauth: bool,
     mut request: ApiRequest,
+    request_binding: RequestBinding,
     tx: mpsc::Sender<Result<StreamEvent>>,
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
     model_name: String,
@@ -1674,6 +1832,7 @@ async fn run_stream_with_retries(
             token.clone(),
             is_oauth,
             request.clone(),
+            &request_binding,
             attempt_tx,
             &model_name,
             &oauth_session_id,
@@ -1917,18 +2076,16 @@ async fn force_refresh_oauth_token(
     Ok(refreshed.access_token)
 }
 
-/// Stream the response from Anthropic API
 /// A Messages API request with the production endpoint, version, auth and
-/// beta headers for the credential route. `extra_beta` appends one beta flag
-/// (used only by the provider-contract probe). The caller sets `accept`.
+/// beta headers for the credential route and the request's `thinking`
+/// parameter. The caller sets `accept`.
 fn messages_request(
     client: &Client,
     token: &str,
     is_oauth: bool,
     model_name: &str,
-    thinking_enabled: bool,
+    thinking_betas: ThinkingBetas,
     oauth_session_id: &str,
-    extra_beta: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let url = if is_oauth { API_URL_OAUTH } else { API_URL };
     let req = client
@@ -1942,11 +2099,7 @@ fn messages_request(
     } else {
         "prompt-caching-2024-07-31"
     };
-    let mut beta_header = anthropic_beta_header_with_thinking(base_beta, thinking_enabled);
-    if let Some(extra) = extra_beta {
-        beta_header.push(',');
-        beta_header.push_str(extra);
-    }
+    let beta_header = anthropic_beta_header(base_beta, thinking_betas);
     if is_oauth {
         // OAuth tokens require Bearer auth (not x-api-key), the Claude CLI
         // User-Agent, the beta set and the ?beta=true query param (in the URL).
@@ -1962,17 +2115,21 @@ fn messages_request(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one streaming attempt needs the request, its binding and the transport identity together"
+)]
 async fn stream_response(
     client: Client,
     token: String,
     is_oauth: bool,
     request: ApiRequest,
+    request_binding: &RequestBinding,
     tx: mpsc::Sender<Result<StreamEvent>>,
     model_name: &str,
     oauth_session_id: &str,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
-    let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
     if std::env::var("JCODE_ANTHROPIC_DEBUG")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -1994,9 +2151,8 @@ async fn stream_response(
         &token,
         is_oauth,
         model_name,
-        request.thinking.is_some(),
+        ThinkingBetas::of_request(&request),
         oauth_session_id,
-        None,
     )
     .header(
         "accept",
@@ -2040,10 +2196,7 @@ async fn stream_response(
     // Parse SSE stream
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut sse_state = SseStreamState {
-        requested_model_base,
-        ..SseStreamState::default()
-    };
+    let mut sse_state = SseStreamState::new(&request.model, request_binding.clone());
 
     // Idle timeout between streamed chunks. Configurable via
     // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
@@ -2339,12 +2492,53 @@ fn is_oauth_catalog_auth_error(error_str: &str) -> bool {
         || is_oauth_auth_error(&lower)
 }
 
-fn anthropic_beta_header_with_thinking(base: &str, thinking_enabled: bool) -> String {
-    if thinking_enabled && !base.contains("interleaved-thinking-2025-05-14") {
-        format!("{base},interleaved-thinking-2025-05-14")
-    } else {
-        base.to_string()
+/// Betas a request's `thinking` parameter needs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ThinkingBetas {
+    /// `thinking` is present.
+    thinking: bool,
+    /// `thinking.block_binding` is present.
+    binding_controls: bool,
+}
+
+impl ThinkingBetas {
+    fn of_request(request: &ApiRequest) -> Self {
+        Self {
+            thinking: request.thinking.is_some(),
+            binding_controls: request
+                .thinking
+                .as_ref()
+                .and_then(ApiThinking::block_binding)
+                .is_some(),
+        }
     }
+
+    /// The same derivation for a request body built as JSON (the
+    /// provider-contract probe edits bodies after building them).
+    fn of_body(body: &Value) -> Self {
+        let thinking = body.get("thinking");
+        Self {
+            thinking: thinking.is_some(),
+            binding_controls: thinking.and_then(|t| t.get("block_binding")).is_some(),
+        }
+    }
+}
+
+fn anthropic_beta_header(base: &str, betas: ThinkingBetas) -> String {
+    let mut header = base.to_string();
+    let mut add = |beta: &str| {
+        if !header.split(',').any(|existing| existing == beta) {
+            header.push(',');
+            header.push_str(beta);
+        }
+    };
+    if betas.thinking {
+        add("interleaved-thinking-2025-05-14");
+    }
+    if betas.binding_controls {
+        add(THINKING_BINDING_CONTROLS_BETA);
+    }
+    header
 }
 
 /// Accumulator for tool_use blocks (input comes in chunks)
@@ -2385,20 +2579,100 @@ struct SseEvent {
 
 /// Mutable accumulator state threaded through [`process_sse_event`] across a
 /// single SSE response stream.
-#[derive(Default)]
 struct SseStreamState {
     current_tool_use: Option<ToolUseAccumulator>,
-    current_thinking_block: bool,
+    /// The thinking block being streamed. Each block is accumulated on its own
+    /// and emitted whole at `content_block_stop` (INT-01 INV-3).
+    current_thinking: Option<ThinkingAccumulator>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
     /// Lowercased base id of the model we asked for, so `message_start` can flag
     /// a silent server-side substitution (e.g. an unavailable id aliased to a
-    /// different model). Empty when unknown (e.g. in unit tests).
+    /// different model).
     requested_model_base: String,
     /// Set once we have warned about a substitution, so we only warn per stream.
     warned_model_substitution: bool,
+    /// The model recorded on captured blocks: the one the provider reports
+    /// serving, or the requested one until `message_start` names it.
+    block_model: String,
+    /// Where this response's thinking blocks sit in the conversation.
+    request_binding: RequestBinding,
+    /// Fingerprint of the thinking block before the next one: the request's
+    /// last, then each block this response produced.
+    previous_thinking: Option<String>,
+}
+
+/// A thinking block in progress.
+enum ThinkingAccumulator {
+    Thinking { thinking: String, signature: String },
+    Redacted { data: String },
+}
+
+impl SseStreamState {
+    fn new(requested_model: &str, request_binding: RequestBinding) -> Self {
+        Self {
+            current_tool_use: None,
+            current_thinking: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            requested_model_base: strip_1m_suffix(requested_model).to_ascii_lowercase(),
+            warned_model_substitution: false,
+            block_model: strip_1m_suffix(requested_model).to_string(),
+            previous_thinking: request_binding.last_thinking.clone(),
+            request_binding,
+        }
+    }
+
+    /// Close the thinking block in progress. A signed block becomes a
+    /// replayable block bound to the request; an unsigned one (never produced
+    /// by the API) stays display-only.
+    fn finish_thinking(&mut self) -> Option<ReplayableReasoningBlock> {
+        let (fingerprint, block) = match self.current_thinking.take()? {
+            ThinkingAccumulator::Thinking {
+                thinking,
+                signature,
+            } => {
+                if signature.is_empty() {
+                    jcode_base::logging::warn(
+                        "Anthropic streamed a thinking block without a signature; it is kept for display only",
+                    );
+                    return None;
+                }
+                let fingerprint = thinking_fingerprint(ThinkingPayload::Signature, &signature);
+                let binding = self.block_binding();
+                (
+                    fingerprint,
+                    ReplayableReasoningBlock::AnthropicThinking {
+                        thinking,
+                        signature,
+                        binding,
+                    },
+                )
+            }
+            ThinkingAccumulator::Redacted { data } => {
+                let fingerprint = thinking_fingerprint(ThinkingPayload::RedactedData, &data);
+                let binding = self.block_binding();
+                (
+                    fingerprint,
+                    ReplayableReasoningBlock::AnthropicRedactedThinking { data, binding },
+                )
+            }
+        };
+        self.previous_thinking = Some(fingerprint);
+        Some(block)
+    }
+
+    fn block_binding(&self) -> AnthropicThinkingBinding {
+        AnthropicThinkingBinding {
+            model: self.block_model.clone(),
+            prefix_digest: self.request_binding.prefix_digest.clone(),
+            predecessor: self.previous_thinking.clone(),
+        }
+    }
 }
 
 /// Process an SSE event and return StreamEvents if applicable
@@ -2416,7 +2690,11 @@ fn process_sse_event(
                 // The server echoes the model that actually served the request.
                 // Log it so we can confirm there was no silent server-side
                 // substitution (and surface it under JCODE_LOG_SERVED_MODEL).
+                if let Some(transformations) = parsed.message.input_transformations.as_deref() {
+                    record_input_transformations(transformations, &mut events);
+                }
                 if let Some(served) = parsed.message.model.as_deref() {
+                    state.block_model = strip_1m_suffix(served).to_string();
                     jcode_base::logging::info(&format!("Anthropic served model={}", served));
                     if std::env::var("JCODE_LOG_SERVED_MODEL").is_ok() {
                         eprintln!("[anthropic] served model={served}");
@@ -2467,16 +2745,22 @@ fn process_sse_event(
                     ApiContentBlockStart::Text { .. } => {
                         // Text block starting - nothing to emit yet
                     }
-                    ApiContentBlockStart::Thinking { _thinking, .. } => {
-                        state.current_thinking_block = true;
+                    ApiContentBlockStart::Thinking {
+                        thinking,
+                        signature,
+                    } => {
                         events.push(StreamEvent::ThinkingStart);
-                        if !_thinking.is_empty() {
-                            events.push(StreamEvent::ThinkingDelta(_thinking));
+                        if !thinking.is_empty() {
+                            events.push(StreamEvent::ThinkingDelta(thinking.clone()));
                         }
+                        state.current_thinking = Some(ThinkingAccumulator::Thinking {
+                            thinking,
+                            signature: signature.unwrap_or_default(),
+                        });
                     }
-                    ApiContentBlockStart::RedactedThinking { .. } => {
-                        state.current_thinking_block = true;
+                    ApiContentBlockStart::RedactedThinking { data } => {
                         events.push(StreamEvent::ThinkingStart);
+                        state.current_thinking = Some(ThinkingAccumulator::Redacted { data });
                     }
                     ApiContentBlockStart::ToolUse { id, name } => {
                         let registry_name = ANTHROPIC_TOOL_NAME_POLICY.registry_name(&name);
@@ -2518,10 +2802,21 @@ fn process_sse_event(
                         events.push(StreamEvent::ToolInputDelta(partial_json));
                     }
                     ApiDelta::Thinking { thinking } => {
+                        if let Some(ThinkingAccumulator::Thinking { thinking: text, .. }) =
+                            state.current_thinking.as_mut()
+                        {
+                            text.push_str(&thinking);
+                        }
                         events.push(StreamEvent::ThinkingDelta(thinking));
                     }
                     ApiDelta::Signature { signature } => {
-                        events.push(StreamEvent::ThinkingSignatureDelta(signature));
+                        if let Some(ThinkingAccumulator::Thinking {
+                            signature: accumulated,
+                            ..
+                        }) = state.current_thinking.as_mut()
+                        {
+                            accumulated.push_str(&signature);
+                        }
                     }
                 }
             }
@@ -2530,13 +2825,20 @@ fn process_sse_event(
             // If we were accumulating a tool_use, it's complete now
             if state.current_tool_use.take().is_some() {
                 events.push(StreamEvent::ToolUseEnd);
-            } else if state.current_thinking_block {
-                state.current_thinking_block = false;
+            } else if state.current_thinking.is_some() {
+                if let Some(block) = state.finish_thinking() {
+                    events.push(StreamEvent::ReplayableReasoning(block));
+                }
                 events.push(StreamEvent::ThinkingEnd);
             }
         }
         "message_delta" => {
             if let Ok(parsed) = serde_json::from_str::<MessageDeltaEvent>(&event.data) {
+                // After a mid-stream server-side fallback the final
+                // `message_delta` repeats the transformations.
+                if let Some(transformations) = parsed.input_transformations.as_deref() {
+                    record_input_transformations(transformations, &mut events);
+                }
                 if let Some(usage) = parsed.usage {
                     state.output_tokens = usage.output_tokens.map(|t| t as u64);
                 }
@@ -2575,6 +2877,43 @@ fn process_sse_event(
     events
 }
 
+/// Surface the response's `input_transformations` (beta
+/// `thinking-binding-controls-2026-08-01`). Every entry is logged and counted.
+/// A prefix-binding mismatch means jcode edited history it should only have
+/// appended to: an INV-1 defect, shown as a status notice. Types and reasons
+/// this build does not know are recorded generically, as the API asks.
+fn record_input_transformations(
+    transformations: &[InputTransformation],
+    events: &mut Vec<StreamEvent>,
+) {
+    let mut prefix_mismatches = 0usize;
+    for entry in transformations {
+        let kind = entry.kind.as_deref().unwrap_or("unknown");
+        let reason = entry.reason.as_deref().unwrap_or("unknown");
+        let path = entry.path.as_deref().unwrap_or("?");
+        jcode_provider_core::anthropic_binding_diagnostics::record_input_transformation(
+            kind, reason,
+        );
+        if reason == "prefix_binding_mismatch" {
+            prefix_mismatches += 1;
+            jcode_base::logging::warn(&format!(
+                "INV-1: Anthropic reported {kind} ({reason}) at {path}"
+            ));
+        } else {
+            jcode_base::logging::info(&format!(
+                "Anthropic input transformation {kind} ({reason}) at {path}"
+            ));
+        }
+    }
+    if prefix_mismatches > 0 {
+        events.push(StreamEvent::StatusDetail {
+            detail: format!(
+                "⚠ Claude could not use {prefix_mismatches} earlier thinking block(s): the conversation before them changed"
+            ),
+        });
+    }
+}
+
 // ============================================================================
 // API Types
 // ============================================================================
@@ -2608,7 +2947,7 @@ fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
 mod sse_types;
 use sse_types::{
     ApiContentBlockStart, ApiDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
-    MessageDeltaEvent, MessageStartEvent,
+    InputTransformation, MessageDeltaEvent, MessageStartEvent,
 };
 
 mod context_window;

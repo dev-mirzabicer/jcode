@@ -350,7 +350,17 @@ pub fn context_block_kind(block: &ContentBlock) -> StoredContextBlockKind {
         ContentBlock::Text { .. } => StoredContextBlockKind::Text,
         ContentBlock::Reasoning { .. } => StoredContextBlockKind::Reasoning,
         ContentBlock::ReasoningTrace { .. } => StoredContextBlockKind::ReasoningTrace,
-        ContentBlock::AnthropicThinking { .. } => StoredContextBlockKind::AnthropicThinking,
+        // Thinking stored without a binding record is never replayed, so it is
+        // history-only like a trace.
+        ContentBlock::AnthropicThinking { binding: None, .. } => {
+            StoredContextBlockKind::ReasoningTrace
+        }
+        ContentBlock::AnthropicThinking {
+            binding: Some(_), ..
+        }
+        | ContentBlock::AnthropicRedactedThinking { .. } => {
+            StoredContextBlockKind::AnthropicThinking
+        }
         ContentBlock::OpenAIReasoning { .. } => StoredContextBlockKind::OpenAiReasoning,
         ContentBlock::ToolUse { .. } => StoredContextBlockKind::ToolUse,
         ContentBlock::ToolResult { .. } => StoredContextBlockKind::ToolResult,
@@ -821,6 +831,11 @@ mod tests {
                 vec![ContentBlock::AnthropicThinking {
                     thinking: "thinking".to_string(),
                     signature: "signature".to_string(),
+                    binding: Some(jcode_message_types::AnthropicThinkingBinding {
+                        model: "claude-test".to_string(),
+                        prefix_digest: "anthropic-prefix-v1:test".to_string(),
+                        predecessor: None,
+                    }),
                 }],
             ),
             stored(
@@ -896,6 +911,11 @@ mod tests {
                 vec![ContentBlock::AnthropicThinking {
                     thinking: "inside anthropic".to_string(),
                     signature: "signature".to_string(),
+                    binding: Some(jcode_message_types::AnthropicThinkingBinding {
+                        model: "claude-test".to_string(),
+                        prefix_digest: "anthropic-prefix-v1:test".to_string(),
+                        predecessor: None,
+                    }),
                 }],
             ),
             stored(

@@ -1,6 +1,14 @@
 use super::{format_messages, validate_projected_messages};
-use jcode_message_types::{ContentBlock, Message, Role};
+use jcode_message_types::{AnthropicThinkingBinding, ContentBlock, Message, Role};
 use serde_json::json;
+
+fn binding() -> AnthropicThinkingBinding {
+    AnthropicThinkingBinding {
+        model: "claude-opus-5-5".to_string(),
+        prefix_digest: "anthropic-prefix-v1:test".to_string(),
+        predecessor: None,
+    }
+}
 
 fn message(role: Role, content: Vec<ContentBlock>) -> Message {
     Message {
@@ -17,6 +25,7 @@ fn thinking_tool_fixture(include_thinking: bool) -> Vec<Message> {
         assistant_content.push(ContentBlock::AnthropicThinking {
             thinking: "I will inspect both files.".to_string(),
             signature: "signed-thinking-state".to_string(),
+            binding: Some(binding()),
         });
     }
     assistant_content.extend([
@@ -103,6 +112,7 @@ fn thinking_without_signature_is_rejected_with_precise_diagnostic() {
                 ContentBlock::AnthropicThinking {
                     thinking: "unsigned".to_string(),
                     signature: String::new(),
+                    binding: Some(binding()),
                 },
                 ContentBlock::Text {
                     text: "answer".to_string(),
@@ -114,7 +124,75 @@ fn thinking_without_signature_is_rejected_with_precise_diagnostic() {
     ];
 
     let error = validate_projected_messages(&messages).unwrap_err();
-    assert!(error.contains("without a complete non-empty signature"));
+    assert!(error.contains("without its signed payload"));
+}
+
+#[test]
+fn signed_blocks_with_empty_text_and_redacted_blocks_validate_and_replay_in_order() {
+    let messages = vec![
+        message(
+            Role::Assistant,
+            vec![
+                ContentBlock::AnthropicThinking {
+                    thinking: String::new(),
+                    signature: "signed-empty".to_string(),
+                    binding: Some(binding()),
+                },
+                ContentBlock::Text {
+                    text: "between".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::AnthropicRedactedThinking {
+                    data: "encrypted-data".to_string(),
+                    binding: binding(),
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                    cache_control: None,
+                },
+            ],
+        ),
+        Message::user("Continue."),
+    ];
+
+    validate_projected_messages(&messages).expect("empty-text signed thinking is valid");
+    let json = serde_json::to_value(format_messages(&messages)).unwrap();
+    assert_eq!(
+        json[0]["content"],
+        json!([
+            {"type": "thinking", "thinking": "", "signature": "signed-empty"},
+            {"type": "text", "text": "between"},
+            {"type": "redacted_thinking", "data": "encrypted-data"},
+            {"type": "text", "text": "answer"},
+        ]),
+        "blocks replay byte-exact, in stored order, without jcode's binding record"
+    );
+}
+
+#[test]
+fn thinking_stored_without_a_binding_record_is_never_replayed() {
+    let messages = vec![
+        message(
+            Role::Assistant,
+            vec![
+                ContentBlock::AnthropicThinking {
+                    thinking: "legacy".to_string(),
+                    signature: "legacy-signature".to_string(),
+                    binding: None,
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                    cache_control: None,
+                },
+            ],
+        ),
+        Message::user("Continue."),
+    ];
+
+    assert_eq!(super::unbound_thinking_block_count(&messages), 1);
+    let json = serde_json::to_value(format_messages(&messages)).unwrap();
+    assert!(!json.to_string().contains("legacy-signature"));
+    validate_projected_messages(&messages).expect("the rest of the turn stays sendable");
 }
 
 #[test]

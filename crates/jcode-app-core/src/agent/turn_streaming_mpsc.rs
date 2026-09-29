@@ -334,7 +334,9 @@ impl Agent {
                 vec![("mode", "mpsc".to_string())],
             );
 
-            let mut text_content = String::new();
+            // Live display copy of the visible text, for the inline tail and
+            // text-wrapped tool-call detection. What is stored comes from `turn`.
+            let mut live_text = String::new();
             let mut text_wrapped_detected = false;
             // Inline swarm worker output tap: publish a throttled tail of the
             // in-progress assistant text to the bus so a coordinator can render
@@ -362,11 +364,8 @@ impl Agent {
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, crate::tool::ToolOutput> =
                 std::collections::HashMap::new();
-            let provider_name = self.provider.name().to_string();
-            let store_reasoning_content =
-                crate::provider::stores_reasoning_content_for_context(&provider_name);
-            let mut reasoning_content = String::new();
-            let mut reasoning_signature = String::new();
+            let replay_kind = crate::provider::stored_reasoning_replay_kind(self.provider.as_ref());
+            let mut turn = crate::message::AssistantTurnAssembler::new();
             // Whether a live reasoning region is currently streaming to the client.
             // Raw reasoning deltas are sent as `ReasoningDelta`; the client owns the
             // dim/italic styling and live partial-line rendering. We close the region
@@ -375,7 +374,6 @@ impl Agent {
             // Last time hidden (non-displayed) reasoning activity was relayed
             // to clients as a keepalive; throttles issue #451 keepalives.
             let mut hidden_activity_last = Instant::now();
-            let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
 
             let mut keepalive = stream_keepalive_ticker();
             loop {
@@ -447,14 +445,11 @@ impl Agent {
                                 cache_creation_input_tokens: usage_cache_creation,
                             });
                             self.checkpoint_partial_provider_output(
-                                &text_content,
-                                &reasoning_content,
-                                &reasoning_signature,
-                                &openai_reasoning_items,
+                                &turn,
                                 &tool_calls,
                                 &sdk_tool_results,
                                 &generated_image_contexts,
-                                store_reasoning_content,
+                                replay_kind,
                                 token_usage,
                             )
                             .await?;
@@ -506,6 +501,7 @@ impl Agent {
 
                 match event {
                     StreamEvent::ThinkingStart => {
+                        turn.reasoning_started();
                         // Reasoning tokens are counted in provider output usage even when
                         // `display.show_thinking` hides the text. Let remote clients start
                         // their TPS timer without forcing hidden reasoning into the transcript.
@@ -513,12 +509,9 @@ impl Agent {
                             phase: crate::message::ConnectionPhase::Streaming.to_string(),
                         });
                     }
-                    StreamEvent::ThinkingEnd => {}
-                    StreamEvent::ThinkingSignatureDelta(signature) => {
-                        if store_reasoning_content {
-                            reasoning_signature.push_str(&signature);
-                        }
-                    }
+                    StreamEvent::ThinkingEnd => turn.reasoning_ended(),
+                    StreamEvent::ThinkingSignatureDelta(_) => {}
+                    StreamEvent::ReplayableReasoning(block) => turn.replayable_reasoning(block),
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Always stream reasoning to clients. Whether to *render*
                         // it is a per-client presentation choice (the TUI keys off
@@ -540,9 +533,7 @@ impl Agent {
                             hidden_activity_last = Instant::now();
                             send_stream_keepalive_mpsc(&event_tx);
                         }
-                        // Always capture reasoning text so it can be persisted as a
-                        // history-only trace, regardless of provider replay support.
-                        reasoning_content.push_str(&thinking_text);
+                        turn.reasoning_delta(&thinking_text);
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         if reasoning_open {
@@ -561,9 +552,10 @@ impl Agent {
                                 duration_secs: None,
                             });
                         }
-                        text_content.push_str(&text);
+                        turn.text(&text);
+                        live_text.push_str(&text);
                         if inline_output_tap {
-                            self.inline_tail.set_live(&text_content);
+                            self.inline_tail.set_live(&live_text);
                             if inline_tap_last.elapsed() >= std::time::Duration::from_millis(200) {
                                 inline_tap_last = Instant::now();
                                 self.publish_inline_tail();
@@ -574,11 +566,10 @@ impl Agent {
                             // markers straddling the boundary) instead of the
                             // whole accumulated response on every token.
                             if let Some(marker_idx) =
-                                find_wrap_marker_incremental(&text_content, text.len())
+                                find_wrap_marker_incremental(&live_text, text.len())
                             {
                                 text_wrapped_detected = true;
-                                let clean_prefix =
-                                    text_content[..marker_idx].trim_end().to_string();
+                                let clean_prefix = live_text[..marker_idx].trim_end().to_string();
                                 let _ =
                                     event_tx.send(ServerEvent::TextReplace { text: clean_prefix });
                             } else {
@@ -593,12 +584,14 @@ impl Agent {
                             let _ = event_tx.send(ServerEvent::TextDelta {
                                 text: "\n\n[generation interrupted - server reloading]".to_string(),
                             });
-                            text_content
-                                .push_str("\n\n[generation interrupted - server reloading]");
+                            let marker = "\n\n[generation interrupted - server reloading]";
+                            turn.text(marker);
+                            live_text.push_str(marker);
                             break;
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        turn.tool_use_started(&id);
                         if reasoning_open {
                             reasoning_open = false;
                             let _ = event_tx.send(ServerEvent::ReasoningDone {
@@ -672,14 +665,11 @@ impl Agent {
                                 }
                                 sdk_tool_results.insert(tool_use_id.clone(), output);
                                 self.checkpoint_partial_provider_output(
-                                    &text_content,
-                                    &reasoning_content,
-                                    &reasoning_signature,
-                                    &openai_reasoning_items,
+                                    &turn,
                                     &tool_calls,
                                     &sdk_tool_results,
                                     &generated_image_contexts,
-                                    store_reasoning_content,
+                                    replay_kind,
                                     None,
                                 )
                                 .await?;
@@ -783,14 +773,11 @@ impl Agent {
                     StreamEvent::RetryRollback { attempt, max } => {
                         if !sdk_tool_results.is_empty() {
                             self.checkpoint_partial_provider_output(
-                                &text_content,
-                                &reasoning_content,
-                                &reasoning_signature,
-                                &openai_reasoning_items,
+                                &turn,
                                 &tool_calls,
                                 &sdk_tool_results,
                                 &generated_image_contexts,
-                                store_reasoning_content,
+                                replay_kind,
                                 None,
                             )
                             .await?;
@@ -807,7 +794,7 @@ impl Agent {
                             "Mid-stream retry rollback (attempt {}/{}): discarding partial output ({} text chars, {} tool calls)",
                             attempt,
                             max,
-                            text_content.len(),
+                            live_text.len(),
                             tool_calls.len(),
                         ));
                         log_agent_provider_stream_lifecycle(
@@ -819,11 +806,11 @@ impl Agent {
                                 ("mode", "mpsc".to_string()),
                                 ("attempt", attempt.to_string()),
                                 ("max", max.to_string()),
-                                ("text_chars", text_content.len().to_string()),
+                                ("text_chars", live_text.len().to_string()),
                                 ("tool_calls", tool_calls.len().to_string()),
                             ],
                         );
-                        text_content.clear();
+                        live_text.clear();
                         if inline_output_tap {
                             // The provider replays from the top; drop the
                             // discarded partial from the live tail too.
@@ -835,10 +822,8 @@ impl Agent {
                         current_tool_input.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
-                        reasoning_content.clear();
-                        reasoning_signature.clear();
+                        turn.reset();
                         reasoning_open = false;
-                        openai_reasoning_items.clear();
                         saw_message_end = false;
                         stop_reason = None;
                         let _ = event_tx.send(ServerEvent::RetryRollback { attempt, max });
@@ -854,7 +839,7 @@ impl Agent {
                         if inline_output_tap {
                             // Fold the finished text into the rolling tail so
                             // it survives the next turn/continuation.
-                            self.inline_tail.set_live(&text_content);
+                            self.inline_tail.set_live(&live_text);
                             self.inline_tail.commit_live();
                         }
                         // Close any still-open reasoning region (e.g. a reasoning-only
@@ -883,14 +868,12 @@ impl Agent {
                         encrypted_content,
                         status,
                     } => {
-                        if store_reasoning_content {
-                            openai_reasoning_items.push(ContentBlock::OpenAIReasoning {
-                                id,
-                                summary,
-                                encrypted_content,
-                                status,
-                            });
-                        }
+                        turn.openai_reasoning(ContentBlock::OpenAIReasoning {
+                            id,
+                            summary,
+                            encrypted_content,
+                            status,
+                        });
                     }
                     StreamEvent::NativeToolCall {
                         request_id,
@@ -950,14 +933,11 @@ impl Agent {
                                 cache_creation_input_tokens: usage_cache_creation,
                             });
                             self.checkpoint_partial_provider_output(
-                                &text_content,
-                                &reasoning_content,
-                                &reasoning_signature,
-                                &openai_reasoning_items,
+                                &turn,
                                 &tool_calls,
                                 &sdk_tool_results,
                                 &generated_image_contexts,
-                                store_reasoning_content,
+                                replay_kind,
                                 token_usage,
                             )
                             .await?;
@@ -1011,14 +991,11 @@ impl Agent {
                 &sdk_tool_results,
             ) {
                 self.checkpoint_partial_provider_output(
-                    &text_content,
-                    &reasoning_content,
-                    &reasoning_signature,
-                    &openai_reasoning_items,
+                    &turn,
                     &correlated,
                     &sdk_tool_results,
                     &generated_image_contexts,
-                    store_reasoning_content,
+                    replay_kind,
                     None,
                 )
                 .await?;
@@ -1129,7 +1106,10 @@ impl Agent {
             }
 
             let had_tool_calls_before = !tool_calls.is_empty();
-            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+            live_text = turn.visible_text();
+            if self.recover_text_wrapped_tool_call(&mut live_text, &mut tool_calls) {
+                turn.replace_visible_text(live_text.clone());
+            }
 
             if !had_tool_calls_before
                 && !tool_calls.is_empty()
@@ -1137,7 +1117,7 @@ impl Agent {
                 && tc.id.starts_with("fallback_text_call_")
             {
                 let _ = event_tx.send(ServerEvent::TextReplace {
-                    text: text_content.clone(),
+                    text: live_text.clone(),
                 });
                 let _ = event_tx.send(ServerEvent::ToolStart {
                     id: tc.id.clone(),
@@ -1152,32 +1132,9 @@ impl Agent {
                 });
             }
 
-            // Add assistant message to history
-            let mut content_blocks = Vec::new();
-            if !text_content.is_empty() {
-                content_blocks.push(ContentBlock::Text {
-                    text: text_content.clone(),
-                    cache_control: None,
-                });
-            }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
-            if store_reasoning_content {
-                content_blocks.extend(openai_reasoning_items.iter().cloned());
-            }
-            for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: None,
-                });
-            }
+            // Add assistant message to history, in the order the provider
+            // produced it.
+            let content_blocks = turn.content_blocks(replay_kind, &tool_calls);
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
@@ -1234,7 +1191,7 @@ impl Agent {
                 if saw_message_end
                     && !self.is_graceful_shutdown()
                     && self.maybe_continue_empty_post_tool_response(
-                        text_content.trim().is_empty(),
+                        live_text.trim().is_empty(),
                         prompt_has_recent_tool_result,
                         stop_reason.as_deref(),
                         &mut empty_post_tool_continuations,
@@ -1258,15 +1215,15 @@ impl Agent {
                             && !self.is_graceful_shutdown()
                             && let Some(notice) = Self::provider_guardrail_notice(
                                 stop_reason.as_deref(),
-                                text_content.trim().is_empty(),
-                                !reasoning_content.trim().is_empty(),
+                                live_text.trim().is_empty(),
+                                turn.has_readable_reasoning(),
                             )
                         {
                             logging::warn(&format!(
-                                "{}: turn ended with no visible output (stop_reason={:?}, reasoning_chars={})",
+                                "{}: turn ended with no visible output (stop_reason={:?}, readable_reasoning={})",
                                 Self::empty_turn_log_event(stop_reason.as_deref()),
                                 stop_reason,
-                                reasoning_content.len()
+                                turn.has_readable_reasoning()
                             ));
                             let _ = event_tx.send(ServerEvent::ProviderGuardrail {
                                 stop_reason: stop_reason.clone(),

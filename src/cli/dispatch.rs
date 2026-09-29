@@ -595,6 +595,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             provider,
             contract: Some(contract),
             contract_out,
+            capture_sse,
             ..
         }) => {
             crate::cli::provider_doctor::run_provider_contract_command(
@@ -602,6 +603,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 &contract,
                 args.model.as_deref(),
                 contract_out,
+                capture_sse,
             )
             .await?;
         }

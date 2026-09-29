@@ -357,9 +357,13 @@ pub fn build_context_message_detail(
         ContentBlock::AnthropicThinking {
             thinking,
             signature,
+            ..
         } => {
             text = thinking.clone();
             opaque_signature_present = !signature.is_empty();
+        }
+        ContentBlock::AnthropicRedactedThinking { .. } => {
+            encrypted_state_present = true;
         }
         ContentBlock::OpenAIReasoning {
             summary,
@@ -472,7 +476,14 @@ fn provider_removable_reasoning_kinds(
                 StoredContextBlockKind::Reasoning,
                 ContextReasoningBlockKind::GenericReasoning,
             )),
-            ContentBlock::AnthropicThinking { .. } => Some((
+            ContentBlock::AnthropicThinking { binding: None, .. } => Some((
+                StoredContextBlockKind::ReasoningTrace,
+                ContextReasoningBlockKind::ReasoningTrace,
+            )),
+            ContentBlock::AnthropicThinking {
+                binding: Some(_), ..
+            }
+            | ContentBlock::AnthropicRedactedThinking { .. } => Some((
                 StoredContextBlockKind::AnthropicThinking,
                 ContextReasoningBlockKind::AnthropicThinking,
             )),
@@ -538,6 +549,9 @@ fn bounded_message_preview(message: &StoredMessage) -> String {
             }
             ContentBlock::AnthropicThinking { thinking, .. } => {
                 non_empty(thinking).map(|text| format!("[thinking: {text}]"))
+            }
+            ContentBlock::AnthropicRedactedThinking { .. } => {
+                Some("[redacted thinking]".to_string())
             }
             ContentBlock::OpenAIReasoning { summary, .. } => {
                 let summary = summary.join(" ");
@@ -1701,6 +1715,11 @@ mod tests {
                 ContentBlock::AnthropicThinking {
                     thinking: "anthropic".to_string(),
                     signature: "signed".to_string(),
+                    binding: Some(crate::message::AnthropicThinkingBinding {
+                        model: "claude-test".to_string(),
+                        prefix_digest: "anthropic-prefix-v1:test".to_string(),
+                        predecessor: None,
+                    }),
                 },
                 ContentBlock::OpenAIReasoning {
                     id: "reasoning-id".to_string(),

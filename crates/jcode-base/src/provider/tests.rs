@@ -801,6 +801,7 @@ struct StubExternalRuntime {
     credential_mode: std::sync::RwLock<jcode_provider_core::CredentialMode>,
     context_continuation_invalidations: std::sync::atomic::AtomicUsize,
     context_validations: std::sync::atomic::AtomicUsize,
+    replay_kind: Option<jcode_provider_core::ContextReasoningBlockKind>,
 }
 
 impl StubExternalRuntime {
@@ -819,7 +820,18 @@ impl StubExternalRuntime {
             credential_mode: std::sync::RwLock::new(jcode_provider_core::CredentialMode::Auto),
             context_continuation_invalidations: std::sync::atomic::AtomicUsize::new(0),
             context_validations: std::sync::atomic::AtomicUsize::new(0),
+            replay_kind: None,
         }
+    }
+
+    fn replaying(mut self, kind: jcode_provider_core::ContextReasoningBlockKind) -> Self {
+        self.replay_kind = Some(kind);
+        self
+    }
+
+    /// The deprecated Claude CLI route, which replays no reasoning.
+    fn claude_cli() -> Self {
+        Self::new("claude", "Claude CLI", "cli", anthropic::AVAILABLE_MODELS)
     }
 
     fn context_continuation_invalidation_count(&self) -> usize {
@@ -861,10 +873,12 @@ impl StubExternalRuntime {
             "https",
             anthropic::AVAILABLE_MODELS,
         )
+        .replaying(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking)
     }
 
     fn openai() -> Self {
         Self::new("openai", "OpenAI", "https", ALL_OPENAI_MODELS)
+            .replaying(jcode_provider_core::ContextReasoningBlockKind::OpenAiReasoning)
     }
 }
 
@@ -948,6 +962,9 @@ impl Provider for StubExternalRuntime {
     fn invalidate_context_continuation(&self, _reason: &str) {
         self.context_continuation_invalidations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn reasoning_replay_kind(&self) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
+        self.replay_kind
     }
     fn validate_projected_context(
         &self,
@@ -1106,6 +1123,79 @@ fn context_continuation_invalidation_delegates_only_to_the_active_runtime() {
     provider.invalidate_context_continuation("conversation rewind");
     assert_eq!(openai.context_continuation_invalidation_count(), 1);
     assert_eq!(cursor.context_continuation_invalidation_count(), 1);
+}
+
+fn multi_provider_with_runtimes(
+    claude_cli: Option<Arc<dyn Provider>>,
+    anthropic: Option<Arc<dyn Provider>>,
+    openai: Option<Arc<dyn Provider>>,
+    active: ActiveProvider,
+) -> MultiProvider {
+    MultiProvider {
+        claude: RwLock::new(claude_cli),
+        anthropic: RwLock::new(anthropic),
+        openai: RwLock::new(openai),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        active: RwLock::new(active),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: None,
+        routes_memo: std::sync::Mutex::new(None),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }
+}
+
+#[test]
+fn reasoning_replay_kind_follows_the_runtime_a_request_dispatches_to() {
+    use jcode_provider_core::ContextReasoningBlockKind::{AnthropicThinking, OpenAiReasoning};
+    let anthropic: Arc<dyn Provider> = Arc::new(StubExternalRuntime::anthropic());
+    let claude_cli: Arc<dyn Provider> = Arc::new(StubExternalRuntime::claude_cli());
+    let openai: Arc<dyn Provider> = Arc::new(StubExternalRuntime::openai());
+
+    // Claude-direct: the concrete runtime replays thinking (children use it
+    // directly); top-level replay waits for INT-01/WP-05.
+    let provider = multi_provider_with_runtimes(
+        Some(claude_cli.clone()),
+        Some(anthropic.clone()),
+        Some(openai.clone()),
+        ActiveProvider::Claude,
+    );
+    assert_eq!(anthropic.reasoning_replay_kind(), Some(AnthropicThinking));
+    const { assert!(!TOP_LEVEL_ANTHROPIC_THINKING_REPLAY) };
+    assert_eq!(provider.reasoning_replay_kind(), None);
+    assert_eq!(
+        top_level_replay_kind(anthropic.reasoning_replay_kind(), true),
+        Some(AnthropicThinking),
+        "the WP-05 switch passes the dispatching runtime's kind through"
+    );
+
+    // Claude CLI only: no replay, with or without the switch.
+    let cli_only =
+        multi_provider_with_runtimes(Some(claude_cli.clone()), None, None, ActiveProvider::Claude);
+    assert_eq!(cli_only.reasoning_replay_kind(), None);
+    assert_eq!(
+        top_level_replay_kind(claude_cli.reasoning_replay_kind(), true),
+        None
+    );
+
+    // OpenAI: unchanged, delegated to the OpenAI runtime.
+    provider.set_active_provider(ActiveProvider::OpenAI);
+    assert_eq!(provider.reasoning_replay_kind(), Some(OpenAiReasoning));
+    assert_eq!(
+        top_level_replay_kind(Some(OpenAiReasoning), false),
+        Some(OpenAiReasoning)
+    );
+
+    // A slot with no runtime replays nothing.
+    let empty = multi_provider_with_runtimes(None, None, None, ActiveProvider::Claude);
+    assert_eq!(empty.reasoning_replay_kind(), None);
 }
 
 #[test]

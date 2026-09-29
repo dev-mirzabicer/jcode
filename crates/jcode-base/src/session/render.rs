@@ -525,11 +525,9 @@ fn render_messages_and_images_with_compacted_history_inner(
         }
         let message_role = msg.role.clone();
         let mut text = String::new();
-        // Reasoning is accumulated separately so it can be rendered *before* the
-        // answer text, matching the live streaming order. Providers persist the
-        // assistant turn as `[Text, ReasoningTrace, ToolUse]`, so appending
-        // reasoning into `text` in block order would otherwise show the thinking
-        // *after* the answer on resume/re-render.
+        // Reasoning is accumulated separately so it is rendered *before* the
+        // answer text, matching the live streaming order, whatever the stored
+        // block order (older sessions stored `[Text, ReasoningTrace, ToolUse]`).
         let mut reasoning = String::new();
         let mut tool_calls: Vec<String> = Vec::new();
         let mut current_tool: Option<ToolCall> = None;
@@ -616,10 +614,15 @@ fn render_messages_and_images_with_compacted_history_inner(
                         stored_index: Some(stored_index),
                     });
                 }
-                ContentBlock::Reasoning { text: t } | ContentBlock::ReasoningTrace { text: t } => {
+                // Signed Anthropic thinking carries its own readable text; no
+                // separate trace is stored beside it.
+                ContentBlock::Reasoning { text: t }
+                | ContentBlock::ReasoningTrace { text: t }
+                | ContentBlock::AnthropicThinking { thinking: t, .. } => {
                     reasoning.push_str(&format_reasoning_markup(t));
                 }
-                ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
+                ContentBlock::AnthropicRedactedThinking { .. }
+                | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
                     let anchor =
                         image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);

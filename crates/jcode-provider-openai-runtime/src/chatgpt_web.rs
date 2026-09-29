@@ -685,6 +685,7 @@ fn build_web_prompt(
                 ContentBlock::Reasoning { .. }
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
+                | ContentBlock::AnthropicRedactedThinking { .. }
                 | ContentBlock::OpenAIReasoning { .. }
                 | ContentBlock::OpenAICompaction { .. } => {}
             }

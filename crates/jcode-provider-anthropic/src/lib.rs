@@ -1,5 +1,6 @@
 use jcode_message_types::{
-    ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition, sanitize_tool_id,
+    AnthropicThinkingBinding, ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT,
+    ToolDefinition, sanitize_tool_id,
 };
 use jcode_provider_core::{ANTHROPIC_TOOL_NAME_POLICY, ContextRequestBuilderValidation};
 use serde::Serialize;
@@ -16,6 +17,8 @@ const CLAUDE_CODE_IDENTITY: &str = "You are a Claude agent, built on Anthropic's
 /// Minimal user turn appended when a formatted conversation would otherwise end
 /// on an assistant message, which Anthropic rejects on non-prefill models.
 pub(crate) const CONTINUATION_USER_TURN: &str = "Continue.";
+
+pub mod binding;
 
 pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
     use std::collections::HashSet;
@@ -320,13 +323,26 @@ pub fn format_content_blocks(blocks: &[ContentBlock]) -> Vec<ApiContentBlock> {
                     });
                 }
             }
+            // Replayed byte-exact and in stored order. A block stored before
+            // jcode recorded bindings may have been spliced or reordered by
+            // the old accumulators, so it is never replayed (INT-01 DESIGN
+            // §4.2); see `unbound_thinking_block_count`.
             ContentBlock::AnthropicThinking {
                 thinking,
                 signature,
+                binding: Some(binding),
             } => {
                 result.push(ApiContentBlock::Thinking {
                     thinking: thinking.clone(),
                     signature: signature.clone(),
+                    binding: Some(binding.clone()),
+                });
+            }
+            ContentBlock::AnthropicThinking { binding: None, .. } => {}
+            ContentBlock::AnthropicRedactedThinking { data, binding } => {
+                result.push(ApiContentBlock::RedactedThinking {
+                    data: data.clone(),
+                    binding: binding.clone(),
                 });
             }
             ContentBlock::ToolUse {
@@ -390,6 +406,16 @@ pub fn format_content_blocks(blocks: &[ContentBlock]) -> Vec<ApiContentBlock> {
     result
 }
 
+/// Number of stored Anthropic thinking blocks the formatter does not replay
+/// because they carry no binding record.
+pub fn unbound_thinking_block_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, ContentBlock::AnthropicThinking { binding: None, .. }))
+        .count()
+}
+
 /// Validate projected provider messages through the production Anthropic formatter.
 ///
 /// This validates formatter output rather than duplicating the wire serializer. It rejects
@@ -420,14 +446,16 @@ pub fn validate_projected_messages(
     let mut seen_tool_use_ids = HashSet::new();
     for (message_index, message) in formatted.iter().enumerate() {
         for block in &message.content {
-            if let ApiContentBlock::Thinking {
-                thinking,
-                signature,
-            } = block
-                && (thinking.trim().is_empty() || signature.trim().is_empty())
-            {
+            // Empty thinking text is valid (the default `display: "omitted"`
+            // returns it); the signature or redacted payload is what replays.
+            let unsigned = match block {
+                ApiContentBlock::Thinking { signature, .. } => signature.trim().is_empty(),
+                ApiContentBlock::RedactedThinking { data, .. } => data.trim().is_empty(),
+                _ => false,
+            };
+            if unsigned {
                 return Err(format!(
-                    "Anthropic message {message_index} contains thinking text without a complete non-empty signature."
+                    "Anthropic message {message_index} contains a thinking block without its signed payload."
                 ));
             }
         }
@@ -580,10 +608,46 @@ pub enum ApiThinking {
     Adaptive {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_binding: Option<ApiBlockBinding>,
     },
     Enabled {
         budget_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_binding: Option<ApiBlockBinding>,
     },
+}
+
+impl ApiThinking {
+    pub fn block_binding(&self) -> Option<&ApiBlockBinding> {
+        match self {
+            Self::Adaptive { block_binding, .. } | Self::Enabled { block_binding, .. } => {
+                block_binding.as_ref()
+            }
+        }
+    }
+}
+
+/// Beta that allows `thinking.block_binding` and adds `input_transformations`
+/// to responses.
+pub const THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+/// `thinking.block_binding`: what the API does with a replayed thinking block
+/// whose conversation prefix changed. Requires
+/// [`THINKING_BINDING_CONTROLS_BETA`].
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApiBlockBinding {
+    pub prefix_mismatch_behavior: PrefixMismatchBehavior,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixMismatchBehavior {
+    /// Reject the request with a 400.
+    Error,
+    /// Drop the first mismatched block and every later thinking block, and
+    /// report them in `input_transformations`.
+    DropBlock,
 }
 
 #[derive(Serialize, Clone)]
@@ -829,7 +893,20 @@ pub enum ApiContentBlock {
         is_error: bool,
     },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String, signature: String },
+    Thinking {
+        thinking: String,
+        signature: String,
+        /// jcode's record of where the block was produced. Never sent.
+        #[serde(skip)]
+        binding: Option<AnthropicThinkingBinding>,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        data: String,
+        /// jcode's record of where the block was produced. Never sent.
+        #[serde(skip)]
+        binding: AnthropicThinkingBinding,
+    },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
 }
