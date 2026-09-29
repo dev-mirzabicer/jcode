@@ -47,11 +47,17 @@ package appends its section. Requirement identifiers (R01–R16) and decisions
 `jcode provider-doctor claude --contract claude-oauth --model <id>` runs the
 contract probe (`crates/jcode-provider-doctor/src/claude_contract.rs`). It uses
 the runtime's production request builder, token resolution and OAuth
-attribution headers, sends about thirteen requests (spending subscription
+attribution headers, sends about seventeen requests (spending subscription
 quota), writes a redacted JSON report (signatures and redacted-thinking data
 replaced by their length, no credential material) to
 `~/.jcode/provider-contract/` or `--contract-out`, and exits non-zero when an
-outcome drifts from the recorded Gate 0 observation.
+outcome drifts from the recorded Gate 0 observation. Probes a model did not
+produce the needed turn for are listed as report notes.
+
+With `--capture-sse <dir>` it instead records three raw streaming responses
+(the thinking task with `display: "summarized"`, the same with the default
+`"omitted"`, and the next turn replaying the first under `error`) as test
+fixtures; see `crates/jcode-provider-anthropic-runtime/fixtures/sse/`.
 
 | Probe | Question |
 |---|---|
@@ -69,10 +75,14 @@ outcome drifts from the recorded Gate 0 observation.
 | `T4` | A doubled (spliced) signature is not rejected |
 | `T5` | Thinking moved after `tool_use` is not rejected |
 | `T6` | Stripping every thinking block is accepted |
+| `T8a` | A second signed-thinking turn over an unchanged history is accepted |
+| `T8` | Stripping the first turn's thinking (a leading run) keeps the second turn's thinking valid under `error` |
 
-The probe's model list of prefix-bound models is Gate 0 observation data for
-comparing outcomes only. Runtime binding policy is owned by the per-model
-capability introduced in WP-02 (D11).
+Which probes expect prefix-binding outcomes follows the runtime's per-model
+`reasoning_binding` capability (D11). Production requests for prefix-bound
+models carry `thinking.block_binding`; the probes that ask what happens
+without it (`T3`, `T4`, `T5`, `T6`) remove it, and the binding beta header is
+sent exactly when a request body carries the control.
 
 ## Gate 0 record (design session, 2026-09-29)
 
@@ -198,3 +208,136 @@ right after queueing a build.
 - `jcode-provider-anthropic` `tool_surface_tests`, `jcode-provider-core`
   `tool_name_policy` and legacy-decoder tests, `jcode-provider-doctor`
   `claude_contract` tests.
+
+## Current behavior after WP-02
+
+- **Per-block capture.** The Anthropic runtime accumulates each thinking block
+  on its own and emits one finalized `StreamEvent::ReplayableReasoning` when
+  the block ends. Signed blocks with empty text (the default
+  `display: "omitted"`, and progress updates) and `redacted_thinking` blocks
+  are kept. `ThinkingDelta` drives live display only.
+- **One assembler.** `jcode_base::message::AssistantTurnAssembler` builds every
+  stored assistant turn, in the order the provider produced it, for both agent
+  turn loops, the TUI local loop and both partial checkpoints. Replayable
+  blocks of the dispatching runtime's kind keep their positions. Other
+  reasoning becomes a history-only `ReasoningTrace`, or generic `Reasoning`
+  for runtimes that replay reasoning text.
+- **Storage.** `ContentBlock::AnthropicThinking` carries the text and signature
+  byte-exact plus a `binding`: the producing model, the digest of the provider
+  prefix it was produced under, and the fingerprint of the thinking block
+  before it. `ContentBlock::AnthropicRedactedThinking` is new. The binding is
+  jcode metadata and is never sent.
+- **Replay decision.** `Provider::reasoning_replay_kind` replaces the
+  provider-name check. The Anthropic runtime reports `AnthropicThinking`,
+  OpenAI reports `OpenAiReasoning` and OpenRouter reports `GenericReasoning`;
+  the Claude CLI and other runtimes report none. `MultiProvider` delegates to
+  the runtime a request dispatches to. Top-level Claude sessions keep thinking
+  as traces until WP-05 activates their replay (an internal switch, removed at
+  the INT-01 closeout). Children resolved through the model roster use the
+  concrete runtime and replay now.
+- **Binding digest** (`jcode_provider_anthropic::binding`). Following
+  Anthropic's preserved-thinking rules, the digest covers the top-level
+  `system`, the tools as a name-sorted set and every earlier message. Thinking
+  blocks and `cache_control` markers are excluded, and objects are serialized
+  with sorted keys. A replayed block is valid when the digest before its
+  assistant message matches and either it is the first thinking block
+  replayed or the block replayed before it is its recorded predecessor. Only
+  a leading run of thinking may be removed. The first invalid block
+  invalidates every later one. The runtime checks every request and logs an
+  invalid replay on a prefix-bound model as an INV-1 defect. WP-03 and WP-04
+  build on this API.
+- **Binding policy as data** (D11). `AnthropicReasoningCaps::reasoning_binding`
+  is `PrefixBound` for Opus 5.5 and Sonnet 5.5 (measured), Fable 5.1
+  (documented) and unknown future generations. It is `Unbound` for Opus 5,
+  Sonnet 5 (measured), Fable 5, Mythos 5 and 5.1 (documented) and earlier
+  models.
+- **Safety net.** Requests for prefix-bound models carry
+  `thinking.block_binding` with the `thinking-binding-controls-2026-08-01`
+  beta, adding `{type: adaptive}` when a request had no `thinking` (such
+  models always think; no temperature is then sent). The behavior is
+  `drop_block` in every runtime build and `error` under unit tests or when the
+  process has `JCODE_ANTHROPIC_PREFIX_MISMATCH=error` (Mirza's decision,
+  2026-09-29). `input_transformations` entries are parsed generically, logged,
+  and counted in `jcode_provider_core::anthropic_binding_diagnostics`. A
+  prefix mismatch is logged as an INV-1 defect and shown as a status notice.
+- **Stored before bindings.** Anthropic thinking stored before WP-02 decodes
+  unchanged but is never replayed (it may be spliced or reordered). Context
+  control treats it as history-only. A conversation holding such blocks shows
+  a one-time status notice. None existed in local session storage at WP-02.
+- **OpenAI.** New GPT turns are stored in arrival order, which is the Responses
+  API's output order: reasoning items before the message and function call
+  (previously the message text came first). Stored older turns are
+  unchanged. Continuation is count-based and unaffected.
+
+## WP-02 live evidence (2026-09-29)
+
+Route Claude OAuth, native Anthropic runtime; candidate debug build of
+`mirza/int01-wp02-reasoning-capture`.
+
+**SSE fixtures** (`claude-opus-5-5`, effort `high`, 16:36Z): three recorded
+streams. The next-turn capture replays the first turn, rebuilt independently
+from its stream, under `prefix_mismatch_behavior: "error"`. The provider
+accepted it. Every response carried `input_transformations: []`, so the
+production request's binding control and beta were accepted. Each response
+held one thinking block (signature in one `signature_delta` after an empty
+start). The omitted-display turn's block had empty text. The runtime tests
+replay these streams through the production path (parser, assembler,
+persistence, formatter) and require the wire blocks to equal the independent
+reconstruction byte for byte.
+
+**Contract probe** (effort `low` for single-turn probes, `high` for the
+thinking chain):
+
+| Model | Run (UTC) | Result |
+|---|---|---|
+| `claude-opus-5-5` | 2026-09-29T16:39:12Z | All 17 probes agree; `T3b` 400 "bound to a different conversation … first at `messages.0.content.0`"; `T3c`/`T7` `thinking_dropped`; `T8` accepted |
+| `claude-sonnet-5-5` | 2026-09-29T16:40:34Z | All 17 probes agree; same binding outcomes; `T8` accepted |
+| `claude-opus-5` | 2026-09-29T16:41:13Z | All 17 probes agree; no binding check (`T3b`/`T3c`/`T7` accepted); `T8` accepted |
+
+`T8` confirms live the permissive half of jcode's validity rule: after the
+first turn's thinking is stripped, the second turn's thinking stays valid under
+`error`.
+
+**Child execution path** (`claude-sonnet-5-5`, effort `high`,
+`JCODE_ANTHROPIC_PREFIX_MISMATCH=error`, 16:50Z): the ignored test
+`claude_child_route_replays_signed_thinking_under_error`
+(`src/cli/reasoning_live_tests.rs`) resolves `claude-oauth:claude-sonnet-5-5`
+through the production model roster, as a delegated child's provider is
+resolved, and runs a four-step file task through the streaming turn loop that
+children use. Five requests were all accepted. Thinking came from two
+requests and every later request replayed it. Each stored block's predecessor
+is the block before it, and no local or provider binding event was recorded
+(session `session_kangaroo_1790700620006_46d218da58742b47`). A real delegated
+child was not used because no roster alias routes to Sonnet 5.5 and the
+`subagent` tool takes aliases only. An earlier attempt used `bash`, which has
+no native command worker outside the server. Its one thinking block was also
+replayed under `error` and accepted.
+
+## WP-02 deterministic evidence
+
+- `jcode-provider-anthropic` `binding::tests`: digest determinism under the
+  scheme label, cache markers excluded, tools bound as a name-sorted set,
+  canonical key order, nested `cache_control` content still bound, thinking
+  excluded from the prefix, and validity for append-only history, an edited
+  earlier message, a changed system prompt or tool set, a change after a
+  block, a stripped leading run, a block removed from the middle and redacted
+  chaining. `context_validation_tests`: empty-text and redacted blocks
+  validate and replay in stored order; unbound blocks are never replayed.
+- `jcode-provider-anthropic-runtime`: per-block SSE capture and chaining, the
+  recorded-stream byte-exact round trips, a recorded second turn chaining to
+  the first, a synthetic multi-block stream (signed, text, empty signed,
+  redacted, tool use), `input_transformations` surfacing, the binding control
+  for prefix-bound and unbound models with both behaviors, the beta header,
+  and the environment override.
+- `jcode-provider-core`: the `reasoning_binding` entries and their agreement
+  with the capability, and the diagnostics counter.
+- `jcode-base`: `message::assistant_turn` (order, single storage, traces,
+  OpenAI and generic kinds, whitespace, tool calls, recovery, reset),
+  persistence round trips including legacy decoding,
+  `provider::tests::reasoning_replay_kind_follows_the_runtime_a_request_dispatches_to`
+  (Claude-direct, Claude CLI and OpenAI), and rendering of stored signed
+  thinking.
+- `jcode-app-core`
+  `agent::tests::both_agent_loops_store_reasoning_in_stream_order_through_the_assembler`
+  (blocking and streaming loops, replay on and off, with a mid-stream
+  rollback). `jcode-tui` `sdk_results` checks the local partial checkpoint.
