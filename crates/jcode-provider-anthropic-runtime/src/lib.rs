@@ -464,6 +464,71 @@ impl AnthropicProvider {
         self.set_credential_mode(mode)
     }
 
+    /// The exact request body `complete` would send for these inputs, as JSON
+    /// with `stream: false`, for the provider-contract probe. It uses the
+    /// production tool, system, message and reasoning builders and the
+    /// credential route pinned on this provider.
+    pub async fn contract_request_body_for_doctor(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Result<Value> {
+        let (_, is_oauth) = self.get_access_token().await?;
+        let model = self.model();
+        let mut request = self.build_api_request(
+            &model,
+            messages,
+            tools,
+            build_system_param(system, is_oauth),
+            is_oauth,
+        );
+        request.stream = false;
+        Ok(serde_json::to_value(&request)?)
+    }
+
+    /// Send one non-streaming Messages request with the production endpoint and
+    /// headers, for the provider-contract probe. Returns the HTTP status and
+    /// the parsed body. The credential never leaves this function.
+    pub async fn send_contract_request_for_doctor(
+        &self,
+        body: &Value,
+        extra_beta: Option<&str>,
+    ) -> Result<(u16, Value)> {
+        let (token, is_oauth) = self.get_access_token().await?;
+        if is_oauth {
+            ensure_oauth_preflight(
+                &self.client,
+                &token,
+                &self.oauth_session_id,
+                &self.oauth_preflight_done,
+            )
+            .await?;
+        }
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .context("contract request has no model")?;
+        let response = messages_request(
+            &self.client,
+            &token,
+            is_oauth,
+            model,
+            body.get("thinking").is_some(),
+            &self.oauth_session_id,
+            extra_beta,
+        )
+        .header("accept", "application/json")
+        .json(body)
+        .send()
+        .await
+        .context("Failed to send contract request to Anthropic API")?;
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        let parsed = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }));
+        Ok((status, parsed))
+    }
+
     /// Fetch the live Anthropic model catalog using the resolved credential.
     ///
     /// Mirrors [`Provider::prefetch_models`] but returns the model ids to the
@@ -1853,6 +1918,50 @@ async fn force_refresh_oauth_token(
 }
 
 /// Stream the response from Anthropic API
+/// A Messages API request with the production endpoint, version, auth and
+/// beta headers for the credential route. `extra_beta` appends one beta flag
+/// (used only by the provider-contract probe). The caller sets `accept`.
+fn messages_request(
+    client: &Client,
+    token: &str,
+    is_oauth: bool,
+    model_name: &str,
+    thinking_enabled: bool,
+    oauth_session_id: &str,
+    extra_beta: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    let req = client
+        .post(url)
+        .header("anthropic-version", API_VERSION)
+        .header("content-type", "application/json");
+    let base_beta = if is_oauth {
+        oauth_beta_headers(model_name)
+    } else if is_1m_model(model_name) {
+        "prompt-caching-2024-07-31,context-1m-2025-08-07"
+    } else {
+        "prompt-caching-2024-07-31"
+    };
+    let mut beta_header = anthropic_beta_header_with_thinking(base_beta, thinking_enabled);
+    if let Some(extra) = extra_beta {
+        beta_header.push(',');
+        beta_header.push_str(extra);
+    }
+    if is_oauth {
+        // OAuth tokens require Bearer auth (not x-api-key), the Claude CLI
+        // User-Agent, the beta set and the ?beta=true query param (in the URL).
+        apply_oauth_attribution_headers(
+            req.header("Authorization", format!("Bearer {token}"))
+                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                .header("anthropic-beta", beta_header),
+            oauth_session_id,
+        )
+    } else {
+        req.header("x-api-key", token)
+            .header("anthropic-beta", beta_header)
+    }
+}
+
 async fn stream_response(
     client: Client,
     token: String,
@@ -1880,52 +1989,23 @@ async fn stream_response(
 
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
-    // Build request with appropriate auth headers
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
-
-    let mut req = client
-        .post(url)
-        .header("anthropic-version", API_VERSION)
-        .header("content-type", "application/json")
-        .header(
-            "accept",
-            if is_oauth {
-                "application/json"
-            } else {
-                "text/event-stream"
-            },
-        );
-
-    if is_oauth {
-        // OAuth tokens require:
-        // 1. Bearer auth (NOT x-api-key)
-        // 2. User-Agent matching Claude CLI
-        // 3. Multiple beta headers
-        // 4. ?beta=true query param (in URL above)
-        let beta_header = anthropic_beta_header_with_thinking(
-            oauth_beta_headers(model_name),
-            request.thinking.is_some(),
-        );
-        req = apply_oauth_attribution_headers(
-            req.header("Authorization", format!("Bearer {}", token))
-                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
-                .header("anthropic-beta", beta_header),
-            oauth_session_id,
-        );
-    } else {
-        // Direct API keys use x-api-key
-        // Include prompt-caching beta header
-        let beta_header = if is_1m_model(model_name) {
-            "prompt-caching-2024-07-31,context-1m-2025-08-07"
+    let req = messages_request(
+        &client,
+        &token,
+        is_oauth,
+        model_name,
+        request.thinking.is_some(),
+        oauth_session_id,
+        None,
+    )
+    .header(
+        "accept",
+        if is_oauth {
+            "application/json"
         } else {
-            "prompt-caching-2024-07-31"
-        };
-        let beta_header =
-            anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
-        req = req
-            .header("x-api-key", &token)
-            .header("anthropic-beta", beta_header);
-    }
+            "text/event-stream"
+        },
+    );
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
         req.json(&request),

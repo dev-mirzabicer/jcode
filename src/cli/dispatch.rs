@@ -593,8 +593,24 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::ProviderDoctor {
             provider,
+            contract: Some(contract),
+            contract_out,
+            ..
+        }) => {
+            crate::cli::provider_doctor::run_provider_contract_command(
+                &provider,
+                &contract,
+                args.model.as_deref(),
+                contract_out,
+            )
+            .await?;
+        }
+        Some(Command::ProviderDoctor {
+            provider,
             tier,
             json,
+            contract: None,
+            ..
         }) => {
             crate::cli::provider_doctor::run_provider_doctor_command(
                 &provider,

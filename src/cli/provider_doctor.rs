@@ -5,6 +5,7 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result, anyhow};
 
 use crate::live_tests::LiveVerificationStageStatus;
+use jcode_provider_doctor::claude_contract::{CLAUDE_OAUTH_CONTRACT, run_claude_oauth_contract};
 use jcode_provider_doctor::{
     DoctorReport, DoctorTier, NativeProviderKind, native_doctor_supports_provider,
     run_antigravity_native_e2e, run_claude_native_e2e, run_generic_native_e2e, run_provider_e2e,
@@ -81,6 +82,80 @@ pub async fn run_provider_doctor_command(
     } else {
         anyhow::bail!("provider-doctor: one or more checks failed for {provider}")
     }
+}
+
+/// `jcode provider-doctor <provider> --contract <name>`: a live provider-contract
+/// probe that writes a redacted JSON report and fails when an outcome drifts
+/// from the recorded observation.
+pub async fn run_provider_contract_command(
+    provider: &str,
+    contract: &str,
+    model: Option<&str>,
+    out: Option<std::path::PathBuf>,
+) -> Result<()> {
+    use crate::provider::Provider;
+    use jcode_provider_anthropic_runtime::AnthropicProvider;
+
+    anyhow::ensure!(
+        contract == CLAUDE_OAUTH_CONTRACT,
+        "unknown provider contract `{contract}`; supported: {CLAUDE_OAUTH_CONTRACT}"
+    );
+    anyhow::ensure!(
+        crate::auth::lifecycle::normalized_auth_provider_id(Some(provider)) == Some("claude"),
+        "the `{CLAUDE_OAUTH_CONTRACT}` contract runs against the `claude` provider"
+    );
+    let model = model.context("--model is required for a provider contract")?;
+    let runtime = AnthropicProvider::new();
+    runtime
+        .pin_credential_mode_for_doctor(true)
+        .context("Claude OAuth credential unavailable; run `jcode login --provider claude`")?;
+    runtime.set_model(model)?;
+
+    let registry =
+        crate::tool::Registry::builtin_tool_surface(std::sync::Arc::new(AnthropicProvider::new()))
+            .await;
+    let tools = registry.definitions(None).await;
+    let report = run_claude_oauth_contract(&runtime, &tools).await?;
+
+    let path = match out {
+        Some(path) => path,
+        None => crate::storage::jcode_dir()?
+            .join("provider-contract")
+            .join(format!(
+                "{contract}-{model}-{}.json",
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            )),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&report)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    println!(
+        "Provider contract {} on {} ({} tools), {}",
+        report.contract, report.model, report.tool_count, report.date
+    );
+    for probe in &report.probes {
+        let verdict = match probe.agrees_with_gate0 {
+            Some(true) => "agrees",
+            Some(false) => "DRIFT",
+            None => "recorded",
+        };
+        println!(
+            "  [{:<8}] {:<29} {} observed={:?} gate0={:?}\n             {}",
+            verdict, probe.id, probe.status, probe.observed, probe.gate0, probe.summary
+        );
+    }
+    println!("Report: {}", path.display());
+    let drift = report.drift();
+    anyhow::ensure!(
+        drift.is_empty(),
+        "provider contract drifted from Gate 0 at: {}",
+        drift.iter().map(|p| p.id).collect::<Vec<_>>().join(", ")
+    );
+    Ok(())
 }
 
 fn emit_report(report: &DoctorReport, emit_json: bool) {

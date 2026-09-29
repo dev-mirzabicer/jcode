@@ -482,6 +482,17 @@ pub(crate) enum Command {
         /// Emit the report as JSON for scripting
         #[arg(long)]
         json: bool,
+
+        /// Run a named live provider-contract probe instead of the tier
+        /// checkpoints. `claude-oauth` checks what the Claude OAuth route
+        /// accepts for the --model under test. Spends subscription quota.
+        #[arg(long, value_name = "CONTRACT")]
+        contract: Option<String>,
+
+        /// Where to write the redacted contract report (JSON). Defaults to
+        /// ~/.jcode/provider-contract/<contract>-<model>-<utc>.json.
+        #[arg(long, value_name = "PATH", requires = "contract")]
+        contract_out: Option<std::path::PathBuf>,
     },
 
     /// Test authentication end-to-end: login (optional), credential probe, refresh, and provider smoke
