@@ -313,6 +313,23 @@ child was not used because no roster alias routes to Sonnet 5.5 and the
 no native command worker outside the server. Its one thinking block was also
 replayed under `error` and accepted.
 
+## WP-02 activation and live smoke
+
+Activated build `ed379c006-dirty-10c2f7c6f4fe` (v0.75.475-dev) through a
+coordinated `selfdev build-reload` at 2026-09-29T18:41Z. The build pipeline's
+pre-publication smoke started the candidate server before the reload. The
+running server, current and shared-server channels all report `ed379c006`. As
+in WP-01, the build was requested from a debug-created selfdev session, which
+was destroyed, and the pending activation was completed with
+`jcode_build_support::complete_pending_activation_for_session` on this
+evidence. The canary is `passed`.
+
+On the activated server, an owned headless session on Claude OAuth
+`claude-opus-5-5` (default effort) ran a read, write, read task. It made four
+requests, each served by `claude-opus-5-5`, carrying the production binding
+control. All tool results succeeded (`b.txt` holds `ALPHA`), and the server
+logged no INV-1 event or input transformation.
+
 ## WP-02 deterministic evidence
 
 - `jcode-provider-anthropic` `binding::tests`: digest determinism under the
