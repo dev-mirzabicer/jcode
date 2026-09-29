@@ -161,6 +161,20 @@ shows each call under its registry name, one tool call per assistant message
 The session also carried external MCP tools (`mcp__node_repl__*`), which
 Claude received under their registry names.
 
+## WP-01 acceptance
+
+Accepted by Mirza on 2026-09-29 and published to `main` at `0de0a4ebf`
+(2026-09-29T11:57:31Z). Activated runtime `cabe97cc4-dirty-d02092be954f`, with
+running, current and shared-server channels equal and the canary passed. The
+activation was requested from a debug-created selfdev session whose connection
+ended with the reload, so its pending activation was completed through
+`jcode_build_support::complete_pending_activation_for_session` on the evidence
+above.
+
+Maintainers driving selfdev through `jcode debug`: a debug-created selfdev
+session is a live agent that jcode wakes when its build completes. Destroy it
+right after queueing a build.
+
 ## WP-01 deterministic evidence
 
 - `jcode-app-core` `tool::tests::provider_parity`:
