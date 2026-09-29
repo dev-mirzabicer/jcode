@@ -136,6 +136,31 @@ Findings:
 The redacted reports are retained in the program evidence directory
 (`evidence/wp01-contract-2026-09-29/`).
 
+## WP-01 activation and live session smoke
+
+Activated build `cabe97cc4-dirty-d02092be954f` (v0.75.469-dev) through a
+coordinated `selfdev build-reload`. The current and shared-server channels
+both point at it, and the shared server reports `cabe97cc4`.
+
+On 2026-09-29 an owned headless fixture session on Claude OAuth,
+`claude-opus-5-5` (default effort), in a scratch Git directory, received one
+prompt asking for seven tool calls in sequence. The persisted transcript
+shows each call under its registry name, one tool call per assistant message
+(parallel calls disabled), and every result without an error flag:
+
+| Tool | Evidence |
+|---|---|
+| `read` | File content returned |
+| `edit` | `beta: 2` replaced by `beta: 20`; the file on disk changed |
+| `bash` | `cat` output of both files |
+| `batch` | Two `read` subcalls, `2 succeeded, 0 failed` |
+| `todo` | One completed item recorded |
+| `get_catalog` | Profiles and model aliases listed |
+| `subagent` | `agent: global:jcode`, `model_alias: fast-worker`, `permission: read_only`; child session created (the roster routed it to `gpt-5.6-terra`) and replied `ready` |
+
+The session also carried external MCP tools (`mcp__node_repl__*`), which
+Claude received under their registry names.
+
 ## WP-01 deterministic evidence
 
 - `jcode-app-core` `tool::tests::provider_parity`:
