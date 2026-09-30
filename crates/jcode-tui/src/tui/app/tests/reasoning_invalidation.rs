@@ -135,3 +135,70 @@ fn local_requests_suppress_stale_thinking_before_sending() {
     // Later context edits must stage against the local request prefix.
     assert!(app.local_request_prefix_if_needed().unwrap().is_some());
 }
+
+/// A registry tool that is never called; registering it changes membership.
+struct LocalFixtureTool;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for LocalFixtureTool {
+    fn name(&self) -> &str {
+        "local_fixture_extra"
+    }
+    fn description(&self) -> &str {
+        "fixture"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    fn decode_input(&self, _input: &serde_json::Value) -> Result<()> {
+        Ok(())
+    }
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tool::ToolContext,
+    ) -> Result<crate::tool::ToolOutput> {
+        Ok(crate::tool::ToolOutput::new("ok"))
+    }
+}
+
+#[test]
+fn local_requests_keep_the_locked_tool_set_until_a_recorded_transition() {
+    // INT-01 WP-05: the local loop follows the agent's tool-set lifetime.
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    let provider: Arc<dyn Provider> = Arc::new(PrefixBoundTestProvider);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.ambient_system_prompt = Some("fixture system prompt".to_string());
+    // Frozen tool guidance keeps the set independent of shared instruction
+    // stores, as a session that already sent a request has it.
+    app.session.delegation_guidance = Some("fixture delegation guidance".to_string());
+    let names = |tools: &[crate::message::ToolDefinition]| -> Vec<String> {
+        tools.iter().map(|tool| tool.name.clone()).collect()
+    };
+
+    let first = rt.block_on(app.local_tool_definitions()).expect("tools");
+    rt.block_on(app.registry.register(
+        "local_fixture_extra".to_string(),
+        Arc::new(LocalFixtureTool),
+    ));
+    let second = rt.block_on(app.local_tool_definitions()).expect("tools");
+    assert_eq!(names(&first), names(&second), "the locked set is kept");
+    assert!(!names(&second).contains(&"local_fixture_extra".to_string()));
+    assert!(app.pending_prefix_transitions.is_empty());
+    // Context edits stage against the set the next request carries.
+    assert_eq!(
+        app.tool_set.locked().map(&names),
+        Some(names(&second))
+    );
+
+    app.release_local_tool_set_after_mcp_management();
+    assert_eq!(
+        app.pending_prefix_transitions,
+        vec!["MCP tool set reload".to_string()]
+    );
+    let rebuilt = rt.block_on(app.local_tool_definitions()).expect("tools");
+    assert!(names(&rebuilt).contains(&"local_fixture_extra".to_string()));
+}

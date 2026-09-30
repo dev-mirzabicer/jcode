@@ -146,8 +146,7 @@ impl Agent {
             partial_output_persistence_error: None,
             last_preflight: None,
             cache_tracker_before_pending: self.cache_tracker.clone(),
-            locked_tools_before_pending: self.locked_tools.clone(),
-            mcp_late_register_resolved_before_pending: self.mcp_late_register_resolved,
+            tool_set_before_pending: self.tool_set.clone(),
             tool_output_scan_index_before_pending: self.tool_output_scan_index,
             unattended_context: options.unattended_context,
             emergency_attempted: false,
@@ -630,8 +629,7 @@ impl Agent {
 
     fn restore_pending_turn_runtime_state(&mut self, context: &ActiveTurnContext) {
         self.cache_tracker = context.cache_tracker_before_pending.clone();
-        self.locked_tools = context.locked_tools_before_pending.clone();
-        self.mcp_late_register_resolved = context.mcp_late_register_resolved_before_pending;
+        self.tool_set = context.tool_set_before_pending.clone();
         self.tool_output_scan_index = context.tool_output_scan_index_before_pending;
     }
 

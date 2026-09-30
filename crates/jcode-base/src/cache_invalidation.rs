@@ -72,6 +72,18 @@ pub fn most_recent_since(since: Instant) -> Option<DocumentedInvalidation> {
         .cloned()
 }
 
+/// Every documented invalidation recorded at or after `since`, oldest first.
+pub fn recorded_since(since: Instant) -> Vec<DocumentedInvalidation> {
+    let journal = JOURNAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    journal
+        .iter()
+        .filter(|entry| entry.at >= since)
+        .cloned()
+        .collect()
+}
+
 /// Clear the journal. Test-support only: process-global state otherwise leaks
 /// documented invalidations across unrelated unit tests.
 pub fn clear_for_tests() {

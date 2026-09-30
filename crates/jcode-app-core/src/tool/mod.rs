@@ -41,6 +41,7 @@ pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
 mod todo;
+pub mod tool_set;
 mod webfetch;
 mod websearch;
 mod workspace_use;
@@ -69,6 +70,7 @@ pub(crate) use jcode_tool_core::intent_schema_property;
 pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
+pub use tool_set::{ResolvedToolSet, ToolSetFilters, ToolSetLock, ToolSetTransition};
 
 pub(crate) fn parsed_patch_file_paths(tool_name: &str, patch_text: &str) -> Result<Vec<String>> {
     match tool_name {

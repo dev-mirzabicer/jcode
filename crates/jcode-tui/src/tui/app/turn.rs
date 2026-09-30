@@ -68,8 +68,9 @@ impl App {
         }
         self.partial_output_checkpointed = false;
         self.partial_output_persistence_error = None;
-        let mut tools = self.registry.definitions(None).await;
-        crate::tool::instruction_guidance::preview(&self.session, &mut tools)
+        let tools = self
+            .local_tool_definitions()
+            .await
             .map_err(|error| error.to_string())?;
         // Capture occurrence-rendered instructions once. Accounting and the
         // actual request must not read different files during the same send.
@@ -1606,6 +1607,9 @@ impl App {
 
                 self.subagent_status = None; // Clear status after tool completes
                 self.batch_progress = None; // Clear batch progress after tool completes
+                if tc.name == "mcp" {
+                    self.release_local_tool_set_after_mcp_management();
+                }
                 let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
                 let (output, is_error, tool_title) = match result {
                     Ok(o) => {

@@ -463,8 +463,8 @@ impl Agent {
                     .system_prompt_text()
                     .unwrap_or_default()
                     .to_string();
-                let tools = match self.locked_tools.as_ref() {
-                    Some(tools) => tools.clone(),
+                let tools = match self.tool_set.locked() {
+                    Some(tools) => tools.to_vec(),
                     None => self.tool_definitions_for_debug().await.map_err(|error| {
                         PrimaryInstructionActivationError::Composition(
                             crate::instruction::SystemPromptActivationError::Compatibility(
@@ -1334,8 +1334,7 @@ mod tests {
         agent.provider_session_id = Some("live-runtime-continuation".to_string());
         agent.session.provider_session_id = Some("live-stored-continuation".to_string());
         agent.pending_alerts.push("preserve-alert".to_string());
-        agent.locked_tools = Some(Vec::new());
-        agent.mcp_late_register_resolved = true;
+        agent.tool_set = crate::tool::ToolSetLock::from_parts(Some(Vec::new()), true);
         agent.background_tool_signal.fire();
         agent.graceful_shutdown.fire();
         agent
@@ -1372,8 +1371,8 @@ mod tests {
         );
         assert_eq!(agent.provider_session_id, before_provider_session_id);
         assert_eq!(agent.pending_alerts, ["preserve-alert"]);
-        assert!(agent.locked_tools.is_some());
-        assert!(agent.mcp_late_register_resolved);
+        assert!(agent.tool_set.locked().is_some());
+        assert!(agent.tool_set.late_mcp_settled());
         assert!(agent.background_tool_signal.is_set());
         assert!(agent.graceful_shutdown.is_set());
         assert_eq!(
@@ -1581,7 +1580,7 @@ mod tests {
         agent.session.provider_session_id = Some("stored-continuation".to_string());
         agent.provider_session_id = Some("live-continuation".to_string());
         let _ = agent.tool_definitions().await.unwrap();
-        assert!(agent.locked_tools.is_some());
+        assert!(agent.tool_set.locked().is_some());
         let invalidations_before = provider.invalidations.load(Ordering::SeqCst);
 
         let store = home.path().join("instructions");
@@ -1632,7 +1631,7 @@ mod tests {
             agent.provider_session_id.as_deref(),
             Some("live-continuation")
         );
-        assert!(agent.locked_tools.is_some());
+        assert!(agent.tool_set.locked().is_some());
 
         agent.session.add_message(
             crate::message::Role::Assistant,
@@ -1671,7 +1670,7 @@ mod tests {
             Some(message_id.as_str())
         );
         let _ = agent.tool_definitions().await.unwrap();
-        assert!(agent.locked_tools.is_some());
+        assert!(agent.tool_set.locked().is_some());
 
         let moved_store = home.path().join("instructions-away");
         std::fs::rename(&store, &moved_store).expect("move store");
@@ -1790,7 +1789,7 @@ mod tests {
         );
         assert_eq!(agent.session.model.as_deref(), Some("synthetic-model"));
         assert_eq!(agent.session.reasoning_effort.as_deref(), Some("high"));
-        assert!(agent.locked_tools.is_some());
+        assert!(agent.tool_set.locked().is_some());
 
         let saved = Session::load(&agent.session.id).expect("load persisted replacement");
         assert_eq!(saved.provider_session_id, None);

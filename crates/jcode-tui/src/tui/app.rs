@@ -929,6 +929,9 @@ pub struct App {
     // Labels of recorded prompt or tool-set transitions since the previous
     // local request: the cause of replayed reasoning they invalidate.
     pending_prefix_transitions: Vec<String>,
+    // The tool set local requests carry, with the agent's lifetime rule
+    // (`crate::tool::tool_set`).
+    tool_set: crate::tool::ToolSetLock,
     // Accumulated session cost + cached per-model pricing.
     cost: CostState,
     // Context limit and authoritative request-pressure state.

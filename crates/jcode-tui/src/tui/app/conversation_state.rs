@@ -466,6 +466,8 @@ impl App {
         new_session.working_dir = old_session.working_dir.clone();
 
         self.session = new_session;
+        // A new provider history locks a new tool set at its first request.
+        self.tool_set.reset();
         self.clear_provider_messages();
         self.clear_display_messages();
         // Ctrl+R is reachable mid-stream (turn.rs key handling); drop the

@@ -207,8 +207,7 @@ struct ActiveTurnContext {
     partial_output_persistence_error: Option<String>,
     last_preflight: Option<ContextPreflightReport>,
     cache_tracker_before_pending: CacheTracker,
-    locked_tools_before_pending: Option<Vec<ToolDefinition>>,
-    mcp_late_register_resolved_before_pending: bool,
+    tool_set_before_pending: crate::tool::ToolSetLock,
     tool_output_scan_index_before_pending: usize,
     unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     emergency_attempted: bool,
@@ -380,25 +379,13 @@ pub struct Agent {
     cache_tracker: CacheTracker,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
-    /// Locked tool list: once the first API request is sent, freeze the tool list
-    /// to avoid cache invalidation when MCP tools arrive asynchronously.
-    /// Cleared on compaction/reset.
-    locked_tools: Option<Vec<ToolDefinition>>,
+    /// The tool set requests carry: locked at the first request, changed
+    /// only at a recorded tool-set transition (see `crate::tool::tool_set`).
+    tool_set: crate::tool::ToolSetLock,
     /// Labels of recorded prompt or tool-set transitions since the previous
     /// provider request. They name why replayed reasoning stopped matching
     /// its prefix, and are cleared once a request reconciles it.
     pending_prefix_transitions: Vec<String>,
-    /// One-shot guard for the async MCP-registration race (#206).
-    ///
-    /// MCP servers connect on a background task and register `mcp__*` tools
-    /// seconds after the session starts (we deliberately do NOT block the first
-    /// turn on MCP connection, so the user can talk to the agent immediately).
-    /// The first turn therefore locks a snapshot without MCP tools. We allow
-    /// exactly one rebuild to pick them up — an intentional, one-time provider
-    /// prompt-cache miss. Once that rebuild happens (or we confirm there are no
-    /// MCP tools to wait for), this is set so the per-turn registry scan stops.
-    /// Reset whenever the tool list is intentionally unlocked.
-    mcp_late_register_resolved: bool,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
     /// Whether memory features are enabled for this session
@@ -465,9 +452,8 @@ impl Agent {
             graceful_shutdown: InterruptSignal::new(),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
-            locked_tools: None,
+            tool_set: crate::tool::ToolSetLock::default(),
             pending_prefix_transitions: Vec::new(),
-            mcp_late_register_resolved: false,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
@@ -990,8 +976,8 @@ impl Agent {
         self.graceful_shutdown.reset();
         self.cache_tracker.reset();
         self.last_usage = TokenUsage::default();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
+        // A new provider history locks a new tool set at its first request.
+        self.tool_set.reset();
         self.rewind_undo_snapshot = None;
     }
 
@@ -1026,9 +1012,11 @@ impl Agent {
             self.note_prefix_transition(source);
         }
 
+        // The tool set is kept: a change to history or to the provider route
+        // does not change the tools, and rebuilding it here would turn any
+        // unrelated registry change into a transition misattributed to this
+        // one (see `crate::tool::tool_set`).
         self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.provider.invalidate_context_continuation(&detail);

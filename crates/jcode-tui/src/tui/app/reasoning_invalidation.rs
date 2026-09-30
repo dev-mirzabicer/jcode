@@ -27,6 +27,44 @@ impl App {
         }
     }
 
+    /// The tool set the next local request carries: locked at the first
+    /// request and changed only at a recorded tool-set transition, as the
+    /// agent's requests are (`crate::tool::tool_set`).
+    pub(super) async fn local_tool_definitions(&mut self) -> anyhow::Result<Vec<ToolDefinition>> {
+        let mut tool_set = std::mem::take(&mut self.tool_set);
+        let resolved = tool_set
+            .resolve(
+                &self.registry,
+                &crate::tool::ToolSetFilters::none(),
+                || async {
+                    let mut tools = self.registry.definitions(None).await;
+                    crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
+                    Ok(tools)
+                },
+            )
+            .await;
+        self.tool_set = tool_set;
+        let resolved = resolved?;
+        for transition in resolved.transitions {
+            self.record_local_prefix_transition(
+                transition.label(),
+                "the local session's tool set changed",
+            );
+        }
+        Ok(resolved.tools)
+    }
+
+    /// The `mcp` tool may have changed registry membership: the next local
+    /// request rebuilds the tool set.
+    pub(super) fn release_local_tool_set_after_mcp_management(&mut self) {
+        if self.tool_set.release_after_mcp_management() {
+            self.record_local_prefix_transition(
+                crate::tool::ToolSetTransition::McpManagement.label(),
+                "the mcp tool changed MCP servers; the next request rebuilds the tool set",
+            );
+        }
+    }
+
     /// The prefix the local session's next request carries, built as
     /// `prepare_local_provider_invocation` builds it; `None` when replayed
     /// reasoning need not be checked (the route does not bind reasoning, or
@@ -45,12 +83,22 @@ impl App {
             .build_system_prompt_split()
             .map_err(|error| ContextServiceError::Runtime(error.to_string()))?
             .static_part;
-        let mut tools = self
-            .registry
-            .try_definitions(None)
-            .map_err(|reason| ContextServiceError::Runtime(reason.to_string()))?;
-        crate::tool::instruction_guidance::preview(&self.session, &mut tools)
-            .map_err(|error| ContextServiceError::Runtime(error.to_string()))?;
+        let tools = match self.tool_set.locked() {
+            Some(locked) => {
+                let mut tools = locked.to_vec();
+                tools.retain(|tool| crate::tool::tool_is_globally_available(&tool.name));
+                tools
+            }
+            None => {
+                let mut tools = self
+                    .registry
+                    .try_definitions(None)
+                    .map_err(|reason| ContextServiceError::Runtime(reason.to_string()))?;
+                crate::tool::instruction_guidance::preview(&self.session, &mut tools)
+                    .map_err(|error| ContextServiceError::Runtime(error.to_string()))?;
+                tools
+            }
+        };
         Ok(Some(ContextRequestPrefix {
             system,
             tools,

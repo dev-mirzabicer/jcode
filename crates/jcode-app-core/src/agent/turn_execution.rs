@@ -901,18 +901,34 @@ impl Agent {
         Ok(restored)
     }
 
-    /// Unlock the tool list so the next API request picks up any new tools.
-    /// Called after MCP reload or when the user explicitly wants new tools.
+    /// The `mcp` tool may have changed registry membership (connect,
+    /// disconnect, reload): the next request rebuilds the tool set, a recorded
+    /// tool-set transition.
     pub fn unlock_tools(&mut self) {
-        if self.locked_tools.is_some() {
+        if self.tool_set.release_after_mcp_management() {
             logging::info("Tool list unlocked — next request will pick up current tools");
-            self.locked_tools = None;
-            self.cache_tracker.reset();
-            self.note_prefix_transition("tool set unlocked");
+            self.record_tool_set_transition(
+                crate::tool::ToolSetTransition::McpManagement,
+                "the mcp tool changed MCP servers; the next request rebuilds the tool set",
+            );
         }
-        // Allow the late-MCP-registration recheck to fire once for the next
-        // snapshot (e.g. after an explicit `mcp` reload).
-        self.mcp_late_register_resolved = false;
+    }
+
+    /// Record an intentional tool-set change: journaled as a cache transition
+    /// and kept as the cause of any replayed reasoning it invalidates.
+    fn record_tool_set_transition(
+        &mut self,
+        transition: crate::tool::ToolSetTransition,
+        detail: &str,
+    ) {
+        self.cache_tracker.reset();
+        if transition == crate::tool::ToolSetTransition::ToolUnavailable {
+            self.provider
+                .invalidate_context_continuation(transition.label());
+            self.provider_session_id = None;
+            self.session.provider_session_id = None;
+        }
+        self.record_prefix_transition(transition.label(), detail);
     }
 
     /// Unlock tools if a tool execution may have changed the registry
@@ -1000,81 +1016,37 @@ impl Agent {
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Result<Vec<ToolDefinition>> {
-        if let Some(locked) = self.locked_tools.as_mut() {
-            let before = locked.len();
-            locked.retain(|tool| crate::tool::tool_is_globally_available(&tool.name));
-            if locked.len() != before {
-                self.provider
-                    .invalidate_context_continuation("Swarm globally disabled");
-                self.provider_session_id = None;
-                self.session.provider_session_id = None;
-                self.cache_tracker.reset();
-                self.record_prefix_transition(
-                    "Swarm globally disabled",
-                    "removed unavailable tool from locked definitions",
-                );
-            }
-        }
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
-
-        // Return locked tools if available (prevents cache invalidation from
-        // tools arriving asynchronously after the first API request).
-        //
-        // Exception: MCP servers connect on a background task and register
-        // `mcp__*` tools seconds after the session starts — typically *after*
-        // the first turn has already locked the snapshot. We deliberately do
-        // NOT block the first turn on MCP connection: servers can be slow or
-        // hang, and we want the user to be able to talk to the agent the moment
-        // the session spawns. The price is that the first locked snapshot is
-        // missing MCP tools, and the only other unlock path fires when the model
-        // calls the `mcp` management tool — which it cannot do without first
-        // seeing MCP tools (#206).
-        //
-        // So, exactly once per locked snapshot, if MCP tools have since appeared
-        // in the registry, we rebuild. This is a single intentional provider
-        // prompt-cache miss (the turn MCP tools first appear). The
-        // `mcp_late_register_resolved` flag makes this a one-shot check so we do
-        // not rescan the registry on every subsequent turn.
-        if let Some(ref locked) = self.locked_tools {
-            if self.mcp_late_register_resolved {
-                return Ok(locked.clone());
-            }
-            if self.registry_has_new_mcp_tools(locked).await {
-                logging::info(
-                    "MCP tools registered after first turn locked the tool snapshot — \
-                     rebuilding once to expose them. This is one intentional prompt-cache \
-                     miss; we accept it so the agent is reachable immediately at spawn \
-                     instead of blocking on MCP connection (#206).",
-                );
-                // Latch the one-shot guard and drop the stale snapshot directly.
-                // We intentionally do NOT call `unlock_tools()` here, because that
-                // re-arms the guard (it is the explicit-reload path) and would let
-                // the recheck fire again on every later turn.
-                self.mcp_late_register_resolved = true;
-                self.locked_tools = None;
-                self.cache_tracker.reset();
-                self.note_prefix_transition("late MCP tool registration");
-            } else {
-                // No MCP tools have appeared. They may still be connecting, so
-                // leave the guard unset and re-check on the next turn. Once they
-                // appear (or never do, after the registry settles) we stop.
-                return Ok(locked.clone());
-            }
+        // The set is locked at the first request and changes only at a
+        // recorded transition. MCP servers connect in the background so the
+        // first turn is never blocked; their tools join the set once, when
+        // they appear (#206).
+        let mut tool_set = std::mem::take(&mut self.tool_set);
+        let filters = crate::tool::ToolSetFilters {
+            allowed: self.allowed_tools.as_ref(),
+            disabled: &self.disabled_tools,
+        };
+        let resolved = tool_set
+            .resolve(&self.registry, &filters, || async {
+                let mut tools = self.build_filtered_tool_definitions().await;
+                crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
+                Ok(tools)
+            })
+            .await;
+        self.tool_set = tool_set;
+        let resolved = resolved?;
+        for transition in resolved.transitions {
+            let detail = match transition {
+                crate::tool::ToolSetTransition::ToolUnavailable => {
+                    "removed unavailable tool from locked definitions"
+                }
+                _ => "MCP tools registered after the tool set was locked joined it",
+            };
+            self.record_tool_set_transition(transition, detail);
         }
-
-        let mut tools = self.build_filtered_tool_definitions().await;
-        crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
-
-        // Lock the tool list to prevent cache invalidation when more tools
-        // arrive asynchronously mid-session.
-        logging::info(&format!(
-            "Locking tool list at {} tools for cache stability",
-            tools.len()
-        ));
-        self.locked_tools = Some(tools.clone());
-        Ok(tools)
+        Ok(resolved.tools)
     }
 
     /// The tool definitions the next request carries, read without waiting:
@@ -1085,8 +1057,8 @@ impl Agent {
     pub(crate) fn next_request_tool_definitions(
         &self,
     ) -> Result<Vec<ToolDefinition>, crate::protocol::ContextServiceError> {
-        if let Some(locked) = &self.locked_tools {
-            let mut tools = locked.clone();
+        if let Some(locked) = self.tool_set.locked() {
+            let mut tools = locked.to_vec();
             tools.retain(|tool| crate::tool::tool_is_globally_available(&tool.name));
             return Ok(tools);
         }
@@ -1135,22 +1107,6 @@ impl Agent {
                 tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(true);
             }
         }
-    }
-
-    /// Returns true if the registry contains `mcp__*` tools (subject to the
-    /// session's `allowed_tools` filter) that are not present in the currently
-    /// locked snapshot. Used to detect the async MCP-registration race (#206).
-    async fn registry_has_new_mcp_tools(&self, locked: &[ToolDefinition]) -> bool {
-        let registry_names = self.registry.tool_names().await;
-        let allowed = self.allowed_tools.as_ref();
-        registry_names.iter().any(|name| {
-            name.starts_with("mcp__")
-                && allowed
-                    .map(|set| crate::tool::tool_name_is_allowed(set, name))
-                    .unwrap_or(true)
-                && !crate::tool::tool_name_is_disabled(&self.disabled_tools, name)
-                && !locked.iter().any(|t| &t.name == name)
-        })
     }
 
     pub(super) fn commit_routing_guidance(&mut self, tools: &[ToolDefinition]) -> Result<()> {

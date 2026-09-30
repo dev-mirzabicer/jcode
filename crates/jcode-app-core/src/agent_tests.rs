@@ -66,8 +66,8 @@ fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
             description: "SYNTHETIC".into(),
             input_schema: serde_json::json!({}),
         };
-        agent.locked_tools = Some(vec![tool("read"), tool("swarm")]);
-        agent.mcp_late_register_resolved = true;
+        agent.tool_set =
+            crate::tool::ToolSetLock::from_parts(Some(vec![tool("read"), tool("swarm")]), true);
         let invalidations = provider.invalidations.load(Ordering::SeqCst);
         let first = agent.tool_definitions().await.unwrap();
         let second = agent.tool_definitions().await.unwrap();
@@ -1648,8 +1648,7 @@ async fn historical_context_change_resets_provider_runtime_exactly_once() {
     );
     let before = agent.messages_for_provider().expect("baseline projection");
     agent.cache_tracker.record_request(&before);
-    agent.locked_tools = Some(Vec::new());
-    agent.mcp_late_register_resolved = true;
+    agent.tool_set = crate::tool::ToolSetLock::from_parts(Some(Vec::new()), true);
     agent.provider_session_id = Some("agent-provider-session".to_string());
     agent.session.provider_session_id = Some("stored-provider-session".to_string());
     agent.update_context_usage_from_stream(9_000, None, None);
@@ -1674,8 +1673,10 @@ async fn historical_context_change_resets_provider_runtime_exactly_once() {
     );
     assert!(agent.provider_session_id.is_none());
     assert!(agent.session.provider_session_id.is_none());
-    assert!(agent.locked_tools.is_none());
-    assert!(!agent.mcp_late_register_resolved);
+    // A context change keeps the tool set (INT-01 WP-05): the tools are not
+    // part of what the transition changed.
+    assert_eq!(agent.tool_set.locked().map(<[_]>::len), Some(0));
+    assert!(agent.tool_set.late_mcp_settled());
     assert_eq!(agent.cache_tracker.turn_count(), 0);
     let projected = agent.messages_for_provider().expect("changed projection");
     let stats = agent_context_budget_stats(&agent).await;
@@ -1746,6 +1747,13 @@ async fn phase10_correlated_preflight_blocks_before_provider_call_and_rolls_back
 
 #[tokio::test]
 async fn durable_primary_preflight_preserves_identity_and_reconciles_rollback() {
+    // Private home and runtime: the Agent, its session and the primary-input
+    // store must not write into another test's home or the real one.
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+    crate::config::invalidate_config_cache();
     let provider = Arc::new(ScriptedSizeProvider::stream(128, Vec::new()));
     let mut agent = Agent::new(provider.clone(), Registry::empty());
     let original = serde_json::to_value(&agent.session.messages).unwrap();
@@ -1780,6 +1788,13 @@ async fn durable_primary_preflight_preserves_identity_and_reconciles_rollback() 
 
 #[tokio::test]
 async fn durable_injected_preflight_retains_prior_tool_history_and_committed_input() {
+    // Private home and runtime: the Agent, its session and the primary-input
+    // store must not write into another test's home or the real one.
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = AgentTestEnvRestore::set_path("JCODE_RUNTIME_DIR", &home.path().join("runtime"));
+    crate::config::invalidate_config_cache();
     let provider = Arc::new(ScriptedSizeProvider::stream(128, Vec::new()));
     let mut agent = Agent::new(provider.clone(), Registry::empty());
     agent.begin_pending_turn(
@@ -1856,7 +1871,7 @@ async fn phase10_provider_payload_rejection_preserves_historical_images_and_neve
         .cache_tracker
         .record_request(&baseline_provider_messages);
     let cache_turns_before = agent.cache_tracker.turn_count();
-    agent.mcp_late_register_resolved = true;
+    agent.tool_set = crate::tool::ToolSetLock::from_parts(None, true);
     agent.tool_output_scan_index = agent.session.messages.len();
     let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
     let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
@@ -1875,8 +1890,8 @@ async fn phase10_provider_payload_rejection_preserves_historical_images_and_neve
     assert!(error.to_string().contains("images were preserved"));
     assert_eq!(provider.request_count(), 1);
     assert_eq!(agent.cache_tracker.turn_count(), cache_turns_before);
-    assert!(agent.locked_tools.is_none());
-    assert!(agent.mcp_late_register_resolved);
+    assert!(agent.tool_set.locked().is_none());
+    assert!(agent.tool_set.late_mcp_settled());
     assert_eq!(agent.tool_output_scan_index, agent.session.messages.len());
     assert_eq!(
         serde_json::to_vec(&agent.session.messages).unwrap(),
@@ -3214,11 +3229,14 @@ fn seed_transient_session_state(agent: &mut Agent) {
         cache_read_input_tokens: Some(3),
         cache_creation_input_tokens: Some(5),
     };
-    agent.locked_tools = Some(vec![ToolDefinition {
-        name: "test_tool".to_string(),
-        description: "test tool".to_string(),
-        input_schema: serde_json::json!({"type": "object"}),
-    }]);
+    agent.tool_set = crate::tool::ToolSetLock::from_parts(
+        Some(vec![ToolDefinition {
+            name: "test_tool".to_string(),
+            description: "test tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]),
+        false,
+    );
 }
 
 #[tokio::test]
@@ -3246,7 +3264,7 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.last_connection_type.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.locked_tools.is_none());
+    assert!(agent.tool_set.locked().is_none());
 }
 
 #[tokio::test]
@@ -3285,7 +3303,7 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.last_connection_type.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.locked_tools.is_none());
+    assert!(agent.tool_set.locked().is_none());
 }
 
 #[tokio::test]
@@ -3834,7 +3852,7 @@ impl crate::tool::Tool for FakeMcpTool {
 
 /// Reproduction for #206: MCP tools that register on the registry *after* the
 /// first turn locks the tool snapshot never reach the provider, because
-/// `tool_definitions()` returns the frozen `locked_tools` snapshot and the only
+/// `tool_definitions()` returns the frozen locked tool set and the only
 /// unlock path (`unlock_tools_if_needed`) fires solely when the LLM invokes the
 /// `"mcp"` management tool — which it never does, since it cannot see the
 /// `mcp__*` tools it would need to trigger that unlock.
@@ -3877,7 +3895,7 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
 
     // Once MCP tools are present in the locked snapshot, subsequent turns must
     // return the *same* stable snapshot so provider prompt-cache hits stay warm
-    // (the whole point of locked_tools). The #206 fix must not flap.
+    // (the whole point of the tool-set lock). The #206 fix must not flap.
     let names =
         |defs: &[ToolDefinition]| -> Vec<String> { defs.iter().map(|t| t.name.clone()).collect() };
     let stable_a = agent.tool_definitions().await.unwrap();
@@ -3898,7 +3916,7 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
 /// locked snapshot. After the first late-registered `mcp__*` tool is picked up
 /// (the one accepted miss), a *second* MCP tool that registers even later must
 /// NOT trigger another rebuild — otherwise a server that connects in waves would
-/// thrash the provider prompt cache. Guards the `mcp_late_register_resolved`
+/// thrash the provider prompt cache. Guards the tool-set lock's late-MCP
 /// one-shot flag (#206 follow-up).
 #[tokio::test]
 async fn mcp_late_registration_rebuild_happens_at_most_once() {
@@ -3926,7 +3944,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
         "first late MCP tool must be picked up by the one accepted rebuild"
     );
     assert!(
-        agent.mcp_late_register_resolved,
+        agent.tool_set.late_mcp_settled(),
         "one-shot guard must latch after the accepted rebuild"
     );
 
@@ -3958,7 +3976,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
     // and lets the next snapshot pick up everything currently registered.
     agent.unlock_tools();
     assert!(
-        !agent.mcp_late_register_resolved,
+        !agent.tool_set.late_mcp_settled(),
         "explicit unlock must re-arm the one-shot guard"
     );
     let after_unlock = agent.tool_definitions().await.unwrap();
