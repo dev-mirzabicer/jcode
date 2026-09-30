@@ -24,11 +24,12 @@ pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
-    AnthropicReasoningCaps, ReasoningBinding, anthropic_context_mode,
-    anthropic_decode_legacy_oauth_tool_name, anthropic_effectively_1m, anthropic_is_1m_model,
+    AnthropicReasoningCaps, ReasoningBinding, ThinkingOff, anthropic_accepts_sampling_parameters,
+    anthropic_context_mode, anthropic_decode_legacy_oauth_tool_name,
+    anthropic_default_reasoning_effort, anthropic_effectively_1m, anthropic_is_1m_model,
     anthropic_oauth_beta_headers, anthropic_reasoning_binding, anthropic_reasoning_caps,
     anthropic_stainless_arch, anthropic_stainless_os, anthropic_strip_1m_suffix,
-    anthropic_tool_name_is_valid,
+    anthropic_thinking_off, anthropic_tool_name_is_valid,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,

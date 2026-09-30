@@ -49,7 +49,7 @@ fn formerly_remapped_registry() -> Vec<ToolDefinition> {
 #[test]
 fn every_tool_keeps_its_registry_name_description_and_schema_dialect() {
     let registry = formerly_remapped_registry();
-    let formatted = format_tools(&registry, false);
+    let formatted = format_tools(&registry);
 
     assert_eq!(formatted.len(), registry.len(), "no tool added or dropped");
     for (tool, wire) in registry.iter().zip(&formatted) {
@@ -75,20 +75,18 @@ fn history_tool_uses_replay_registry_names() {
 }
 
 #[test]
-fn only_the_final_tool_carries_the_tools_cache_breakpoint() {
-    let formatted = format_tools(&formerly_remapped_registry(), true);
-    let marked: Vec<&str> = formatted
-        .iter()
-        .filter(|tool| tool.cache_control.is_some())
-        .map(|tool| tool.name.as_str())
-        .collect();
-    assert_eq!(marked, vec!["write"]);
-    assert!(format_tools(&[], true).is_empty());
+fn formatted_tools_carry_no_cache_marker_of_their_own() {
+    // Breakpoints are placed on the whole request (`place_cache_breakpoints`);
+    // the static-prefix marker sits on the last system block, which covers the
+    // tools rendered before it (INT-01 DESIGN §6).
+    let formatted = format_tools(&formerly_remapped_registry());
+    assert!(formatted.iter().all(|tool| tool.cache_control.is_none()));
+    assert!(format_tools(&[]).is_empty());
 }
 
 #[test]
 fn tool_choice_disables_parallel_calls_whenever_tools_are_sent() {
-    let formatted = format_tools(&formerly_remapped_registry(), false);
+    let formatted = format_tools(&formerly_remapped_registry());
     let choice = ApiToolChoice::for_tools(&formatted).expect("tools present");
     assert_eq!(
         serde_json::to_value(choice).expect("serialize"),
@@ -99,7 +97,7 @@ fn tool_choice_disables_parallel_calls_whenever_tools_are_sent() {
 
 #[test]
 fn request_serializes_tool_choice_beside_tools_and_omits_it_without_tools() {
-    let tools = format_tools(&formerly_remapped_registry(), false);
+    let tools = format_tools(&formerly_remapped_registry());
     let with_tools = ApiRequest {
         model: "claude-opus-5-5".to_string(),
         max_tokens: 16,
@@ -132,4 +130,49 @@ fn request_serializes_tool_choice_beside_tools_and_omits_it_without_tools() {
     };
     let value = serde_json::to_value(&without_tools).expect("serialize");
     assert!(value.get("tool_choice").is_none());
+}
+
+#[test]
+fn format_tools_removes_top_level_combinators_for_anthropic_api() {
+    let tool = ToolDefinition {
+        name: "custom".to_string(),
+        description: "schema compatibility regression".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "nested_union": {
+                    "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]
+                }
+            },
+            "required": ["action"],
+            "oneOf": [
+                {"type": "object", "properties": {"label": {"type": "string"}}},
+                {"type": "object", "properties": {"task_id": {"type": "string"}}}
+            ],
+            "allOf": [
+                {"type": "object", "properties": {"intent": {"type": "string"}}, "required": ["intent"]}
+            ]
+        }),
+    };
+
+    let formatted = format_tools(&[tool]);
+    let schema = &formatted[0].input_schema;
+    for keyword in ["oneOf", "anyOf", "allOf"] {
+        assert!(
+            schema.get(keyword).is_none(),
+            "Anthropic rejects top-level {keyword}: {schema}"
+        );
+    }
+    for property in ["action", "nested_union", "label", "task_id", "intent"] {
+        assert!(
+            schema["properties"].get(property).is_some(),
+            "missing merged property {property}: {schema}"
+        );
+    }
+    assert!(
+        schema["properties"]["nested_union"].get("anyOf").is_some(),
+        "nested combinators remain supported and should not be flattened"
+    );
+    assert_eq!(schema["required"], json!(["action", "intent"]));
 }

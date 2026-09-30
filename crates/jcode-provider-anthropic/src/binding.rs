@@ -519,7 +519,8 @@ mod tests {
         if let Some(tools) = marked.tools.as_mut() {
             tools[1].cache_control = Some(CacheControlParam::ephemeral(false));
         }
-        crate::add_message_cache_breakpoint(&mut marked.messages, true);
+        // Every production marker, including tool_result and image blocks.
+        crate::place_cache_breakpoints(&mut marked, true);
         assert_ne!(
             serde_json::to_string(&plain).unwrap(),
             serde_json::to_string(&marked).unwrap(),

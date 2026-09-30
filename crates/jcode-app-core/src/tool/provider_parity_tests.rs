@@ -342,9 +342,8 @@ async fn claude_and_gpt_receive_the_same_tool_surface() {
             "the surface must include `{expected}`"
         );
     }
-    let anthropic =
-        serde_json::to_value(jcode_provider_anthropic::format_tools(&definitions, false))
-            .expect("serialize");
+    let anthropic = serde_json::to_value(jcode_provider_anthropic::format_tools(&definitions))
+        .expect("serialize");
     let openai = Value::Array(crate::provider::openai_request::build_tools(&definitions));
 
     let failures = surface_parity_failures(&definitions, &anthropic, &openai);
@@ -407,9 +406,8 @@ async fn every_advertised_minimal_input_decodes_through_the_real_tool() {
             .map(|d| json!({"name": d.name, "input_schema": d.input_schema}))
             .collect(),
     );
-    let anthropic =
-        serde_json::to_value(jcode_provider_anthropic::format_tools(&definitions, false))
-            .expect("serialize");
+    let anthropic = serde_json::to_value(jcode_provider_anthropic::format_tools(&definitions))
+        .expect("serialize");
 
     let mut failures = decode_failures(&registry, &registry_tools, "input_schema").await;
     failures.extend(decode_failures(&registry, &anthropic, "input_schema").await);

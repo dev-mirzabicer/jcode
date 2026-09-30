@@ -227,6 +227,25 @@ pub struct AnthropicReasoningCaps {
     /// Whether a thinking block is invalidated by an edit to the conversation
     /// before it (INT-01 D11).
     pub reasoning_binding: ReasoningBinding,
+    /// How a request asks the model not to think (effort `none`).
+    pub thinking_off: ThinkingOff,
+    /// Whether the model accepts sampling parameters such as `temperature`.
+    pub sampling_parameters: bool,
+}
+
+/// How a request asks a Claude model not to think, the meaning of jcode's
+/// effort `none` (INT-01 DESIGN §7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThinkingOff {
+    /// Omitting `thinking` runs the model without thinking.
+    #[default]
+    OmitThinking,
+    /// Omitting `thinking` runs adaptive thinking; `thinking: {type:
+    /// "disabled"}` turns it off.
+    Disabled,
+    /// Thinking cannot be turned off. The lowest setting is effort `low`, which
+    /// is what `none` means for this model.
+    AlwaysOn,
 }
 
 /// Whether Anthropic binds a model's signed thinking to the conversation that
@@ -255,6 +274,8 @@ impl AnthropicReasoningCaps {
         xhigh_effort: true,
         max_effort: true,
         reasoning_binding: ReasoningBinding::Unbound,
+        thinking_off: ThinkingOff::OmitThinking,
+        sampling_parameters: true,
     };
     /// `output_config` effort + adaptive thinking, but no `xhigh` level.
     const EFFORT_NO_XHIGH: Self = Self {
@@ -264,6 +285,8 @@ impl AnthropicReasoningCaps {
         xhigh_effort: false,
         max_effort: true,
         reasoning_binding: ReasoningBinding::Unbound,
+        thinking_off: ThinkingOff::OmitThinking,
+        sampling_parameters: true,
     };
     /// `output_config` effort with manual thinking budgets (Opus 4.5).
     const MANUAL_WITH_EFFORT: Self = Self {
@@ -273,6 +296,8 @@ impl AnthropicReasoningCaps {
         xhigh_effort: false,
         max_effort: false,
         reasoning_binding: ReasoningBinding::Unbound,
+        thinking_off: ThinkingOff::OmitThinking,
+        sampling_parameters: true,
     };
     /// Manual thinking budgets only (Claude 3.7 Sonnet).
     const MANUAL_ONLY: Self = Self {
@@ -282,6 +307,8 @@ impl AnthropicReasoningCaps {
         xhigh_effort: false,
         max_effort: false,
         reasoning_binding: ReasoningBinding::Unbound,
+        thinking_off: ThinkingOff::OmitThinking,
+        sampling_parameters: true,
     };
     const NONE: Self = Self {
         output_effort: false,
@@ -290,6 +317,8 @@ impl AnthropicReasoningCaps {
         xhigh_effort: false,
         max_effort: false,
         reasoning_binding: ReasoningBinding::Unbound,
+        thinking_off: ThinkingOff::OmitThinking,
+        sampling_parameters: true,
     };
 
     /// Whether any reasoning-effort control is available at all.
@@ -345,7 +374,93 @@ fn parse_claude_family_version(base: &str) -> (Option<&str>, Option<(u32, u32)>)
 pub fn anthropic_reasoning_caps(model: &str) -> AnthropicReasoningCaps {
     AnthropicReasoningCaps {
         reasoning_binding: anthropic_reasoning_binding(model),
+        thinking_off: anthropic_thinking_off(model),
+        sampling_parameters: anthropic_accepts_sampling_parameters(model),
         ..anthropic_effort_caps(model)
+    }
+}
+
+/// How a Claude model's request turns thinking off.
+///
+/// Entries follow Anthropic's model documentation (claude-api reference,
+/// re-verified 2026-10-01): omitting `thinking` runs Opus 4.8/4.7 and every
+/// earlier generation without thinking; Opus 5 and Sonnet 5 run adaptive
+/// thinking when it is omitted and accept `{type: "disabled"}` (Opus 5 only at
+/// effort `high` or below, which `none` satisfies because it sends no effort);
+/// Opus 5.5, Sonnet 5.5, Fable and Mythos reject `disabled`. Sonnet 5.5's
+/// `{type: "between_tools"}` is not used: it rejects `block_binding`, which
+/// would remove the binding safety net from a prefix-bound model. An unknown
+/// future generation is `AlwaysOn`, which never sends a rejected shape.
+pub fn anthropic_thinking_off(model: &str) -> ThinkingOff {
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude") {
+        return ThinkingOff::OmitThinking;
+    }
+    let (family, version) = parse_claude_family_version(&base);
+    let Some(version) = version else {
+        return ThinkingOff::OmitThinking;
+    };
+    if version < (5, 0) {
+        return ThinkingOff::OmitThinking;
+    }
+    match family {
+        Some("opus") | Some("sonnet") if version == (5, 0) => ThinkingOff::Disabled,
+        _ => ThinkingOff::AlwaysOn,
+    }
+}
+
+/// Whether a Claude model accepts sampling parameters (`temperature`).
+///
+/// Anthropic's documentation removes them on Opus 4.7 and later, Sonnet 5 and
+/// later, Fable and Mythos (Sonnet 5.5 rejects non-default values). INT-01
+/// Gate 0 (G0.5, 2026-09-29, Claude OAuth) measured `temperature: 1.0`
+/// accepted on Opus 5.5, Opus 5, Sonnet 5.5 and Sonnet 5, so omitting it there
+/// is hygiene rather than the fix for an observed rejection. Unknown future
+/// generations follow the documented direction and receive none.
+pub fn anthropic_accepts_sampling_parameters(model: &str) -> bool {
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude") {
+        return true;
+    }
+    let (family, version) = parse_claude_family_version(&base);
+    let Some(version) = version else {
+        return true;
+    };
+    match family {
+        Some("opus") => version < (4, 7),
+        Some("sonnet") | Some("haiku") => version < (5, 0),
+        _ => version < (5, 0),
+    }
+}
+
+/// jcode's reasoning effort for a Claude model when none is configured, or
+/// `None` to leave the model's own default (INT-01 DESIGN §7).
+///
+/// An explicit table, not name matching: Opus 5.5 gets `medium`, its API
+/// default; Opus 5 `low`, enough for day-to-day agentic work; Opus 4.7/4.8
+/// `xhigh`, Anthropic's recommended start for coding; earlier Opus with an
+/// effort control `high`; Fable `high`. Sonnet, Haiku, Mythos and unknown
+/// generations keep the model default, so a new generation never inherits a
+/// neighbour's policy by accident.
+pub fn anthropic_default_reasoning_effort(model: &str) -> Option<&'static str> {
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude") {
+        return None;
+    }
+    let (family, version) = parse_claude_family_version(&base);
+    let version = version?;
+    match family {
+        Some("opus") => match version {
+            (5, 5) => Some("medium"),
+            (5, 0) => Some("low"),
+            (4, 7) | (4, 8) => Some("xhigh"),
+            v if v < (4, 7) && anthropic_effort_caps(model).supports_reasoning_effort() => {
+                Some("high")
+            }
+            _ => None,
+        },
+        Some("fable") if matches!(version, (5, 0) | (5, 1)) => Some("high"),
+        _ => None,
     }
 }
 
@@ -550,6 +665,118 @@ mod tests {
     }
 
     #[test]
+    fn current_claude_models_are_listed_and_classified() {
+        // INT-01 E3: the static list, context classification and output budget
+        // know the current generations.
+        for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"] {
+            assert!(ALL_CLAUDE_MODELS.contains(&model), "{model} listed");
+            assert_eq!(
+                anthropic_context_mode(model),
+                AnthropicContextMode::Native1M,
+                "{model}"
+            );
+            assert_eq!(anthropic_max_output_tokens(model), 128_000, "{model}");
+            assert!(anthropic_reasoning_caps(model).supports_reasoning_effort());
+            assert!(
+                crate::pricing::anthropic_api_pricing(model).is_some(),
+                "{model} is priced"
+            );
+        }
+        assert_eq!(ALL_CLAUDE_MODELS[0], crate::DEFAULT_CLAUDE_MODEL);
+    }
+
+    #[test]
+    fn default_effort_is_an_explicit_per_model_table() {
+        // INT-01 DESIGN §7 (E1): Opus 5.5 is no longer caught by an Opus 5
+        // prefix match.
+        for (model, expected) in [
+            ("claude-opus-5-5", Some("medium")),
+            ("claude-opus-5-5[1m]", Some("medium")),
+            ("claude-opus-5", Some("low")),
+            ("claude-opus-4-8", Some("xhigh")),
+            ("claude-opus-4-7", Some("xhigh")),
+            ("claude-opus-4-6", Some("high")),
+            ("claude-opus-4-5", Some("high")),
+            ("claude-fable-5-1", Some("high")),
+            ("claude-fable-5", Some("high")),
+            ("claude-sonnet-5-5", None),
+            ("claude-sonnet-5", None),
+            ("claude-sonnet-4-6", None),
+            ("claude-haiku-4-5", None),
+            ("claude-mythos-5-1", None),
+            ("claude-opus-4-1", None),
+            ("claude-opus-6", None),
+            ("claude-fable-5-2", None),
+            ("gpt-5.6-sol", None),
+        ] {
+            assert_eq!(
+                anthropic_default_reasoning_effort(model),
+                expected,
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_off_follows_each_generation() {
+        use ThinkingOff::*;
+        for (model, expected) in [
+            ("claude-opus-5-5", AlwaysOn),
+            ("claude-sonnet-5-5", AlwaysOn),
+            ("claude-fable-5-1", AlwaysOn),
+            ("claude-fable-5", AlwaysOn),
+            ("claude-mythos-5-1", AlwaysOn),
+            ("claude-opus-5", Disabled),
+            ("claude-sonnet-5", Disabled),
+            ("claude-sonnet-5-20260701", Disabled),
+            ("claude-opus-4-8", OmitThinking),
+            ("claude-opus-4-7", OmitThinking),
+            ("claude-sonnet-4-6", OmitThinking),
+            ("claude-haiku-4-5", OmitThinking),
+            ("claude-opus-6", AlwaysOn),
+        ] {
+            assert_eq!(anthropic_thinking_off(model), expected, "{model}");
+            assert_eq!(
+                anthropic_reasoning_caps(model).thinking_off,
+                expected,
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampling_parameters_are_sent_only_where_documented() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-5-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-mythos-5-1",
+            "claude-opus-6",
+        ] {
+            assert!(!anthropic_accepts_sampling_parameters(model), "{model}");
+            assert!(
+                !anthropic_reasoning_caps(model).sampling_parameters,
+                "{model}"
+            );
+        }
+        for model in [
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+            "claude-3-7-sonnet",
+        ] {
+            assert!(anthropic_accepts_sampling_parameters(model), "{model}");
+        }
+    }
+
+    #[test]
     fn reasoning_caps_match_live_verified_generations() {
         // Full ladder: Fable 5 (live 2026-07-01), Sonnet 5 (live 2026-07-07),
         // Opus 5 (live 2026-07-24), Opus 4.7/4.8.
@@ -744,16 +971,17 @@ mod tests {
             "claude-mythos-5-1",
             "claude-3-7-sonnet",
         ] {
-            let caps = anthropic_reasoning_caps(model);
+            // The per-model policy entries (binding, thinking off, sampling)
+            // leave the effort ladder as the effort table defines it.
+            let policy_free = |caps: AnthropicReasoningCaps| AnthropicReasoningCaps {
+                reasoning_binding: ReasoningBinding::Unbound,
+                thinking_off: ThinkingOff::OmitThinking,
+                sampling_parameters: true,
+                ..caps
+            };
             assert_eq!(
-                AnthropicReasoningCaps {
-                    reasoning_binding: ReasoningBinding::Unbound,
-                    ..caps
-                },
-                AnthropicReasoningCaps {
-                    reasoning_binding: ReasoningBinding::Unbound,
-                    ..anthropic_effort_caps(model)
-                },
+                policy_free(anthropic_reasoning_caps(model)),
+                policy_free(anthropic_effort_caps(model)),
                 "{model}"
             );
         }

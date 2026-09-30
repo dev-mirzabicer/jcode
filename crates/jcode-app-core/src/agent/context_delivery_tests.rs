@@ -148,10 +148,10 @@ fn strip_cache_control(value: &mut Value) {
 }
 
 fn anthropic_view(request: &Recorded) -> View {
-    let system = jcode_provider_anthropic::build_system_param(&request.system, true, true);
+    let system = jcode_provider_anthropic::build_system_param(&request.system, true);
     let mut system = serde_json::to_value(system).unwrap();
     let mut tools =
-        serde_json::to_value(jcode_provider_anthropic::format_tools(&request.tools, true)).unwrap();
+        serde_json::to_value(jcode_provider_anthropic::format_tools(&request.tools)).unwrap();
     strip_cache_control(&mut system);
     strip_cache_control(&mut tools);
     let mut blocks = Vec::new();

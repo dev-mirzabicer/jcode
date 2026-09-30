@@ -69,9 +69,14 @@ pub fn anthropic_api_pricing_with_tier(
     }
 
     match base {
+        // Fable 5.1 cache reads are 0.025x input.
+        "claude-fable-5-1" => exact(10.0, 50.0, 0.25, "Anthropic API pricing"),
         "claude-fable-5" => exact(10.0, 50.0, 1.0, "Anthropic API pricing"),
+        // Opus 5.5 cache reads are 0.05x input.
+        "claude-opus-5-5" => exact(4.0, 20.0, 0.2, "Anthropic API pricing"),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
         | "claude-opus-4-5" => exact(5.0, 25.0, 0.5, "Anthropic API pricing"),
+        "claude-sonnet-5-5" => exact(2.0, 10.0, 0.2, "Anthropic API pricing"),
         // Sonnet 5 introductory pricing ($2/$10) runs through 2026-08-31,
         // after which it moves to the standard Sonnet $3/$15 rates.
         "claude-sonnet-5" => exact(2.0, 10.0, 0.2, "Anthropic API introductory pricing"),
@@ -359,6 +364,27 @@ mod tests {
         assert_eq!(fable.output_price_per_mtok_micros, Some(50_000_000));
         assert_eq!(fable.cache_read_price_per_mtok_micros, Some(1_000_000));
         assert_eq!(fable.cache_write_price_per_mtok_micros, Some(12_500_000));
+
+        // Current generations (published 2026-09; claude-api reference
+        // re-verified 2026-10-01): Opus 5.5 reads at 0.05x, Fable 5.1 at 0.025x.
+        for (model, input, output, read) in [
+            ("claude-opus-5-5", 4_000_000, 20_000_000, 200_000),
+            ("claude-sonnet-5-5", 2_000_000, 10_000_000, 200_000),
+            ("claude-fable-5-1", 10_000_000, 50_000_000, 250_000),
+        ] {
+            let estimate = anthropic_api_pricing(model).expect("priced model");
+            assert_eq!(estimate.input_price_per_mtok_micros, Some(input), "{model}");
+            assert_eq!(
+                estimate.output_price_per_mtok_micros,
+                Some(output),
+                "{model}"
+            );
+            assert_eq!(
+                estimate.cache_read_price_per_mtok_micros,
+                Some(read),
+                "{model}"
+            );
+        }
 
         let sonnet = anthropic_api_pricing("claude-sonnet-4-6").expect("priced model");
         assert_eq!(sonnet.input_price_per_mtok_micros, Some(3_000_000));

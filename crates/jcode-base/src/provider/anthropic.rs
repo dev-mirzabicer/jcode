@@ -69,21 +69,8 @@ pub fn apply_oauth_attribution_headers(
         .header("anthropic-dangerous-direct-browser-access", "true")
 }
 
-/// Available models
-pub const AVAILABLE_MODELS: &[&str] = &[
-    "claude-opus-5",
-    "claude-fable-5",
-    "claude-opus-4-8",
-    "claude-opus-4-6",
-    "claude-opus-4-6[1m]",
-    "claude-sonnet-5",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-6[1m]",
-    "claude-haiku-4-5",
-    "claude-opus-4-5",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-20250514",
-];
+/// Available models: the one curated Claude list.
+pub const AVAILABLE_MODELS: &[&str] = jcode_provider_core::ALL_CLAUDE_MODELS;
 
 pub fn load_anthropic_api_key() -> Result<String> {
     let key = crate::provider_catalog::load_api_key_from_env_or_config(

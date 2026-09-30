@@ -659,21 +659,6 @@ impl AnthropicProvider {
         strip_1m_suffix(model).trim().to_ascii_lowercase()
     }
 
-    fn model_supports_output_effort(model: &str) -> bool {
-        // Shared capability table (with an optimistic default for unknown 5.x+
-        // generations); see `jcode_provider_core::anthropic_reasoning_caps`.
-        // Fable 5 verified live 2026-07-01; Sonnet 5 verified live 2026-07-07.
-        jcode_provider_core::anthropic_reasoning_caps(model).output_effort
-    }
-
-    fn model_supports_adaptive_thinking(model: &str) -> bool {
-        jcode_provider_core::anthropic_reasoning_caps(model).adaptive_thinking
-    }
-
-    fn model_supports_manual_thinking(model: &str) -> bool {
-        jcode_provider_core::anthropic_reasoning_caps(model).manual_thinking
-    }
-
     fn model_supports_xhigh_effort(model: &str) -> bool {
         jcode_provider_core::anthropic_reasoning_caps(model).xhigh_effort
     }
@@ -747,39 +732,29 @@ impl AnthropicProvider {
         } else if jcode_base::prompt::is_swarm_effort(effort) {
             jcode_base::prompt::SWARM_EFFORT.to_string()
         } else {
-            Self::actual_effort_for_model(model, effort)
+            Self::actual_effort_for_model(model, &Self::effort_without_none(model, effort))
         }
     }
 
-    /// Default reasoning effort to apply when the user has *not* explicitly
-    /// configured one. Claude Opus 5 defaults to `low`: it is strong enough
-    /// at low effort for day-to-day coding/agentic work, and users can cycle
-    /// up when they want deeper reasoning. Older Claude Opus models are
-    /// reasoning-heavy flagships, so we default them to `xhigh` where
-    /// supported (Opus 4.7/4.8), clamped to `high` on older Opus.
-    /// Deliberately NOT `max`: Anthropic recommends `xhigh` as the starting
-    /// point for coding/agentic work and reserves `max` for frontier problems
-    /// (it costs much more and can overthink). Claude Fable 5 defaults to
-    /// `high`: it benefits from deeper reasoning on coding/agentic work.
-    /// Every other model keeps the model's own default (no forced effort) so
-    /// cheaper models stay cheap.
-    fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
-        let key = Self::normalized_model_key(model);
-        if key.contains("claude-opus-5") {
-            Some("low".to_string())
-        } else if key.contains("claude-opus") {
-            Some(if Self::model_supports_xhigh_effort(model) {
-                "xhigh".to_string()
-            } else {
-                "high".to_string()
-            })
-        } else if key.contains("claude-fable-5") {
-            // Fable 5 defaults to `high` reasoning for stronger day-to-day
-            // results. Users can still cycle down for faster/cheaper turns.
-            Some("high".to_string())
+    /// Effort `none` on a model whose thinking cannot be turned off is its
+    /// lowest setting, `low` (INT-01 DESIGN §7). Every other effort is kept.
+    fn effort_without_none(model: &str, effort: &str) -> String {
+        if effort == "none"
+            && jcode_provider_core::anthropic_thinking_off(model)
+                == jcode_provider_core::ThinkingOff::AlwaysOn
+        {
+            "low".to_string()
         } else {
-            None
+            effort.to_string()
         }
+    }
+
+    /// Default reasoning effort when the user has not configured one: the
+    /// explicit per-model table in
+    /// [`jcode_provider_core::anthropic_default_reasoning_effort`]. `None`
+    /// keeps the model's own default.
+    fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
+        jcode_provider_core::anthropic_default_reasoning_effort(model).map(str::to_string)
     }
 
     /// The raw, user-configured reasoning effort for this provider, if any.
@@ -798,11 +773,13 @@ impl AnthropicProvider {
         if !Self::model_supports_reasoning_effort(model) {
             return None;
         }
-        Some(
-            self.stored_reasoning_effort()
-                .or_else(|| Self::default_reasoning_effort_for_model(model))
-                .unwrap_or_else(|| "none".to_string()),
-        )
+        let configured = self
+            .stored_reasoning_effort()
+            .or_else(|| Self::default_reasoning_effort_for_model(model));
+        Some(match configured {
+            Some(effort) => Self::effort_without_none(model, &effort),
+            None => "none".to_string(),
+        })
     }
 
     fn model_supports_priority_service_tier(model: &str) -> bool {
@@ -878,22 +855,22 @@ impl AnthropicProvider {
         show_thinking: bool,
         mismatch_behavior: PrefixMismatchBehavior,
     ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
-        let effort = self.effort_for_model(model);
-        // An explicit "none" (user-configured or a model default) means
-        // reasoning was deliberately disabled, so it must also win over the
-        // `display.show_thinking` fallback below. `effort_for_model` returns
-        // Some("none") even when nothing is configured, so check the
-        // stored/default effort instead.
-        let effort_is_explicit_none = self
+        let caps = jcode_provider_core::anthropic_reasoning_caps(model);
+        // `effort_for_model` resolves `none` to `low` where thinking cannot be
+        // turned off, and returns `none` both for an explicit `none` and when
+        // nothing is configured and the model has no jcode default. Only the
+        // explicit form turns thinking off and wins over the
+        // `display.show_thinking` fallback below.
+        let explicit_none = self
             .stored_reasoning_effort()
             .or_else(|| Self::default_reasoning_effort_for_model(model))
-            .as_deref()
-            == Some("none");
+            .is_some_and(|effort| Self::effort_without_none(model, &effort) == "none");
+        let effort = self.effort_for_model(model);
         let effort = effort.as_deref().filter(|effort| *effort != "none");
-        let show_thinking = show_thinking && !effort_is_explicit_none;
+        let show_thinking = show_thinking && !explicit_none;
 
         let output_config = effort
-            .filter(|_| Self::model_supports_output_effort(model))
+            .filter(|_| caps.output_effort)
             .map(|effort| ApiOutputConfig {
                 effort: Self::actual_effort_for_model(model, effort),
             });
@@ -901,12 +878,17 @@ impl AnthropicProvider {
         // When only the display toggle is on (no explicit effort), request
         // thinking without forcing `output_config`, so the model keeps its
         // default reasoning strength and only the thinking *display* is enabled.
-        let thinking = if Self::model_supports_adaptive_thinking(model) {
+        let thinking = if explicit_none
+            && caps.thinking_off == jcode_provider_core::ThinkingOff::Disabled
+        {
+            // Omitting `thinking` would run adaptive thinking on this model.
+            Some(ApiThinking::Disabled)
+        } else if caps.adaptive_thinking {
             (effort.is_some() || show_thinking).then_some(ApiThinking::Adaptive {
                 display: Some("summarized"),
                 block_binding: None,
             })
-        } else if Self::model_supports_manual_thinking(model) {
+        } else if caps.manual_thinking {
             // Manual-thinking models need a concrete budget. Use the configured
             // effort, or fall back to a minimal budget when only the display
             // toggle is on.
@@ -922,13 +904,11 @@ impl AnthropicProvider {
         };
         let thinking = with_binding_control(thinking, model, mismatch_behavior);
 
-        // Extended/adaptive thinking is incompatible with temperature. OAuth path
-        // normally mirrors Claude Code's temperature=1.0, so omit it when thinking is active.
-        let temperature = if is_oauth && thinking.is_none() {
-            Some(1.0)
-        } else {
-            None
-        };
+        // The OAuth route mirrors Claude Code's `temperature: 1.0`, but only
+        // without thinking and only for models that still accept sampling
+        // parameters (INT-01 DESIGN §7).
+        let temperature =
+            (is_oauth && thinking.is_none() && caps.sampling_parameters).then_some(1.0);
 
         (thinking, output_config, temperature)
     }
@@ -1143,7 +1123,7 @@ impl AnthropicProvider {
     /// Convert tool definitions to Anthropic API format. OAuth and API-key
     /// requests carry the same registry tools.
     fn format_tools(&self, tools: &[ToolDefinition]) -> Vec<ApiTool> {
-        jcode_provider_anthropic::format_tools(tools, is_cache_ttl_1h())
+        jcode_provider_anthropic::format_tools(tools)
     }
 
     /// Build the Messages request shared by `complete` and `complete_split`,
@@ -1159,11 +1139,11 @@ impl AnthropicProvider {
         let api_tools = self.format_tools(tools);
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(model, is_oauth);
-        ApiRequest {
+        let mut request = ApiRequest {
             model: strip_1m_suffix(model).to_string(),
             max_tokens: self.max_tokens_for(model),
             system,
-            messages: format_messages_with_identity(self.format_messages(messages), is_oauth),
+            messages: self.format_messages(messages),
             tool_choice: ApiToolChoice::for_tools(&api_tools),
             tools: (!api_tools.is_empty()).then_some(api_tools),
             metadata: is_oauth.then(|| oauth_request_metadata(&self.oauth_session_id)),
@@ -1172,7 +1152,9 @@ impl AnthropicProvider {
             temperature,
             service_tier: self.current_service_tier_for_model(model),
             stream: true,
-        }
+        };
+        jcode_provider_anthropic::place_cache_breakpoints(&mut request, is_cache_ttl_1h());
+        request
     }
 }
 
@@ -1362,7 +1344,14 @@ impl Provider for AnthropicProvider {
         if !Self::model_supports_reasoning_effort(&model) {
             return vec![];
         }
-        let mut efforts = vec!["none", "low", "medium", "high"];
+        let mut efforts = if jcode_provider_core::anthropic_thinking_off(&model)
+            == jcode_provider_core::ThinkingOff::AlwaysOn
+        {
+            // Thinking cannot be turned off; `none` would mean `low`.
+            vec!["low", "medium", "high"]
+        } else {
+            vec!["none", "low", "medium", "high"]
+        };
         if Self::model_supports_xhigh_effort(&model) {
             efforts.push("xhigh");
         }
@@ -1768,6 +1757,9 @@ fn with_binding_control(
             display: None,
             block_binding,
         },
+        // `disabled` takes no other field. The binding tables never pair it
+        // with a prefix-bound model (such models always think).
+        Some(ApiThinking::Disabled) => ApiThinking::Disabled,
     })
 }
 
@@ -2007,7 +1999,9 @@ async fn run_stream_with_retries(
                     ));
                     request.thinking = None;
                     request.output_config = None;
-                    if is_oauth {
+                    if is_oauth
+                        && jcode_provider_core::anthropic_accepts_sampling_parameters(&model_name)
+                    {
                         request.temperature = Some(1.0);
                     }
                     last_error = Some(e);
@@ -2539,7 +2533,7 @@ struct ThinkingBetas {
 impl ThinkingBetas {
     fn of_request(request: &ApiRequest) -> Self {
         Self {
-            thinking: request.thinking.is_some(),
+            thinking: request.thinking.as_ref().is_some_and(ApiThinking::thinks),
             binding_controls: request
                 .thinking
                 .as_ref()
@@ -2553,7 +2547,8 @@ impl ThinkingBetas {
     fn of_body(body: &Value) -> Self {
         let thinking = body.get("thinking");
         Self {
-            thinking: thinking.is_some(),
+            thinking: thinking
+                .is_some_and(|t| t.get("type").and_then(Value::as_str) != Some("disabled")),
             binding_controls: thinking.and_then(|t| t.get("block_binding")).is_some(),
         }
     }
@@ -2954,16 +2949,7 @@ fn record_input_transformations(
 // ============================================================================
 
 fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
-    jcode_provider_anthropic::build_system_param(system, is_oauth, is_cache_ttl_1h())
-}
-
-fn format_messages_with_identity(messages: Vec<ApiMessage>, is_oauth: bool) -> Vec<ApiMessage> {
-    jcode_provider_anthropic::format_messages_with_identity(messages, is_oauth, is_cache_ttl_1h())
-}
-
-#[cfg(test)]
-fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
-    jcode_provider_anthropic::add_message_cache_breakpoint(messages, is_cache_ttl_1h())
+    jcode_provider_anthropic::build_system_param(system, is_oauth)
 }
 
 mod sse_types;

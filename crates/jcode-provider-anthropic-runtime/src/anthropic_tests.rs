@@ -157,6 +157,7 @@ fn test_anthropic_reasoning_effort_request_parts() {
     match thinking.expect("adaptive thinking should be enabled") {
         ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Claude 4.6 should use adaptive thinking"),
+        ApiThinking::Disabled => panic!("thinking must not be disabled here"),
     }
     assert_eq!(
         output_config.expect("output_config should be set").effort,
@@ -235,6 +236,7 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
     match thinking.expect("show_thinking should enable adaptive thinking") {
         ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Sonnet 4.6 should use adaptive thinking"),
+        ApiThinking::Disabled => panic!("thinking must not be disabled here"),
     }
     assert!(
         output_config.is_none(),
@@ -249,15 +251,15 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
 #[test]
 fn test_anthropic_explicit_none_effort_disables_thinking_even_with_show_thinking() {
     // Regression: with `display.show_thinking = true` (the default), setting
-    // effort to `none` still requested adaptive thinking, so the user kept
-    // seeing reasoning on Fable/Sonnet. An explicit `none` must suppress the
-    // thinking request entirely, on both adaptive and manual thinking models.
+    // effort to `none` still requested adaptive thinking. An explicit `none`
+    // must turn thinking off wherever the model allows it, on adaptive and
+    // manual thinking models alike (INT-01 DESIGN §7).
     let provider = AnthropicProvider::new();
     *provider.reasoning_effort.write().unwrap() = Some("none".to_string());
 
-    // Adaptive-thinking model (Fable 5 / Sonnet 4.6 family).
+    // Adaptive-thinking model that runs without thinking when it is omitted.
     let (thinking, output_config, temperature) = provider.build_reasoning_request_parts_inner(
-        "claude-fable-5",
+        "claude-sonnet-4-6",
         true,
         true,
         PrefixMismatchBehavior::Error,
@@ -270,7 +272,7 @@ fn test_anthropic_explicit_none_effort_disables_thinking_even_with_show_thinking
     assert_eq!(
         temperature,
         Some(1.0),
-        "no thinking means the OAuth path restores temperature"
+        "no thinking means the OAuth path restores temperature where accepted"
     );
 
     // Manual-thinking model.
@@ -285,6 +287,104 @@ fn test_anthropic_explicit_none_effort_disables_thinking_even_with_show_thinking
         "explicit effort=none must suppress manual thinking budgets too"
     );
     assert!(output_config.is_none());
+}
+
+#[test]
+fn effort_none_follows_how_each_generation_turns_thinking_off() {
+    // INT-01 DESIGN §7, R13.
+    let provider = AnthropicProvider::new();
+    *provider.reasoning_effort.write().unwrap() = Some("none".to_string());
+    let parts = |model: &str| {
+        provider.build_reasoning_request_parts_inner(
+            model,
+            true,
+            true,
+            PrefixMismatchBehavior::DropBlock,
+        )
+    };
+
+    // Thinking on unless disabled: `{type: "disabled"}`, no effort, and no
+    // sampling parameter.
+    for model in ["claude-opus-5", "claude-sonnet-5"] {
+        let (thinking, output_config, temperature) = parts(model);
+        assert_eq!(
+            serde_json::to_value(thinking.as_ref().expect("disabled")).unwrap(),
+            json!({"type": "disabled"}),
+            "{model}"
+        );
+        assert!(output_config.is_none(), "{model}");
+        assert_eq!(temperature, None, "{model} rejects sampling parameters");
+    }
+
+    // Thinking cannot be turned off: `none` is `low`.
+    for model in [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-fable-5",
+    ] {
+        let (thinking, output_config, temperature) = parts(model);
+        assert!(
+            matches!(thinking, Some(ApiThinking::Adaptive { .. })),
+            "{model} keeps adaptive thinking"
+        );
+        assert_eq!(output_config.expect("effort").effort, "low", "{model}");
+        assert_eq!(temperature, None, "{model}");
+    }
+
+    // Omitting thinking turns it off; Opus 4.8 takes no sampling parameter.
+    let (thinking, output_config, temperature) = parts("claude-opus-4-8");
+    assert!(thinking.is_none() && output_config.is_none());
+    assert_eq!(temperature, None);
+}
+
+#[test]
+fn effort_none_is_not_offered_where_thinking_cannot_be_turned_off() {
+    let provider = AnthropicProvider::new();
+    use_model(&provider, "claude-opus-5-5");
+    assert!(!provider.available_efforts().contains(&"none"));
+    provider.set_reasoning_effort("none").unwrap();
+    assert_eq!(
+        provider.reasoning_effort().as_deref(),
+        Some("low"),
+        "the stored and surfaced effort is the one sent"
+    );
+    use_model(&provider, "claude-opus-5");
+    assert!(provider.available_efforts().contains(&"none"));
+}
+
+#[test]
+fn unconfigured_efforts_follow_the_default_table() {
+    let provider = AnthropicProvider::new();
+    *provider.reasoning_effort.write().unwrap() = None;
+    let parts = |model: &str| {
+        provider.build_reasoning_request_parts_inner(
+            model,
+            true,
+            false,
+            PrefixMismatchBehavior::DropBlock,
+        )
+    };
+
+    let (thinking, output_config, temperature) = parts("claude-opus-5-5");
+    assert_eq!(output_config.expect("effort").effort, "medium");
+    assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+    assert_eq!(temperature, None);
+
+    // Sonnet 5.5 keeps its model default: no effort, and thinking carries only
+    // the binding control (the model always thinks).
+    let (thinking, output_config, temperature) = parts("claude-sonnet-5-5");
+    assert!(output_config.is_none());
+    assert_eq!(
+        serde_json::to_value(thinking.expect("binding control")).unwrap(),
+        json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}})
+    );
+    assert_eq!(temperature, None);
+
+    // Sonnet 5 keeps its model default and receives no sampling parameter.
+    let (thinking, output_config, temperature) = parts("claude-sonnet-5");
+    assert!(thinking.is_none() && output_config.is_none());
+    assert_eq!(temperature, None);
 }
 
 #[test]
@@ -315,6 +415,7 @@ fn test_anthropic_fable_defaults_to_high_effort() {
     match thinking.expect("Fable default effort should enable adaptive thinking") {
         ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Fable 5 should use adaptive thinking"),
+        ApiThinking::Disabled => panic!("thinking must not be disabled here"),
     }
 
     // The surfaced status mirrors the effective default for the active model.
@@ -327,30 +428,26 @@ fn test_anthropic_fable_defaults_to_high_effort() {
     // An explicit user override still wins over the Fable default.
     provider.set_reasoning_effort("low").unwrap();
     assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+    // Fable always thinks, so `none` means its lowest setting and beats the
+    // high default (INT-01 DESIGN §7).
     provider.set_reasoning_effort("none").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
     let (thinking, output_config, _temp) = provider.build_reasoning_request_parts_inner(
         "claude-fable-5",
         true,
         true,
         PrefixMismatchBehavior::Error,
     );
-    assert!(
-        thinking.is_none(),
-        "explicit none must beat the high default and show_thinking"
-    );
-    assert!(output_config.is_none());
+    assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+    assert_eq!(output_config.expect("effort").effort, "low");
 }
 
 #[test]
 fn test_anthropic_sonnet_5_supports_full_effort_ladder() {
     // `claude-sonnet-5` accepts `output_config` effort low..xhigh/max and
     // adaptive thinking (verified live 2026-07-07).
-    assert!(AnthropicProvider::model_supports_output_effort(
-        "claude-sonnet-5"
-    ));
-    assert!(AnthropicProvider::model_supports_adaptive_thinking(
-        "claude-sonnet-5"
-    ));
+    assert!(jcode_provider_core::anthropic_reasoning_caps("claude-sonnet-5").output_effort);
+    assert!(jcode_provider_core::anthropic_reasoning_caps("claude-sonnet-5").adaptive_thinking);
     assert!(AnthropicProvider::model_supports_xhigh_effort(
         "claude-sonnet-5"
     ));
@@ -450,6 +547,7 @@ fn test_anthropic_opus_defaults_to_xhigh_effort() {
     match thinking.expect("Opus default effort should enable adaptive thinking") {
         ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Opus 4.8 should use adaptive thinking"),
+        ApiThinking::Disabled => panic!("thinking must not be disabled here"),
     }
 
     // The surfaced status mirrors the effective default for the active model.
@@ -492,6 +590,7 @@ fn test_anthropic_show_thinking_enables_manual_thinking_without_effort() {
     match thinking.expect("show_thinking should enable manual thinking") {
         ApiThinking::Enabled { budget_tokens, .. } => assert_eq!(budget_tokens, 1_024),
         ApiThinking::Adaptive { .. } => panic!("Claude 3.7 Sonnet should use manual thinking"),
+        ApiThinking::Disabled => panic!("thinking must not be disabled here"),
     }
 }
 
@@ -602,6 +701,7 @@ fn test_anthropic_manual_thinking_budget_for_opus_45() {
     match thinking.expect("manual thinking should be enabled") {
         ApiThinking::Enabled { budget_tokens, .. } => assert_eq!(budget_tokens, 8_192),
         ApiThinking::Adaptive { .. } => panic!("Claude Opus 4.5 should use manual thinking"),
+        ApiThinking::Disabled => panic!("thinking must not be disabled here"),
     }
     assert_eq!(output_config.unwrap().effort, "high");
     assert_eq!(temperature, None);
@@ -1067,6 +1167,7 @@ async fn test_dangling_tool_use_repair() {
             tool_use_id,
             is_error,
             content,
+            ..
         } = block
         {
             found_ids.insert(tool_use_id.clone());
@@ -1257,429 +1358,26 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
 }
 
 #[test]
-fn test_cache_breakpoint_no_messages() {
-    let mut messages: Vec<ApiMessage> = vec![];
-    add_message_cache_breakpoint(&mut messages);
-    // Should not panic, just return early
-    assert!(messages.is_empty());
-}
-
-#[test]
-fn test_cache_breakpoint_too_few_messages() {
-    let mut messages = vec![
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Hello".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "World".to_string(),
-                cache_control: None,
-            }],
-        },
-    ];
-    add_message_cache_breakpoint(&mut messages);
-    // With only 2 messages, should not add cache control
-    for msg in &messages {
-        for block in &msg.content {
-            if let ApiContentBlock::Text { cache_control, .. } = block {
-                assert!(cache_control.is_none());
-            }
-        }
-    }
-}
-
-#[test]
-fn test_cache_breakpoint_adds_to_assistant_message() {
-    let mut messages = vec![
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Identity".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Hello".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "assistant".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Hi there!".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "How are you?".to_string(),
-                cache_control: None,
-            }],
-        },
-    ];
-
-    add_message_cache_breakpoint(&mut messages);
-
-    // Assistant message (index 2) should have cache_control
-    if let ApiContentBlock::Text { cache_control, .. } = &messages[2].content[0] {
-        assert!(cache_control.is_some());
-    } else {
-        panic!("Expected Text block");
-    }
-
-    // Other messages should NOT have cache_control
-    for (i, msg) in messages.iter().enumerate() {
-        if i == 2 {
-            continue; // Skip the assistant message we just checked
-        }
-        for block in &msg.content {
-            if let ApiContentBlock::Text { cache_control, .. } = block {
-                assert!(
-                    cache_control.is_none(),
-                    "Message {} should not have cache_control",
-                    i
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn test_cache_breakpoint_finds_text_in_mixed_content() {
-    // Assistant message with tool_use followed by text
-    let mut messages = vec![
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Identity".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Run a command".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "assistant".to_string(),
-            content: vec![
-                ApiContentBlock::Text {
-                    text: "Running command...".to_string(),
-                    cache_control: None,
-                },
-                ApiContentBlock::ToolUse {
-                    id: "tool_1".to_string(),
-                    name: "bash".to_string(),
-                    input: serde_json::json!({"command": "ls"}),
-                    cache_control: None,
-                },
-            ],
-        },
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Thanks".to_string(),
-                cache_control: None,
-            }],
-        },
-    ];
-
-    add_message_cache_breakpoint(&mut messages);
-
-    // The last block (ToolUse) in the assistant message should have cache_control
-    // (we prefer the last block for maximum cache coverage)
-    let assistant_msg = &messages[2];
-    let has_cached_block = assistant_msg.content.iter().any(|block| {
-        matches!(
-            block,
-            ApiContentBlock::ToolUse {
-                cache_control: Some(_),
-                ..
-            }
-        )
-    });
-    assert!(
-        has_cached_block,
-        "Should have added cache_control to last block (ToolUse) in assistant message"
-    );
-}
-
-#[test]
-fn oauth_system_is_the_identity_blocks_plus_the_cached_static_prompt() {
+fn oauth_system_is_the_identity_blocks_plus_the_static_prompt() {
     let Some(ApiSystem::Blocks(blocks)) = build_system_param("static prompt", true) else {
         panic!("Expected Blocks variant");
     };
-    // Billing header and SDK identity (uncached), then the static prompt
-    // (cached). Nothing per-request is ever added (INT-01 R08).
+    // Billing header and SDK identity, then the static prompt. Nothing
+    // per-request is ever added (INT-01 R08). The request's cache placement
+    // marks the last block (see `production_requests_read_where_the_previous_request_wrote`).
     assert_eq!(blocks.len(), 3);
-    assert!(blocks[0].cache_control.is_none());
-    assert!(blocks[1].cache_control.is_none());
     assert_eq!(blocks[2].text, "static prompt");
-    assert!(blocks[2].cache_control.is_some());
+    assert!(blocks.iter().all(|block| block.cache_control.is_none()));
 }
 
 #[test]
-fn api_key_system_is_only_the_cached_static_prompt() {
+fn api_key_system_is_only_the_static_prompt() {
     let Some(ApiSystem::Blocks(blocks)) = build_system_param("static prompt", false) else {
         panic!("Expected Blocks variant");
     };
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].text, "static prompt");
-    assert!(blocks[0].cache_control.is_some());
     assert!(build_system_param("", false).is_none());
-}
-
-// --- Cross-turn cache correctness tests ---
-// These tests verify the two-marker sliding-window strategy that allows each turn
-// to READ from the previous turn's conversation cache.
-
-fn count_message_cache_breakpoints(messages: &[ApiMessage]) -> usize {
-    messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter(|b| {
-            matches!(
-                b,
-                ApiContentBlock::Text {
-                    cache_control: Some(_),
-                    ..
-                } | ApiContentBlock::ToolUse {
-                    cache_control: Some(_),
-                    ..
-                }
-            )
-        })
-        .count()
-}
-
-fn cached_message_indices(messages: &[ApiMessage]) -> Vec<usize> {
-    messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| {
-            m.content.iter().any(|b| {
-                matches!(
-                    b,
-                    ApiContentBlock::Text {
-                        cache_control: Some(_),
-                        ..
-                    } | ApiContentBlock::ToolUse {
-                        cache_control: Some(_),
-                        ..
-                    }
-                )
-            })
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// Helper to build a minimal conversation with N exchanges (user→assistant pairs).
-/// Returns messages suitable for add_message_cache_breakpoint (includes a trailing user msg).
-fn build_conversation(exchanges: usize) -> Vec<ApiMessage> {
-    let mut messages = vec![ApiMessage {
-        role: "user".to_string(),
-        content: vec![ApiContentBlock::Text {
-            text: "identity".to_string(),
-            cache_control: None,
-        }],
-    }];
-    for i in 0..exchanges {
-        messages.push(ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: format!("Question {}", i + 1),
-                cache_control: None,
-            }],
-        });
-        messages.push(ApiMessage {
-            role: "assistant".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: format!("Answer {}", i + 1),
-                cache_control: None,
-            }],
-        });
-    }
-    // Trailing user message (the current turn's input)
-    messages.push(ApiMessage {
-        role: "user".to_string(),
-        content: vec![ApiContentBlock::Text {
-            text: format!("Question {}", exchanges + 1),
-            cache_control: None,
-        }],
-    });
-    messages
-}
-
-#[test]
-fn test_cache_one_exchange_single_marker() {
-    // Turn 2: only one assistant reply exists → one marker (WRITE only)
-    let mut messages = build_conversation(1);
-    add_message_cache_breakpoint(&mut messages);
-
-    let indices = cached_message_indices(&messages);
-    assert_eq!(indices.len(), 1, "One assistant message → one cache marker");
-    // The assistant message is at index 2 (identity=0, user=1, assistant=2, user=3)
-    assert_eq!(indices[0], 2);
-}
-
-#[test]
-fn test_cache_two_exchanges_two_markers() {
-    // Turn 3: two assistant replies → two markers (READ prev + WRITE new)
-    let mut messages = build_conversation(2);
-    // identity=0, user=1, assistant=2, user=3, assistant=4, user=5
-    add_message_cache_breakpoint(&mut messages);
-
-    let indices = cached_message_indices(&messages);
-    assert_eq!(
-        indices.len(),
-        2,
-        "Two assistant messages → two cache markers"
-    );
-    assert!(
-        indices.contains(&2),
-        "Second-to-last assistant (READ marker) at index 2"
-    );
-    assert!(
-        indices.contains(&4),
-        "Last assistant (WRITE marker) at index 4"
-    );
-}
-
-#[test]
-fn test_cache_many_exchanges_still_two_markers() {
-    // 10 exchanges → still only 2 markers (within the 4-breakpoint API limit)
-    let mut messages = build_conversation(10);
-    add_message_cache_breakpoint(&mut messages);
-
-    let count = count_message_cache_breakpoints(&messages);
-    assert_eq!(
-        count, 2,
-        "Should always place exactly 2 markers regardless of conversation length"
-    );
-}
-
-#[test]
-fn test_cache_cross_turn_read_marker_preserved() {
-    // THE KEY REGRESSION TEST: simulates turn N → turn N+1 and verifies that the
-    // assistant message from turn N still has cache_control in the turn N+1 request.
-    // Without this, the turn N cache snapshot is written but never read.
-
-    // Turn 2: one assistant reply
-    let mut turn2 = build_conversation(1);
-    // identity=0, user=1, assistant=2, user=3
-    add_message_cache_breakpoint(&mut turn2);
-    let turn2_cached = cached_message_indices(&turn2);
-    assert_eq!(
-        turn2_cached,
-        vec![2],
-        "Turn 2: cache marker at assistant index 2"
-    );
-
-    // The content of the assistant message from turn 2 (what gets written to cache)
-    let cached_text = match &turn2[2].content[0] {
-        ApiContentBlock::Text { text, .. } => text.clone(),
-        _ => panic!("Expected text block"),
-    };
-
-    // Turn 3: same conversation + one more exchange (assistant[2] is now second-to-last)
-    let mut turn3 = build_conversation(2);
-    // identity=0, user=1, assistant=2(same as before), user=3, assistant=4(new), user=5
-    add_message_cache_breakpoint(&mut turn3);
-    let turn3_cached = cached_message_indices(&turn3);
-
-    // CRITICAL: assistant at index 2 MUST still have cache_control in turn 3,
-    // so Anthropic can serve a cache READ hit for the turn-2 snapshot.
-    assert!(
-        turn3_cached.contains(&2),
-        "Turn 3 MUST keep cache_control on the turn-2 assistant message (index 2) \
-             so Anthropic can serve a cache_read hit. Without this, turn-2's cache is \
-             written but never read, wasting cache_creation tokens every turn."
-    );
-    assert!(
-        turn3_cached.contains(&4),
-        "Turn 3 must add cache_control on the new assistant message (index 4) to \
-             write a fresh cache snapshot for turn 4 to read"
-    );
-
-    // Verify it's actually the same content (same assistant message, not a different one)
-    match &turn3[2].content[0] {
-        ApiContentBlock::Text {
-            text,
-            cache_control,
-        } => {
-            assert_eq!(text, &cached_text);
-            assert!(cache_control.is_some(), "Must have cache_control set");
-        }
-        _ => panic!("Expected text block"),
-    }
-}
-
-#[test]
-fn test_cache_non_oauth_path_gets_breakpoints() {
-    // Non-OAuth path should now also get conversation cache breakpoints
-    // (previously it returned early without calling add_message_cache_breakpoint)
-    let messages = vec![
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Hello".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "assistant".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Hi there!".to_string(),
-                cache_control: None,
-            }],
-        },
-        ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: "Follow-up".to_string(),
-                cache_control: None,
-            }],
-        },
-    ];
-
-    let result = format_messages_with_identity(messages, false);
-    let indices = cached_message_indices(&result);
-    assert_eq!(
-        indices,
-        vec![1],
-        "Non-OAuth path should add cache breakpoint to assistant message"
-    );
-}
-
-#[test]
-fn test_cache_total_breakpoints_within_api_limit() {
-    // Anthropic allows at most 4 cache_control parameters per request total
-    // (system blocks + tool definitions + message blocks).
-    // System: 1 (static block) + Tools: 1 (last tool) + Messages: up to 2 = 4 max.
-    // This test verifies messages never exceed 2 breakpoints.
-    for exchanges in 1..=20 {
-        let mut messages = build_conversation(exchanges);
-        add_message_cache_breakpoint(&mut messages);
-        let count = count_message_cache_breakpoints(&messages);
-        assert!(
-            count <= 2,
-            "Conversation with {} exchanges produced {} message breakpoints, exceeding \
-                 the 2-message budget (system+tools use the other 2 of Anthropic's 4-limit)",
-            exchanges,
-            count
-        );
-    }
 }
 
 #[tokio::test]
@@ -2185,9 +1883,7 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     // *defaults* to `low` (jcode's default model/effort pairing), and an
     // explicit `low` must survive normalization, must NOT be silently
     // promoted, and must land in `output_config.effort` on the request.
-    assert!(AnthropicProvider::model_supports_output_effort(
-        "claude-opus-5"
-    ));
+    assert!(jcode_provider_core::anthropic_reasoning_caps("claude-opus-5").output_effort);
     assert_eq!(
         AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
         Some("low"),
@@ -2910,4 +2606,113 @@ fn unbound_models_report_no_replayed_reasoning_invalidation() {
         None,
         "Opus 5 does not bind thinking to its prefix (D11)"
     );
+}
+
+/// Marked message blocks of a request, as `(message, block)`.
+fn marked_message_blocks(request: &ApiRequest) -> Vec<(usize, usize)> {
+    request
+        .messages
+        .iter()
+        .enumerate()
+        .flat_map(|(message, m)| {
+            m.content
+                .iter()
+                .enumerate()
+                .filter(|(_, block)| block.has_cache_control())
+                .map(move |(block, _)| (message, block))
+        })
+        .collect()
+}
+
+/// The request through `(message, block)`, cache markers removed.
+fn cached_span(request: &ApiRequest, message: usize, block: usize) -> serde_json::Value {
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.remove("cache_control");
+                map.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let mut span = request.clone();
+    span.messages.truncate(message + 1);
+    span.messages[message].content.truncate(block + 1);
+    let mut value = serde_json::json!({
+        "tools": span.tools,
+        "system": span.system,
+        "messages": span.messages,
+    });
+    strip(&mut value);
+    value
+}
+
+#[test]
+fn production_requests_read_where_the_previous_request_wrote() {
+    // INT-01 DESIGN §6, R12: a scripted Claude session through the production
+    // builder, with thinking bound exactly as the runtime binds it.
+    let provider = AnthropicProvider::new();
+    use_model(&provider, "claude-opus-5-5");
+    let tools = probe_tools();
+    let mut history = vec![Message::user("start")];
+    let mut requests = Vec::new();
+    for step in 0..5 {
+        let tool_id = format!("call_{step}");
+        requests.push(provider.build_api_request(
+            "claude-opus-5-5",
+            &history,
+            &tools,
+            build_system_param("probe system", true),
+            true,
+        ));
+        let turn = produced_turn_for(
+            &provider,
+            &history,
+            &tools,
+            true,
+            &format!("sig-{step}"),
+            &tool_id,
+        );
+        history.push(turn);
+        history.push(Message::tool_result(&tool_id, "ok", false));
+        if step == 2 {
+            history.push(Message::user("a new user turn"));
+        }
+    }
+
+    for request in &requests {
+        let Some(ApiSystem::Blocks(blocks)) = &request.system else {
+            panic!("system");
+        };
+        assert!(blocks.last().is_some_and(|b| b.cache_control.is_some()));
+        assert!(
+            request
+                .tools
+                .iter()
+                .flatten()
+                .all(|t| t.cache_control.is_none())
+        );
+        let markers = serde_json::to_string(request)
+            .unwrap()
+            .matches("cache_control")
+            .count();
+        assert!(markers <= 4, "at most four breakpoints, got {markers}");
+        assert!(
+            jcode_provider_anthropic::binding::analyze_request(request)
+                .invalid()
+                .next()
+                .is_none(),
+            "cache placement never changes what a replayed block is bound to"
+        );
+    }
+    for pair in requests.windows(2) {
+        let written = *marked_message_blocks(&pair[0]).last().expect("newest");
+        assert!(marked_message_blocks(&pair[1]).contains(&written));
+        assert_eq!(
+            cached_span(&pair[0], written.0, written.1),
+            cached_span(&pair[1], written.0, written.1),
+            "the previous request's cached span is a byte-identical prefix"
+        );
+    }
 }

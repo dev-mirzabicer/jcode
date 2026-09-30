@@ -60,11 +60,11 @@ pub(crate) fn fixture_request(
     tools: &[ToolDefinition],
     system: &str,
 ) -> ApiRequest {
-    let api_tools = format_tools(tools, false);
-    ApiRequest {
+    let api_tools = format_tools(tools);
+    let mut request = ApiRequest {
         model: "claude-sonnet-5-5".to_string(),
         max_tokens: 1024,
-        system: build_system_param(system, false, false),
+        system: build_system_param(system, false),
         messages: format_messages(messages),
         tool_choice: ApiToolChoice::for_tools(&api_tools),
         tools: (!api_tools.is_empty()).then_some(api_tools),
@@ -74,7 +74,10 @@ pub(crate) fn fixture_request(
         temperature: None,
         service_tier: None,
         stream: true,
-    }
+    };
+    // As `build_api_request` does; bindings exclude every marker.
+    jcode_provider_anthropic::place_cache_breakpoints(&mut request, false);
+    request
 }
 
 #[async_trait]
