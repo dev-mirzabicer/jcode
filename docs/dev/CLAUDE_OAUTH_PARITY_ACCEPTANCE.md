@@ -639,3 +639,41 @@ attempts are recorded: one stopped before the summary because the script
 omitted the curator plan review, and one passed every request but produced
 thinking in only two requests, so the revert case was not exercised; the
 script now asks for arithmetic that needs reasoning.
+
+## WP-04 activation and TUI evidence
+
+Activated build `5cc2be147-dirty-9ab2a70b8f0c` (v0.75.489-dev) through a
+coordinated `selfdev build-reload` requested at 2026-09-30T18:15:45Z from a
+debug-created selfdev session that was never resumed. The pipeline reported
+"published and smoke-tested" with the built source equal to the requested
+source. The running server, current and shared-server channels report
+`5cc2be147`. As in WP-01 to WP-03, the new server did not load the requesting
+session, so the pending activation was completed with
+`jcode_build_support::complete_pending_activation_for_session` after a
+manifest backup; the canary is `passed`.
+
+An earlier activation of `ddae4736c` served the first tester frames. They
+showed that the production review of a ready draft, the curator workspace's
+atomic review, did not list the locked group: it was only in the legacy
+review lines. Commit `5cc2be147` adds it to the workspace overview, its list
+label and its apply overlay; the build above activates that fix.
+
+On the activated build, owned tester clients rendered the debug fixtures with
+real key and mouse input, with no frame anomalies:
+
+- 140x48: the review overview shows the locked group (4 invalidated by this
+  edit, 1 already invalid, 2 replayed again) and labels the overview item;
+  `a` opens the apply overlay stating "Claude thinking: 5 block(s) suppressed
+  as invalid, 2 replayed again", and `Esc` closes it without applying. The
+  history shows the managed transaction with authorization
+  `jcode · Claude thinking invalidation` and a disabled `(Revert)
+  (Reapply)`; `r` and `p` refuse with the managed-transaction notice, and a
+  mouse click on the disabled Revert opens nothing, while an ordinary
+  transaction's `r` still opens the revert confirmation. The managed detail
+  names each cause.
+- 72x24: the review list labels the overview; `Enter` opens the detail with
+  the locked group. The history refuses `r` with the same notice and shows
+  the disabled controls.
+
+Frames are kept in the program evidence directory
+(`evidence/wp04-2026-09-30/tui-frames/`).
