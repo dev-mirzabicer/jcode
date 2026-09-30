@@ -2730,6 +2730,12 @@ fn several_signed_blocks_interleaved_with_text_and_a_redacted_block_replay_in_or
 
 /// Bind one produced assistant turn the way the runtime binds it: to the
 /// request `build_api_request` builds for the history before it.
+/// Select a model without the catalog check `set_model` performs: the
+/// catalog is process-global and other tests replace it.
+fn use_model(provider: &AnthropicProvider, model: &str) {
+    *provider.model.write().unwrap() = model.to_string();
+}
+
 fn produced_turn_for(
     provider: &AnthropicProvider,
     history: &[Message],
@@ -2800,7 +2806,7 @@ fn bound_history(provider: &AnthropicProvider, is_oauth: bool) -> Vec<Message> {
 fn replayed_reasoning_invalidations_use_the_production_request_prefix() {
     use jcode_provider_core::{InvalidReplayedReasoning, ReplayedReasoningInvalidity};
     let provider = AnthropicProvider::new();
-    provider.set_model("claude-sonnet-5-5").unwrap();
+    use_model(&provider, "claude-sonnet-5-5");
     provider
         .last_request_route
         .store(ROUTE_API_KEY, Ordering::Relaxed);
@@ -2865,7 +2871,7 @@ fn replayed_reasoning_invalidations_use_the_production_request_prefix() {
 #[test]
 fn replayed_reasoning_invalidations_follow_the_credential_route() {
     let provider = AnthropicProvider::new();
-    provider.set_model("claude-opus-5-5").unwrap();
+    use_model(&provider, "claude-opus-5-5");
     let tools = probe_tools();
     provider
         .last_request_route
@@ -2891,14 +2897,14 @@ fn replayed_reasoning_invalidations_follow_the_credential_route() {
 #[test]
 fn unbound_models_report_no_replayed_reasoning_invalidation() {
     let provider = AnthropicProvider::new();
-    provider.set_model("claude-sonnet-5-5").unwrap();
+    use_model(&provider, "claude-sonnet-5-5");
     provider
         .last_request_route
         .store(ROUTE_API_KEY, Ordering::Relaxed);
     let tools = probe_tools();
     let mut history = bound_history(&provider, false);
     history[2] = Message::tool_result("t1", "edited", false);
-    provider.set_model("claude-opus-5").unwrap();
+    use_model(&provider, "claude-opus-5");
     assert_eq!(
         provider.replayed_reasoning_invalidations(&history, &tools, "probe system"),
         None,
