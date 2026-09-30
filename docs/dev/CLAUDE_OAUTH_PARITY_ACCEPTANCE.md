@@ -677,3 +677,12 @@ real key and mouse input, with no frame anomalies:
 
 Frames are kept in the program evidence directory
 (`evidence/wp04-2026-09-30/tui-frames/`).
+
+## WP-04 acceptance
+
+Accepted by Mirza on 2026-09-30 (approval received by 18:33Z) on candidate
+`c7c6f066a`. Activated runtime `5cc2be147-dirty-9ab2a70b8f0c` (running,
+current and shared-server channels equal, canary passed); later commits are
+documentation only. Top-level Claude replay remains off until WP-05, which now
+has complete invalidation coverage: every context transition and every
+request reconciles bound thinking before it is sent.
