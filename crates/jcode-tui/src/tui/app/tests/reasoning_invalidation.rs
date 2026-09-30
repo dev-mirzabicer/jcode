@@ -74,6 +74,8 @@ fn local_requests_suppress_stale_thinking_before_sending() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
+    // A fixed prompt keeps the prefix independent of shared instruction stores.
+    app.ambient_system_prompt = Some("fixture system prompt".to_string());
     app.session.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {
