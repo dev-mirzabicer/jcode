@@ -509,3 +509,133 @@ continuation repair.
   split), and `managed_effort_is_a_static_section_and_fails_before_provider`.
 - `jcode-tui`: `test_system_reminder_is_delivered_as_transcript_content_not_system_prompt`
   and the local skill and kv-cache telemetry tests.
+
+## Current behavior after WP-04
+
+- **One managed set** (R11, D6, Mirza's decisions D-WP04-1 and D-WP04-2,
+  2026-09-30). Every replayed Claude thinking block that no longer matches its
+  request prefix is held by one jcode-managed reasoning-invalidation context
+  transaction (`StoredContextAuthorization::ReasoningInvalidation`), as
+  `ReasoningSuppression` operations with an `Invalidated { cause }` selection,
+  one per cause. `jcode_app_core::context::reasoning_invalidation` is its only
+  writer. It recomputes the complete set from the WP-02 bindings in every
+  apply, revert, reapply and authorized emergency transaction
+  (`prepare_context_transition_for_session`) and before every request (both
+  agent loops and the TUI local loop). When the set changes, the previous
+  managed transaction is `Superseded` and the new one applied at the same
+  revision; people cannot revert or reapply it, and undo skips it. Current
+  behavior is documented in
+  [`CONTEXT_CONTROL.md`](../CONTEXT_CONTROL.md#replayed-reasoning-bound-to-its-prefix).
+- **Why a whole set.** DESIGN §5 staged consequential suppressions "in the same
+  reviewed transaction". Revert and reapply must also suppress blocks produced
+  while the reverted change was active and restore blocks that match again,
+  which suppressions inside immutable user transactions cannot do. The managed
+  set is recomputed and superseded instead, so every sequence of transitions
+  is exact.
+- **Validity.** `Provider::replayed_reasoning_invalidations(messages, tools,
+  system)` reports the blocks a request with exactly that prefix would have to
+  drop. The Anthropic runtime builds its production request (on the route of
+  its latest request, or before one the configured credential mode) and
+  applies `binding::blocks_to_suppress`: `analyze_request`'s rule with each
+  invalid block already removed. Models whose `reasoning_binding` is
+  `Unbound`, and every other provider, answer `None`, so nothing is staged and
+  an existing set is lifted (D11).
+- **Causes.** `ContextTransition { transaction_id, transition }` for blocks the
+  transition itself invalidates; `RequestPrefixChanged { recorded_transitions
+  }` for blocks invalid because the system prompt, tool set or credential route
+  changed, with the harness transitions the agent recorded since its previous
+  request (skill activation, tool-set changes, model switch, agent
+  replacement). Causes survive supersession and a rewind that ends a set.
+- **Review and apply.** Reviews stage exactly as apply does and show a locked
+  group (invalidated by this edit, already invalid, replayed again); economics
+  include the removed reasoning. A review records the request-prefix digest it
+  was computed under, and apply refuses a draft whose prefix changed.
+  Revert and reapply keep their confirmation; the result status reports the
+  change (D-WP04-2).
+- **Requests.** A request-time change is persisted before the request is sent;
+  a persistence failure blocks the request. It raises a status notice and a
+  `reasoning invalidation` cache-invalidation record.
+- **Selections.** A person's `R` selection is recorded even for blocks jcode
+  suppresses, so a later restore cannot undo it. Managed sets are left out of
+  provider-kind validation, so they never block a provider switch.
+- **Cost.** The request prefix is composed only when the route binds reasoning
+  and the transcript holds bound reasoning, or a managed set is in force.
+  OpenAI sessions and top-level Claude sessions (thinking stored as traces
+  until WP-05) do no extra work.
+- **Persistence.** The context-view schema version is unchanged; older state
+  decodes as before. A session that holds a managed set uses new enum values
+  that pre-WP-04 binaries cannot decode.
+
+## WP-04 deterministic evidence
+
+- `jcode-provider-anthropic` `binding::tests`: `blocks_to_suppress` keeps an
+  unchanged history, suppresses the blocks after an edit and keeps the ones
+  before, suppresses the blocks chained after a middle suppression, keeps the
+  blocks after a leading run, suppresses everything on a changed system prompt
+  or tool set, and every plan leaves only valid blocks under
+  `analyze_request`. Stored and wire fingerprints agree.
+- `jcode-provider-anthropic-runtime`: `replayed_reasoning_invalidations`
+  through the production request builder (indices, middle chain, system and
+  tool changes), across the credential route (the OAuth identity blocks are
+  bound), and `None` for Opus 5 (Unbound).
+- `jcode-session-types`, `jcode-context-core` validation: managed sets round
+  trip; they are applied once then superseded or ended by a transcript edit;
+  only one may be active; only they may carry an `Invalidated` selection, of
+  signed thinking only.
+- `jcode-app-core` `context::reasoning_invalidation_tests` (a provider that
+  decides validity with the production Anthropic formatter and binding rule,
+  every turn bound to the exact projected request): summary, distillation,
+  middle suppression, keep-latest (nothing staged), revert (restores and
+  suppresses), reapply, overlapping transactions in every order, Unbound
+  model, switch to an Unbound model, request-time system-prompt and tool
+  changes with restoration, attribution under an unreconciled prefix change,
+  a person's selection of a managed block, managed revert/reapply refused and
+  undo skipping it, a rewind re-staging with the original cause, a plain
+  transcript never reading the prefix, review equals apply (group and
+  economics), a no-op review stages nothing, apply refusing a changed prefix,
+  and an authorized emergency transaction staging under its own cause with the
+  reasoning in its recorded reduction.
+- `jcode-app-core` `agent::reasoning_invalidation_tests`: the streaming and
+  blocking turn loops suppress and persist thinking bound to a replaced system
+  prompt before the next request, which then replays nothing invalid.
+- `jcode-tui`: the review's locked group (wide and narrow), the apply
+  confirmation line, a managed transaction in history (label, disabled Revert
+  and Reapply, `r`/`p` refused with a notice), per-cause provenance detail, and
+  the local request gate. Debug fixtures `reasoning-invalidation-review`,
+  `-confirmation`, `-history` and `-detail`.
+- `jcode-protocol`: the new result, preview and draft fields round-trip and
+  default on older wire forms.
+
+## WP-04 live evidence (2026-09-30)
+
+`cli::startup::invalidation_live_tests::context_transitions_live` (ignored;
+run with `JCODE_ANTHROPIC_PREFIX_MISMATCH=error cargo test -p jcode --lib
+context_transitions_live -- --ignored --nocapture`) drives the concrete
+Anthropic runtime a child resolves to (roster alias for
+`claude-oauth:claude-sonnet-5-5`, effort `high`) through the streaming turn
+loop: two file-and-arithmetic turns, a real summary of the first turn through
+the production draft path (curator plan review, generation on
+`claude-sonnet-5-5`, review, apply), a turn, revert, a turn, reapply and a
+final turn. With `prefix_mismatch_behavior: "error"` every request that still
+replayed a block bound to a changed prefix would be rejected.
+
+Run at 2026-09-30T18:03Z, session
+`session_cactus_1790791430588_7b9b6bfbf16d9216`: passed. Every continuation
+was accepted, 6 bound thinking blocks were produced, no local or provider
+binding event was recorded, and every written value is correct.
+
+| Transition | Suppressed by it | Replayed again | Suppressed after |
+|---|---|---|---|
+| Review | 1 | 0 | 1 |
+| Apply | 1 | 0 | 1 |
+| Revert | 2 | 1 | 2 |
+| Reapply | 3 | 2 | 3 |
+
+Apply staged exactly what the review showed (the second turn's thinking,
+bound to the unsummarized history). Revert replayed it again and suppressed
+the thinking produced while the summary was active; reapply did the reverse
+and also suppressed the thinking produced after the revert. Two earlier
+attempts are recorded: one stopped before the summary because the script
+omitted the curator plan review, and one passed every request but produced
+thinking in only two requests, so the revert case was not exercised; the
+script now asks for arithmetic that needs reasoning.

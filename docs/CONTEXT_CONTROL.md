@@ -61,6 +61,10 @@ Future changes must preserve all of these unless product requirements explicitly
   capping, pre-summarizing, or replacing required source with omission markers.
 - Replayed-reasoning suppression is provider aware. Transcript-only reasoning and
   provider-required function-call signatures are not counted as removable context.
+- Replayed reasoning a model binds to its request prefix is never sent after that prefix
+  changed, and never dropped silently: jcode suppresses it explicitly, persisted and visible,
+  in the same transition that invalidates it (see
+  [Replayed reasoning bound to its prefix](#replayed-reasoning-bound-to-its-prefix)).
 - Persisted targets use stable message identity, block locators, exact hashes, structural
   closure, and strict validation. The system never guesses a nearby replacement target.
 - A fully redundant operation is a visible no-op. It does not create a transaction,
@@ -326,6 +330,11 @@ History is provenance. Transactions are never deleted merely because they were r
 Reapply repeats strict target, projection, and provider validation against the current
 transcript.
 
+History also lists jcode-managed reasoning invalidations, labeled
+`jcode · Claude thinking invalidation`. Each is applied once and ends as `superseded` when a
+newer set replaces it, or as `invalidated` when a rewind removes its targets. People do not
+revert or reapply it, and `/context undo` skips it.
+
 ### Atomic commit sequence
 
 Before activation Jcode:
@@ -345,6 +354,59 @@ Before activation Jcode:
 If persistence fails, the previous in-memory context state and provider session identity are
 restored. No continuation reset is emitted. Apply races reserve a draft so only one client
 can commit it.
+
+## Replayed reasoning bound to its prefix
+
+Some models bind each replayed reasoning block to the request prefix that produced it: the
+system prompt, the tool set and every earlier message, plus a chain to the block before it
+(Claude preserved thinking on Opus 5.5, Sonnet 5.5 and Fable 5.1). A summary, a
+distillation, a suppression in the middle of a run, a revert or reapply, or a changed system
+prompt or tool set can leave later blocks bound to a prefix the next request no longer has.
+The provider would reject such a block or drop it silently.
+
+jcode keeps every such block in one managed reasoning-invalidation transaction, grouped by
+cause. It recomputes the complete set from the blocks' recorded bindings:
+
+- in every apply, revert and reapply, including authorized emergency transactions, inside
+  the same revision as the change;
+- before every provider request, after the request's system prompt and tools are known.
+
+When the set changes, the previous managed transaction is superseded and the new one applied
+at the same revision. Recomputing the whole set keeps revert and reapply exact: reverting a
+summary replays blocks that match the unsummarized history again and suppresses blocks
+produced while the summary was active; reapplying does the reverse. Removing a leading run of
+blocks (keep the latest turns) invalidates nothing; suppressing a block in the middle
+invalidates the blocks chained after it.
+
+Each suppressed block records its cause:
+
+| Cause | Meaning |
+|---|---|
+| Context transition | The apply, revert or reapply of the named transaction changed the history before the block. |
+| Request prefix changed | The system prompt, tool set or credential route differs from the request that produced the block. The recorded harness transitions since the previous request (skill activation, tool-set change, model switch, agent replacement) are listed when known. |
+
+What people see:
+
+- **Review.** A draft review shows a locked group: blocks invalidated by this edit, blocks
+  already invalid for another cause, and blocks that match again and are replayed. They
+  cannot be deselected; cancelling the review keeps the thinking. Economics include the
+  removed reasoning. The review records the request prefix it was computed under, and apply
+  refuses a draft whose prefix changed since.
+- **Revert and reapply.** The confirmation is unchanged; the result status states how many
+  thinking blocks were suppressed and how many are replayed again.
+- **Editor.** Suppressed blocks carry the `R` marker. Provenance (`v`) opens the managed
+  transaction and shows each block's cause. History lists every managed set.
+- **Requests.** A request-time change is persisted before the request is sent (a persistence
+  failure blocks the request and preserves input), shown as a status notice and recorded in
+  the cache-invalidation journal.
+
+A person's own `R` selection is recorded even for blocks jcode currently suppresses, so a
+later restore cannot undo it. Routes and models that do not bind reasoning (OpenAI, Opus 5,
+Sonnet 5 and every non-Anthropic route) stage nothing, and switching to one lifts the managed
+set at the next request. Managed sets never block a provider or model switch. The rule reads
+the per-model `reasoning_binding` capability, so a provider change of binding policy is a
+capability entry, not new code. The Anthropic request-time `drop_block` safety net remains
+for anything jcode could not detect, and any drop it reports is logged as a defect.
 
 ## File evidence and summary provenance
 
@@ -571,7 +633,7 @@ closed.
 
 | Provider family/route | Current validation and operation boundary |
 |---|---|
-| Native Anthropic | Validates the Anthropic message formatter, which is identical for the API-key and OAuth routes. Signed thinking, including empty-text and `redacted_thinking` blocks, can be suppressed only as a complete block. Thinking stored before bindings were recorded (INT-01/WP-02) is never replayed and counts as history-only. Tool/result and image normalization must still pass. |
+| Native Anthropic | Validates the Anthropic message formatter, which is identical for the API-key and OAuth routes. Signed thinking, including empty-text and `redacted_thinking` blocks, can be suppressed only as a complete block. Thinking stored before bindings were recorded (INT-01/WP-02) is never replayed and counts as history-only. On models that bind thinking to its prefix, every transition stages the thinking it invalidates (see [Replayed reasoning bound to its prefix](#replayed-reasoning-bound-to-its-prefix)). Tool/result and image normalization must still pass. |
 | OpenAI Responses | Validates through the Responses input builder. Complete `OpenAIReasoning` items can be suppressed. Every historical context revision clears persistent WebSocket/`previous_response_id` continuation before the next full request. |
 | ChatGPT web conversation route | Projected-history operations are disabled because this route does not use the Responses input builder and has no dedicated validation adapter. |
 | OpenRouter and named OpenAI-compatible routes | Validates with the exact model-dependent chat formatter options. Generic `Reasoning` is removable only when that route actually replays it. Locked model state fails closed rather than assuming a fallback shape. |
@@ -707,6 +769,7 @@ The subsystem intentionally has one implementation per concern:
 | `jcode-protocol/src/context.rs` | Bounded typed local/remote DTOs and correlation identities. |
 | `jcode-tui::context_editor` | Presentation state machine, stable selection, review/history/provenance, keyboard/mouse handling, and responsive rendering. |
 | `context_editor/curator_workspace.rs` | Per-run route/instruction control, exact-call disclosure, default save/restore, progress, outcomes, and atomic retry presentation. |
+| `jcode-app-core/src/context/reasoning_invalidation.rs` | The only writer of managed reasoning invalidations: recomputes the set for transitions, reviews and requests from the runtime's `Provider::replayed_reasoning_invalidations`. |
 | `agent/emergency.rs` and scheduler integration | Explicitly authorized unattended planning, protection, one transaction, one retry, and audit. |
 
 Do not duplicate projection, validation, transaction, or evidence semantics in the TUI.
