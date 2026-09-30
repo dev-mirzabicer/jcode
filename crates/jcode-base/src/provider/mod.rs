@@ -143,29 +143,6 @@ pub fn stored_reasoning_replay_kind(
     provider.reasoning_replay_kind()
 }
 
-/// Whether top-level Claude sessions (dispatched through [`MultiProvider`])
-/// replay Anthropic thinking.
-///
-/// INT-01/WP-05 activates top-level replay, after append-only delivery (WP-03)
-/// and the context-control rule (WP-04). This internal switch is the rollback
-/// lever while live acceptance runs; it is not configuration and is removed
-/// once that acceptance passes (DESIGN §8).
-const TOP_LEVEL_ANTHROPIC_THINKING_REPLAY: bool = true;
-
-fn top_level_replay_kind(
-    runtime_kind: Option<jcode_provider_core::ContextReasoningBlockKind>,
-    anthropic_replay_enabled: bool,
-) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
-    match runtime_kind {
-        Some(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking)
-            if !anthropic_replay_enabled =>
-        {
-            None
-        }
-        kind => kind,
-    }
-}
-
 // Keep inactive direct profiles on the same 15-minute soft-refresh cadence as
 // the active OpenRouter/OpenAI-compatible runtime. We continue serving the
 // cached routes immediately while a background refresh updates the catalog.
@@ -2321,11 +2298,11 @@ impl Provider for MultiProvider {
         }
     }
 
+    /// The replay kind of the runtime a request dispatches to: top-level
+    /// sessions replay what the concrete runtime replays (INT-01 R14).
     fn reasoning_replay_kind(&self) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
-        let runtime_kind = self
-            .runtime_for(self.active_provider())?
-            .reasoning_replay_kind();
-        top_level_replay_kind(runtime_kind, TOP_LEVEL_ANTHROPIC_THINKING_REPLAY)
+        self.runtime_for(self.active_provider())?
+            .reasoning_replay_kind()
     }
 
     fn replayed_reasoning_invalidations(

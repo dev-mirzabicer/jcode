@@ -1168,30 +1168,16 @@ fn reasoning_replay_kind_follows_the_runtime_a_request_dispatches_to() {
         ActiveProvider::Claude,
     );
     assert_eq!(anthropic.reasoning_replay_kind(), Some(AnthropicThinking));
-    const { assert!(TOP_LEVEL_ANTHROPIC_THINKING_REPLAY) };
     assert_eq!(provider.reasoning_replay_kind(), Some(AnthropicThinking));
-    assert_eq!(
-        top_level_replay_kind(anthropic.reasoning_replay_kind(), true),
-        Some(AnthropicThinking),
-        "the WP-05 switch passes the dispatching runtime's kind through"
-    );
 
-    // Claude CLI only: no replay, with or without the switch.
+    // Claude CLI only: the deprecated route replays nothing.
     let cli_only =
         multi_provider_with_runtimes(Some(claude_cli.clone()), None, None, ActiveProvider::Claude);
     assert_eq!(cli_only.reasoning_replay_kind(), None);
-    assert_eq!(
-        top_level_replay_kind(claude_cli.reasoning_replay_kind(), true),
-        None
-    );
 
     // OpenAI: unchanged, delegated to the OpenAI runtime.
     provider.set_active_provider(ActiveProvider::OpenAI);
     assert_eq!(provider.reasoning_replay_kind(), Some(OpenAiReasoning));
-    assert_eq!(
-        top_level_replay_kind(Some(OpenAiReasoning), false),
-        Some(OpenAiReasoning)
-    );
 
     // A slot with no runtime replays nothing.
     let empty = multi_provider_with_runtimes(None, None, None, ActiveProvider::Claude);
