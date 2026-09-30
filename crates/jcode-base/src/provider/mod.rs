@@ -734,14 +734,13 @@ impl MultiProvider {
                 }
                 CompletionMode::Split {
                     system_static,
-                    system_dynamic,
                     context,
                 } => {
                     self.complete_split_on_provider(
                         candidate,
                         messages,
                         tools,
-                        (system_static, system_dynamic),
+                        system_static,
                         resume_session_id,
                         context,
                     )
@@ -1706,7 +1705,6 @@ impl Provider for MultiProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
-        system_dynamic: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         self.complete_with_failover(
@@ -1714,7 +1712,6 @@ impl Provider for MultiProvider {
             tools,
             CompletionMode::Split {
                 system_static,
-                system_dynamic,
                 context: None,
             },
             resume_session_id,
@@ -1727,7 +1724,6 @@ impl Provider for MultiProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
-        system_dynamic: &str,
         resume_session_id: Option<&str>,
         context: jcode_provider_core::ProviderRequestContext,
     ) -> Result<EventStream> {
@@ -1736,7 +1732,6 @@ impl Provider for MultiProvider {
             tools,
             CompletionMode::Split {
                 system_static,
-                system_dynamic,
                 context: Some(&context),
             },
             resume_session_id,

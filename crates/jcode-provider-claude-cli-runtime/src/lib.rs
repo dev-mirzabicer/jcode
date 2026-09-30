@@ -892,14 +892,11 @@ impl Provider for ClaudeProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
-        system_dynamic: &str,
         resume_session_id: Option<&str>,
         context: jcode_provider_core::ProviderRequestContext,
     ) -> Result<EventStream> {
-        let messages =
-            jcode_message_types::messages_with_dynamic_system_context(messages, system_dynamic);
         self.complete_with_capture(
-            &messages,
+            messages,
             tools,
             system_static,
             resume_session_id,

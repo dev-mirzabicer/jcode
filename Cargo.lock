@@ -3442,6 +3442,7 @@ dependencies = [
  "jcode-plan",
  "jcode-provider-anthropic",
  "jcode-provider-core",
+ "jcode-provider-openai",
  "jcode-provider-openrouter-runtime",
  "jcode-schema-dialect",
  "jcode-selfdev-types",

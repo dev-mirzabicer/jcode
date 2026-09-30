@@ -99,10 +99,11 @@ pub fn is_swarm_mode_effort(effort: &str) -> bool {
     classify_effort(effort).is_swarm_mode()
 }
 
-/// Append the appropriate swarm directive to a split prompt's dynamic part when
-/// the active reasoning effort is a swarm sentinel. The deep sentinel injects the
-/// DAG-first task-graph directive; the light sentinel injects the fan-out
-/// directive. No-op otherwise.
+/// Append the appropriate swarm directive to the static system prompt when the
+/// active reasoning effort is a swarm sentinel. The deep sentinel adds the
+/// DAG-first task-graph directive; the light sentinel adds the fan-out
+/// directive. No-op otherwise, and always while Swarm is globally disabled. A
+/// change of directive is a static-prompt transition.
 pub fn append_swarm_effort_directive(
     split: &mut SplitSystemPrompt,
     effort: Option<&str>,
@@ -118,43 +119,58 @@ pub fn append_swarm_effort_directive(
         _ => return Ok(()),
     };
     let directive = resource.render(working_dir)?;
-    if !split.dynamic_part.is_empty() {
-        split.dynamic_part.push_str("\n\n");
-    }
-    split.dynamic_part.push_str(&directive);
+    split.push_section(&directive);
     Ok(())
 }
+/// Complete the static system prompt from its composed base: the active-skill
+/// section, then the swarm effort directive (dormant while Swarm is disabled).
+/// Every request path uses this one order, so the prompt is byte-stable
+/// between recorded transitions (INT-01, D8).
+pub fn compose_static_system_prompt(
+    base: String,
+    active_skill: Option<&str>,
+    effort: Option<&str>,
+    working_dir: Option<&Path>,
+) -> Result<SplitSystemPrompt, crate::instruction::SystemPromptActivationError> {
+    let mut split = SplitSystemPrompt { static_part: base };
+    if let Some(skill) = active_skill {
+        split.push_section(&format!("# Active Skill\n\n{skill}"));
+    }
+    append_swarm_effort_directive(&mut split, effort, working_dir)?;
+    Ok(split)
+}
+
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
 const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
 const SELFDEV_FOCUS_DESKTOP2_PROMPT: &str = include_str!("prompt/selfdev_focus_desktop2.txt");
-/// Split system prompt for efficient caching
-/// Static content is cached, dynamic content is not
+/// The composed system prompt a provider receives as its cached, static
+/// instructions. It changes only at a recorded transition (activation, skill
+/// activation, instruction reload). Model-visible dynamic context never enters
+/// it; that is delivered as persisted transcript content (INT-01, INV-1).
 #[derive(Debug, Clone, Default)]
 pub struct SplitSystemPrompt {
-    /// Static content that should be cached (instruction files, base prompt, skills)
     pub static_part: String,
-    /// Dynamic turn context that changes per request (memory, active skill, reminders)
-    pub dynamic_part: String,
 }
 
 impl SplitSystemPrompt {
     pub fn chars(&self) -> usize {
-        match (self.static_part.is_empty(), self.dynamic_part.is_empty()) {
-            (true, true) => 0,
-            (false, true) => self.static_part.len(),
-            (true, false) => self.dynamic_part.len(),
-            (false, false) => self.static_part.len() + 2 + self.dynamic_part.len(),
-        }
+        self.static_part.len()
     }
 
     pub fn estimated_tokens(&self) -> usize {
-        crate::util::estimate_tokens(&if self.static_part.is_empty() {
-            self.dynamic_part.clone()
-        } else if self.dynamic_part.is_empty() {
-            self.static_part.clone()
-        } else {
-            format!("{}\n\n{}", self.static_part, self.dynamic_part)
-        })
+        crate::util::estimate_tokens(&self.static_part)
+    }
+
+    /// Append a section after the composed prompt, separated like the
+    /// composer's own sections.
+    pub fn push_section(&mut self, section: &str) {
+        if section.is_empty() {
+            return;
+        }
+        if !self.static_part.is_empty() {
+            self.static_part.push_str("\n\n");
+        }
+        self.static_part.push_str(section);
     }
 }
 
@@ -354,38 +370,31 @@ pub fn build_system_prompt_full_with_capabilities(
     )
 }
 
-/// Build system prompt split into static (cacheable) and dynamic parts
-/// This improves cache hit rate by keeping frequently-changing content separate
+/// Build the static system prompt for callers that have not adopted
+/// named-profile activation. Active-skill text is added by the caller as a
+/// static section; dormant memory has no system-prompt slot.
 pub fn build_system_prompt_split(
-    skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,
-    memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
 ) -> Result<(SplitSystemPrompt, ContextInfo), crate::instruction::SystemPromptActivationError> {
     build_system_prompt_split_with_capabilities(
-        skill_prompt,
         available_skills,
         is_selfdev,
-        memory_prompt,
         working_dir,
         PromptCapabilities::current(),
     )
 }
 
 pub fn build_system_prompt_split_with_capabilities(
-    skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,
-    memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> Result<(SplitSystemPrompt, ContextInfo), crate::instruction::SystemPromptActivationError> {
     crate::instruction::SystemPromptComposer::new().compatibility_split(
-        skill_prompt,
         available_skills,
         is_selfdev,
-        memory_prompt,
         working_dir,
         capabilities,
     )

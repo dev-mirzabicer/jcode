@@ -239,8 +239,26 @@ impl Agent {
         if crate::prompt::is_swarm_effort(effort) {
             crate::config::require_swarm()?;
         }
+        let previous = self.provider.reasoning_effort();
         self.provider.set_reasoning_effort(effort)?;
         let current = self.provider.reasoning_effort();
+        // The swarm effort directive is a static-prompt section (INT-01, D8),
+        // so entering, leaving or changing swarm mode is a recorded transition.
+        // Unreachable while Swarm is globally disabled.
+        let swarm_mode = |effort: Option<&str>| {
+            effort
+                .map(crate::prompt::classify_effort)
+                .filter(|kind| kind.is_swarm_mode())
+        };
+        if swarm_mode(previous.as_deref()) != swarm_mode(current.as_deref()) {
+            crate::cache_invalidation::record(
+                "swarm effort directive",
+                format!(
+                    "reasoning effort changed to {}",
+                    current.as_deref().unwrap_or("default")
+                ),
+            );
+        }
         self.session.reasoning_effort = current.clone();
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());

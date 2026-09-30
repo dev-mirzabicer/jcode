@@ -74,6 +74,18 @@ impl PendingMemory {
     pub fn is_fresh(&self) -> bool {
         self.computed_at.elapsed().as_secs() < 120
     }
+
+    /// The trailing, request-only message that carries recalled memory. Memory
+    /// is globally disabled (Phase 2); a reactivation must deliver through the
+    /// persisted context-delivery owner instead, because a message present in
+    /// one request and absent from the next breaks append-only provider
+    /// history (INT-01, INV-1).
+    pub fn provider_message(&self) -> jcode_message_types::Message {
+        jcode_message_types::Message::user(&format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            self.prompt
+        ))
+    }
 }
 
 /// Request-scoped reservation that restores uncommitted memory on every exit

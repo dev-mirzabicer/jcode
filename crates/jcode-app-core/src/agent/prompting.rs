@@ -63,28 +63,12 @@ impl Agent {
         pending
     }
 
-    fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
-        let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
-    }
-
-    /// Build split system prompt for better caching
-    /// Returns static (cacheable) and dynamic (not cached) parts separately
+    /// Build the static system prompt for every provider request. Active-skill
+    /// text and the (dormant) swarm effort directive are static sections, so
+    /// the prompt changes only at a recorded transition. Per-turn reminders are
+    /// delivered as persisted transcript content, never here (INT-01).
     pub(super) fn build_system_prompt_split(
         &self,
-        memory_prompt: Option<&str>,
     ) -> std::result::Result<
         crate::prompt::SplitSystemPrompt,
         crate::instruction::SystemPromptActivationError,
@@ -92,21 +76,11 @@ impl Agent {
         if let Some(ref override_prompt) = self.system_prompt_override {
             return Ok(crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),
-                dynamic_part: String::new(),
             });
         }
 
-        let skill_prompt = self
-            .session
-            .active_skill
-            .as_ref()
-            .map(|skill| skill.rendered_text.as_str());
-
-        let mut split = if let Some(static_part) = self.session.system_prompt_text() {
-            crate::prompt::SplitSystemPrompt {
-                static_part: static_part.to_string(),
-                dynamic_part: String::new(),
-            }
+        let base = if let Some(static_part) = self.session.system_prompt_text() {
+            static_part.to_string()
         } else {
             let skills = self.current_skills_snapshot();
             let available_skills = skills
@@ -123,28 +97,19 @@ impl Agent {
                 .as_ref()
                 .map(std::path::PathBuf::from);
             crate::prompt::build_system_prompt_split(
-                None,
                 &available_skills,
                 self.session.is_canary,
-                None,
                 working_dir.as_deref(),
             )?
             .0
+            .static_part
         };
-        if let Some(memory_prompt) = memory_prompt {
-            split.dynamic_part.push_str(memory_prompt);
-        }
-        if let Some(skill_prompt) = skill_prompt {
-            if !split.dynamic_part.is_empty() {
-                split.dynamic_part.push_str("\n\n");
-            }
-            split.dynamic_part.push_str("# Active Skill\n\n");
-            split.dynamic_part.push_str(skill_prompt);
-        }
-
-        self.append_current_turn_system_reminder(&mut split);
-        crate::prompt::append_swarm_effort_directive(
-            &mut split,
+        let split = crate::prompt::compose_static_system_prompt(
+            base,
+            self.session
+                .active_skill
+                .as_ref()
+                .map(|skill| skill.rendered_text.as_str()),
             self.provider.reasoning_effort().as_deref(),
             self.session
                 .working_dir

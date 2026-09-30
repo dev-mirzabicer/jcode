@@ -457,7 +457,7 @@ impl Agent {
                     )
                 })?;
                 let mut split = self
-                    .build_system_prompt_split(None)
+                    .build_system_prompt_split()
                     .map_err(PrimaryInstructionActivationError::Composition)?;
                 split.static_part = candidate
                     .system_prompt_text()
@@ -757,6 +757,15 @@ mod tests {
         }
     }
 
+    /// The active-skill section of the static system prompt (INT-01, D8).
+    fn active_skill_section(split: crate::prompt::SplitSystemPrompt) -> String {
+        split
+            .static_part
+            .rsplit_once("# Active Skill\n\n")
+            .map(|(_, section)| section.to_string())
+            .unwrap_or_default()
+    }
+
     fn fixture() -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -842,7 +851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_effort_fails_before_provider_and_preserves_frozen_static_text() {
+    async fn managed_effort_is_a_static_section_and_fails_before_provider() {
         let home = TestHome::new();
         let _swarm_sources = SyntheticSwarmSources::enabled();
         let project = tempfile::tempdir().unwrap();
@@ -884,16 +893,15 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        assert!(text(&requests[0]).contains("EFFORT-FIRST"));
-        assert!(text(&requests[1]).contains("EFFORT-SECOND"));
-        assert!(!text(&requests[1]).contains("EFFORT-FIRST"));
+        // The directive is a static-prompt section after the frozen prompt,
+        // rendered from current source (INT-01, D8), and never message content.
+        let systems = provider.systems.lock().unwrap().clone();
+        assert_eq!(systems[0], format!("{frozen}\n\nEFFORT-FIRST"));
+        assert_eq!(systems[1], format!("{frozen}\n\nEFFORT-SECOND"));
         assert!(
-            provider
-                .systems
-                .lock()
-                .unwrap()
+            requests
                 .iter()
-                .all(|s| s == &frozen)
+                .all(|messages| !text(messages).contains("EFFORT-"))
         );
         write("{{missing}}");
         assert!(
@@ -1012,7 +1020,7 @@ mod tests {
 
         let first = agent.activate_skill("snapshot-skill").expect("activate v1");
         assert!(first.rendered_text.contains("SKILL_V1"));
-        let first_dynamic = agent.build_system_prompt_split(None).unwrap().dynamic_part;
+        let first_dynamic = active_skill_section(agent.build_system_prompt_split().unwrap());
         assert!(first_dynamic.contains("SKILL_V1"));
         let frozen_system = agent
             .system_prompt_text()
@@ -1041,7 +1049,7 @@ mod tests {
         )
         .expect("skill v2");
         assert_eq!(
-            agent.build_system_prompt_split(None).unwrap().dynamic_part,
+            active_skill_section(agent.build_system_prompt_split().unwrap()),
             first_dynamic,
             "disk edits must not mutate active rendered text"
         );
@@ -1080,10 +1088,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            resumed
-                .build_system_prompt_split(None)
-                .unwrap()
-                .dynamic_part,
+            active_skill_section(resumed.build_system_prompt_split().unwrap()),
             first_dynamic,
             "resume must use exact stored text without source access"
         );
@@ -1093,10 +1098,7 @@ mod tests {
             .expect("reinvoke v2");
         assert!(reinvoked.rendered_text.contains("SKILL_V2"));
         assert!(!reinvoked.rendered_text.contains("SKILL_V1"));
-        let second_dynamic = resumed
-            .build_system_prompt_split(None)
-            .unwrap()
-            .dynamic_part;
+        let second_dynamic = active_skill_section(resumed.build_system_prompt_split().unwrap());
         assert!(second_dynamic.contains("SKILL_V2"));
 
         let mut split = Session::create(Some(resumed.session_id().to_string()), None);
@@ -1105,10 +1107,7 @@ mod tests {
         let split_agent =
             Agent::new_with_session(std::sync::Arc::new(provider), registry.clone(), split, None);
         assert_eq!(
-            split_agent
-                .build_system_prompt_split(None)
-                .unwrap()
-                .dynamic_part,
+            active_skill_section(split_agent.build_system_prompt_split().unwrap()),
             second_dynamic,
             "split must clone exact active rendered text"
         );
@@ -1335,7 +1334,6 @@ mod tests {
         agent.provider_session_id = Some("live-runtime-continuation".to_string());
         agent.session.provider_session_id = Some("live-stored-continuation".to_string());
         agent.pending_alerts.push("preserve-alert".to_string());
-        agent.current_turn_system_reminder = Some("preserve-reminder".to_string());
         agent.locked_tools = Some(Vec::new());
         agent.mcp_late_register_resolved = true;
         agent.background_tool_signal.fire();
@@ -1374,10 +1372,6 @@ mod tests {
         );
         assert_eq!(agent.provider_session_id, before_provider_session_id);
         assert_eq!(agent.pending_alerts, ["preserve-alert"]);
-        assert_eq!(
-            agent.current_turn_system_reminder.as_deref(),
-            Some("preserve-reminder")
-        );
         assert!(agent.locked_tools.is_some());
         assert!(agent.mcp_late_register_resolved);
         assert!(agent.background_tool_signal.is_set());

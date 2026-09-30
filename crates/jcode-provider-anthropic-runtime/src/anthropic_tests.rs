@@ -1415,53 +1415,28 @@ fn test_cache_breakpoint_finds_text_in_mixed_content() {
 }
 
 #[test]
-fn test_system_param_split_oauth() {
-    let static_content = "This is static content";
-    let dynamic_content = "This is dynamic content";
-
-    let result = build_system_param_split(static_content, dynamic_content, true);
-
-    if let Some(ApiSystem::Blocks(blocks)) = result {
-        // Should have 4 blocks: identity, notice, static (cached), dynamic (not cached)
-        assert_eq!(blocks.len(), 4);
-
-        // Block 0: identity (no cache)
-        assert!(blocks[0].cache_control.is_none());
-
-        // Block 1: notice (no cache)
-        assert!(blocks[1].cache_control.is_none());
-
-        // Block 2: static (cached)
-        assert!(blocks[2].cache_control.is_some());
-        assert!(blocks[2].text.contains("static"));
-
-        // Block 3: dynamic (not cached)
-        assert!(blocks[3].cache_control.is_none());
-        assert!(blocks[3].text.contains("dynamic"));
-    } else {
+fn oauth_system_is_the_identity_blocks_plus_the_cached_static_prompt() {
+    let Some(ApiSystem::Blocks(blocks)) = build_system_param("static prompt", true) else {
         panic!("Expected Blocks variant");
-    }
+    };
+    // Billing header and SDK identity (uncached), then the static prompt
+    // (cached). Nothing per-request is ever added (INT-01 R08).
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[0].cache_control.is_none());
+    assert!(blocks[1].cache_control.is_none());
+    assert_eq!(blocks[2].text, "static prompt");
+    assert!(blocks[2].cache_control.is_some());
 }
 
 #[test]
-fn test_system_param_split_non_oauth() {
-    let static_content = "This is static content";
-    let dynamic_content = "This is dynamic content";
-
-    let result = build_system_param_split(static_content, dynamic_content, false);
-
-    if let Some(ApiSystem::Blocks(blocks)) = result {
-        // Should have 2 blocks: static (cached), dynamic (not cached)
-        assert_eq!(blocks.len(), 2);
-
-        // Block 0: static (cached)
-        assert!(blocks[0].cache_control.is_some());
-
-        // Block 1: dynamic (not cached)
-        assert!(blocks[1].cache_control.is_none());
-    } else {
+fn api_key_system_is_only_the_cached_static_prompt() {
+    let Some(ApiSystem::Blocks(blocks)) = build_system_param("static prompt", false) else {
         panic!("Expected Blocks variant");
-    }
+    };
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].text, "static prompt");
+    assert!(blocks[0].cache_control.is_some());
+    assert!(build_system_param("", false).is_none());
 }
 
 // --- Cross-turn cache correctness tests ---

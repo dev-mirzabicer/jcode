@@ -1,10 +1,11 @@
 use super::*;
 
 impl App {
-    /// Build split system prompt for better caching
+    /// Build the static system prompt for a local provider request. Active
+    /// skill text is a static section; per-turn reminders are delivered as
+    /// persisted transcript content (INT-01).
     pub(super) fn build_system_prompt_split(
         &mut self,
-        memory_prompt: Option<&str>,
     ) -> std::result::Result<
         crate::prompt::SplitSystemPrompt,
         crate::instruction::SystemPromptActivationError,
@@ -13,29 +14,16 @@ impl App {
         if let Some(ref prompt) = self.ambient_system_prompt {
             return Ok(crate::prompt::SplitSystemPrompt {
                 static_part: prompt.clone(),
-                dynamic_part: String::new(),
             });
         }
 
-        let skill_prompt = self
-            .session
-            .active_skill
-            .as_ref()
-            .map(|skill| skill.rendered_text.as_str());
-        let (mut split, context_info) = if let Some(static_part) = self.session.system_prompt_text()
-        {
+        let (base, context_info) = if let Some(static_part) = self.session.system_prompt_text() {
             let info = crate::prompt::ContextInfo {
                 system_prompt_chars: static_part.len(),
                 total_chars: static_part.len(),
                 ..Default::default()
             };
-            (
-                crate::prompt::SplitSystemPrompt {
-                    static_part: static_part.to_string(),
-                    dynamic_part: String::new(),
-                },
-                info,
-            )
+            (static_part.to_string(), info)
         } else {
             let skills = self.current_skills_snapshot();
             let available_skills = skills
@@ -46,27 +34,19 @@ impl App {
                     description: s.description.clone(),
                 })
                 .collect::<Vec<_>>();
-            crate::prompt::build_system_prompt_split(
-                None,
+            let (split, info) = crate::prompt::build_system_prompt_split(
                 &available_skills,
                 self.session.is_canary,
                 None,
-                None,
-            )?
+            )?;
+            (split.static_part, info)
         };
-        if let Some(memory_prompt) = memory_prompt {
-            split.dynamic_part.push_str(memory_prompt);
-        }
-        if let Some(skill_prompt) = skill_prompt {
-            if !split.dynamic_part.is_empty() {
-                split.dynamic_part.push_str("\n\n");
-            }
-            split.dynamic_part.push_str("# Active Skill\n\n");
-            split.dynamic_part.push_str(skill_prompt);
-        }
-        self.append_current_turn_system_reminder(&mut split);
-        crate::prompt::append_swarm_effort_directive(
-            &mut split,
+        let split = crate::prompt::compose_static_system_prompt(
+            base,
+            self.session
+                .active_skill
+                .as_ref()
+                .map(|skill| skill.rendered_text.as_str()),
             self.provider.reasoning_effort().as_deref(),
             self.session
                 .working_dir

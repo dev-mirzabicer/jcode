@@ -13,6 +13,18 @@ impl Agent {
         self.record_context_runtime_message_added();
         Ok(id)
     }
+    /// Append model-visible harness context as persisted transcript content
+    /// (INT-01, D2). The caller persists it with the operation it belongs to.
+    pub(crate) fn add_context_delivery(
+        &mut self,
+        channel: jcode_session_types::ContextDeliveryChannel,
+        body: &str,
+    ) -> Option<String> {
+        let id = self.session.append_context_delivery(channel, body)?;
+        self.record_context_runtime_message_added();
+        Some(id)
+    }
+
     pub(crate) fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
         let id = self.session.add_message(role, content);
         self.record_context_runtime_message_added();

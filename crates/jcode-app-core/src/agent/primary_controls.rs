@@ -99,6 +99,7 @@ impl Agent {
                 Self::user_context_blocks(&input.content, input.images.clone()),
                 input.display_role,
                 input.origin.clone(),
+                input.system_reminder.as_deref(),
             )
         } else {
             self.run_once_streaming_mpsc_with_request_context(
@@ -145,31 +146,39 @@ impl Agent {
             return Ok(Vec::new());
         }
         let store = crate::primary_input::PrimaryInputStore::current();
-        let pending = store.pending(self.session_id())?;
-        let mut injected = Vec::new();
-        let mut scope = None;
-        let mut reminder = None;
-        for input in pending {
+        // One boundary injects the leading safe-boundary inputs that share an
+        // unattended scope and a system reminder. The shared reminder is one
+        // occurrence: it is delivered once, committed with the group's last
+        // input, after all of the group's content.
+        let mut group = Vec::new();
+        for input in store.pending(self.session_id())? {
             if input.delivery != jcode_session_types::PrimaryInputDelivery::SafeBoundary {
                 continue;
             }
-            if let Some(scope) = &scope {
-                if scope != &input.unattended_context
-                    || reminder.as_ref() != Some(&input.system_reminder)
-                {
-                    break;
-                }
-            } else {
-                scope = Some(input.unattended_context.clone());
-                reminder = Some(input.system_reminder.clone());
+            if group
+                .first()
+                .is_some_and(|first: &jcode_session_types::PrimaryInputEnvelope| {
+                    first.unattended_context != input.unattended_context
+                        || first.system_reminder != input.system_reminder
+                })
+            {
+                break;
             }
+            group.push(input);
+        }
+        let mut injected = Vec::new();
+        let group_len = group.len();
+        for (index, input) in group.into_iter().enumerate() {
+            let reminder = (index + 1 == group_len)
+                .then_some(input.system_reminder.as_deref())
+                .flatten();
             self.pending_primary_input = Some(input.clone());
             self.append_user_context_blocks_with_origin(
                 Self::user_context_blocks(&input.content, input.images.clone()),
                 input.display_role,
                 input.origin.clone(),
+                reminder,
             )?;
-            self.current_turn_system_reminder = input.system_reminder.clone();
             let source = match input.display_role {
                 None => SoftInterruptSource::User,
                 Some(StoredDisplayRole::System) => SoftInterruptSource::System,
@@ -290,7 +299,7 @@ impl Agent {
                 message: format!("location_{}", record.operation),
             });
             let projected = candidate.projected_messages_for_provider()?;
-            let split = self.build_system_prompt_split(None)?;
+            let split = self.build_system_prompt_split()?;
             let tools = match &self.locked_tools {
                 Some(tools) => tools.clone(),
                 None => self.tool_definitions_for_session(&candidate).await?,
@@ -326,7 +335,7 @@ impl Agent {
             return Ok(());
         };
         let projected = candidate.projected_messages_for_provider()?;
-        let split = self.build_system_prompt_split(None)?;
+        let split = self.build_system_prompt_split()?;
         let tools = match &self.locked_tools {
             Some(tools) => tools.clone(),
             None => self.tool_definitions_for_session(&candidate).await?,

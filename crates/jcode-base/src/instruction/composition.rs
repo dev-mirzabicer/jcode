@@ -1436,10 +1436,8 @@ mod tests {
         }];
         let render = || {
             composer.compatibility_split(
-                None,
                 &skills,
                 false,
-                None,
                 Some(&fixture.project),
                 PromptCapabilities { mermaid: true },
             )
@@ -1509,16 +1507,13 @@ mod tests {
         ] {
             assert!(!current.static_part.contains(absent), "{absent}");
         }
-        assert!(current.dynamic_part.is_empty());
         std::fs::write(root.join("system/available-skills.md"), "invalid").unwrap();
         assert!(render().is_err());
         assert!(
             composer
                 .compatibility_split(
-                    None,
                     &[],
                     false,
-                    None,
                     Some(&fixture.project),
                     PromptCapabilities { mermaid: false }
                 )
@@ -1644,10 +1639,8 @@ mod tests {
         assert!(
             composer
                 .compatibility_split(
-                    None,
                     &[],
                     false,
-                    None,
                     Some(&fixture.project),
                     PromptCapabilities { mermaid: false }
                 )

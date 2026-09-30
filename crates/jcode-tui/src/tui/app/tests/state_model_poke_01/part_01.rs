@@ -396,7 +396,7 @@ fn test_begin_kv_cache_request_stops_tps_collection_until_output_resumes() {
     app.streaming.streaming_tps_collect_output = true;
     app.streaming.streaming_tps_start = Some(Instant::now() - Duration::from_secs(3));
 
-    app.begin_kv_cache_request(&[Message::user("next")], &[], "system", "dynamic");
+    app.begin_kv_cache_request(&[Message::user("next")], &[], "system", &[]);
 
     assert!(!app.streaming.streaming_tps_collect_output);
     assert!(app.streaming.streaming_tps_start.is_none());

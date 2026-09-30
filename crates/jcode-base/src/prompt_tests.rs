@@ -12,10 +12,8 @@ fn mermaid_prompt_module_follows_capability() {
     )
     .unwrap();
     let (enabled, _) = build_system_prompt_split_with_capabilities(
-        None,
         &[],
         false,
-        None,
         None,
         PromptCapabilities { mermaid: true },
     )
@@ -23,10 +21,8 @@ fn mermaid_prompt_module_follows_capability() {
     assert!(enabled.static_part.contains("SYNTHETIC CAPABILITY"));
 
     let (disabled, _) = build_system_prompt_split_with_capabilities(
-        None,
         &[],
         false,
-        None,
         None,
         PromptCapabilities { mermaid: false },
     )
@@ -81,16 +77,16 @@ fn test_session_context_includes_time_timezone_and_system_info() {
 #[test]
 fn test_split_prompt_does_not_inject_session_context_per_turn() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
-    let (split, _info) = build_system_prompt_split(None, &[], false, None, None).unwrap();
-    assert!(!split.dynamic_part.contains("# Session Context"));
-    assert!(!split.dynamic_part.contains("Time: "));
-    assert!(!split.dynamic_part.contains("Timezone: UTC"));
+    let (split, _info) = build_system_prompt_split(&[], false, None).unwrap();
+    assert!(!split.static_part.contains("# Session Context"));
+    assert!(!split.static_part.contains("Time: "));
+    assert!(!split.static_part.contains("Timezone: UTC"));
 }
 
 #[test]
 fn sponsored_discovery_is_not_injected_into_the_system_prompt() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
-    let (split, _) = build_system_prompt_split(None, &[], false, None, None).unwrap();
+    let (split, _) = build_system_prompt_split(&[], false, None).unwrap();
     assert!(!split.static_part.contains("Discoverable Tools"));
     assert!(!split.static_part.contains("integration_tools"));
 }
@@ -170,7 +166,7 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
     assert!(info.preferred_tools_chars > 0);
 
     let (split, split_info) =
-        build_system_prompt_split(None, &[], false, None, Some(project_dir.path())).unwrap();
+        build_system_prompt_split(&[], false, Some(project_dir.path())).unwrap();
     assert!(
         split
             .static_part
@@ -222,7 +218,7 @@ fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
     let directory = _home.root().join("jcode");
     std::fs::create_dir_all(&directory).unwrap();
     let repo_dir = directory.as_path();
-    let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir)).unwrap();
+    let (split, _info) = build_system_prompt_split(&[], true, Some(repo_dir)).unwrap();
     assert!(
         split
             .static_part
@@ -258,13 +254,13 @@ fn test_selfdev_prompt_template_placeholders_are_resolved() {
 #[test]
 fn split_prompt_estimated_tokens_is_positive_when_populated() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
-    let (split, _info) = build_system_prompt_split(None, &[], false, None, None).unwrap();
+    let (split, _info) = build_system_prompt_split(&[], false, None).unwrap();
     assert!(split.chars() > 0);
     assert!(split.estimated_tokens() > 0);
 }
 
 #[test]
-fn swarm_effort_directives_use_current_synthetic_sources_without_changing_static_prefix() {
+fn swarm_effort_directives_are_static_prompt_sections_from_current_synthetic_sources() {
     let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     crate::instruction::SystemPromptComposer::new()
         .ensure_global_store()
@@ -279,36 +275,32 @@ fn swarm_effort_directives_use_current_synthetic_sources_without_changing_static
     write("swarm-effort", "LIGHT");
     write("swarm-deep-effort", "DEEP");
     for (effort, expected) in [
-        (None, "DYNAMIC"),
-        (Some("xhigh"), "DYNAMIC"),
-        (Some(" Swarm "), "DYNAMIC\n\nLIGHT"),
-        (Some("swarm-deep"), "DYNAMIC\n\nDEEP"),
+        (None, "STATIC"),
+        (Some("xhigh"), "STATIC"),
+        (Some(" Swarm "), "STATIC\n\nLIGHT"),
+        (Some("swarm-deep"), "STATIC\n\nDEEP"),
     ] {
         let mut split = SplitSystemPrompt {
             static_part: "STATIC".into(),
-            dynamic_part: "DYNAMIC".into(),
         };
         append_swarm_effort_directive(&mut split, effort, None).unwrap();
-        assert_eq!(split.static_part, "STATIC");
-        assert_eq!(split.dynamic_part, expected);
+        assert_eq!(split.static_part, expected);
     }
     write("swarm-effort", "NEXT");
     let mut next = SplitSystemPrompt::default();
     append_swarm_effort_directive(&mut next, Some("swarm"), None).unwrap();
-    assert_eq!(next.dynamic_part, "NEXT");
+    assert_eq!(next.static_part, "NEXT");
     write("swarm-effort", "{{missing}}");
     let mut failed = SplitSystemPrompt {
         static_part: "STATIC".into(),
-        dynamic_part: "DYNAMIC".into(),
     };
     assert!(append_swarm_effort_directive(&mut failed, Some("swarm"), None).is_err());
     assert_eq!(failed.static_part, "STATIC");
-    assert_eq!(failed.dynamic_part, "DYNAMIC");
     append_swarm_effort_directive(&mut failed, Some("low"), None).unwrap();
     write("swarm-effort", "");
     let mut empty = SplitSystemPrompt::default();
     append_swarm_effort_directive(&mut empty, Some("swarm"), None).unwrap();
-    assert!(empty.dynamic_part.is_empty());
+    assert!(empty.static_part.is_empty());
 }
 
 #[test]

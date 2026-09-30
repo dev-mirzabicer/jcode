@@ -51,14 +51,13 @@ impl MultiProvider {
                 }
                 CompletionMode::Split {
                     system_static,
-                    system_dynamic,
                     context,
                 } => {
                     self.complete_split_on_provider(
                         provider,
                         messages,
                         tools,
-                        (system_static, system_dynamic),
+                        system_static,
                         None,
                         context,
                     )

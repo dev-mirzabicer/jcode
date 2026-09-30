@@ -127,18 +127,41 @@ pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
         ));
     }
 
-    // Anthropic rejects a request whose final message is an assistant turn on
-    // models that do not support assistant prefill ("This model does not support
-    // assistant message prefill. The conversation must end with a user message.").
-    // jcode never intends to prefill, so a trailing assistant turn here is always
-    // an upstream accident: the reload auto-resume path starts a turn with empty
-    // user content and delivers its continuation as a system reminder, leaving the
-    // transcript ending on the interrupted assistant turn. Repair the shape at the
-    // last formatting step. See issue #600.
+    // Anthropic requires every tool_result answering the previous assistant
+    // turn to lead the user message. Merging consecutive user messages puts
+    // delivered context (a system reminder or an injected input) beside tool
+    // results, and a result after a text block makes the API report the
+    // tool_use as missing its result. Stable partition: results first, every
+    // other block keeps its order.
+    for msg in merged.iter_mut().filter(|m| m.role == "user") {
+        let first_non_result = msg
+            .content
+            .iter()
+            .position(|b| !matches!(b, ApiContentBlock::ToolResult { .. }));
+        let needs_reorder = first_non_result.is_some_and(|start| {
+            msg.content[start..]
+                .iter()
+                .any(|b| matches!(b, ApiContentBlock::ToolResult { .. }))
+        });
+        if needs_reorder {
+            let (results, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut msg.content)
+                .into_iter()
+                .partition(|b| matches!(b, ApiContentBlock::ToolResult { .. }));
+            msg.content = results;
+            msg.content.extend(rest);
+        }
+    }
+
+    // Current Claude models reject a request that ends on an assistant turn
+    // (no prefill). Every turn now starts with persisted user-role content,
+    // including a reload resume, whose continuation is its delivered content,
+    // so this is unreachable. It remains a guard against history damage and
+    // is logged as a defect: the appended turn is not in the transcript, so
+    // the next request would not be an append of this one.
     if merged.last().is_some_and(|last| last.role == "assistant") {
-        jcode_logging::warn(
-            "[anthropic] Conversation ended with an assistant message; appending a \
-             continuation user turn to avoid a model prefill rejection (400)",
+        jcode_logging::error(
+            "[anthropic] INV-1 defect: conversation ended with an assistant message; \
+             appending an unpersisted continuation user turn to avoid a prefill rejection (400)",
         );
         merged.push(ApiMessage {
             role: "user".to_string(),
@@ -704,19 +727,12 @@ pub struct ApiSystemBlock {
     pub cache_control: Option<CacheControlParam>,
 }
 
+/// Build the top-level `system`: the OAuth identity blocks (when on OAuth) and
+/// the cached static prompt. Nothing per-request belongs here; dynamic context
+/// is delivered as persisted transcript content so the prefix never changes.
 pub fn build_system_param(system: &str, is_oauth: bool, cache_ttl_1h: bool) -> Option<ApiSystem> {
-    build_system_param_split(system, "", is_oauth, cache_ttl_1h)
-}
-
-/// Build system param with split static/dynamic content for better caching
-pub fn build_system_param_split(
-    static_part: &str,
-    dynamic_part: &str,
-    is_oauth: bool,
-    cache_ttl_1h: bool,
-) -> Option<ApiSystem> {
+    let mut blocks = Vec::new();
     if is_oauth {
-        let mut blocks = Vec::new();
         blocks.push(ApiSystemBlock {
             block_type: "text",
             text: format!("x-anthropic-billing-header: {}", OAUTH_BILLING_HEADER),
@@ -727,49 +743,15 @@ pub fn build_system_param_split(
             text: CLAUDE_CODE_IDENTITY.to_string(),
             cache_control: None,
         });
-        // Static content - CACHED (instruction files, base prompt, skills)
-        if !static_part.is_empty() {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: static_part.to_string(),
-                cache_control: Some(CacheControlParam::ephemeral(cache_ttl_1h)),
-            });
-        }
-        // Dynamic content - NOT cached (date, git status, memory)
-        if !dynamic_part.is_empty() {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: dynamic_part.to_string(),
-                cache_control: None,
-            });
-        }
-        return Some(ApiSystem::Blocks(blocks));
     }
-
-    // Non-OAuth: use block format with cache control for static part only
-    let has_static = !static_part.is_empty();
-    let has_dynamic = !dynamic_part.is_empty();
-
-    if !has_static && !has_dynamic {
-        None
-    } else {
-        let mut blocks = Vec::new();
-        if has_static {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: static_part.to_string(),
-                cache_control: Some(CacheControlParam::ephemeral(cache_ttl_1h)),
-            });
-        }
-        if has_dynamic {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: dynamic_part.to_string(),
-                cache_control: None,
-            });
-        }
-        Some(ApiSystem::Blocks(blocks))
+    if !system.is_empty() {
+        blocks.push(ApiSystemBlock {
+            block_type: "text",
+            text: system.to_string(),
+            cache_control: Some(CacheControlParam::ephemeral(cache_ttl_1h)),
+        });
     }
+    (!blocks.is_empty()).then_some(ApiSystem::Blocks(blocks))
 }
 
 pub fn format_messages_with_identity(
@@ -1154,6 +1136,10 @@ mod tool_surface_tests;
 #[cfg(test)]
 #[path = "trailing_assistant_repair_tests.rs"]
 mod trailing_assistant_repair_tests;
+
+#[cfg(test)]
+#[path = "tool_results_first_tests.rs"]
+mod tool_results_first_tests;
 
 #[cfg(test)]
 #[path = "duplicate_tool_result_tests.rs"]

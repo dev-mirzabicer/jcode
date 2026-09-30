@@ -144,7 +144,6 @@ mod tests {
         let pending = jcode_context_core::estimate_message_tokens(&messages[1]);
         let system = SplitSystemPrompt {
             static_part: "system".to_string(),
-            dynamic_part: "dynamic".to_string(),
         };
         let result = request_token_breakdown(&messages, pending, 0, &system, &[]);
         assert_eq!(result.pending_input_tokens, pending);

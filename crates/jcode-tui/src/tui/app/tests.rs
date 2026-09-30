@@ -104,8 +104,18 @@ fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let mut current_messages = baseline_messages.clone();
     current_messages.push(crate::message::Message::user("follow up"));
 
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "memory a");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "memory b");
+    let baseline = App::kv_cache_request_signature(
+        &baseline_messages,
+        &[],
+        "system",
+        &[Message::user("memory a")],
+    );
+    let current = App::kv_cache_request_signature(
+        &current_messages,
+        &[],
+        "system",
+        &[Message::user("memory b")],
+    );
 
     assert!(App::kv_cache_signatures_prefix_match(&current, &baseline));
     assert_eq!(
@@ -127,8 +137,8 @@ fn kv_cache_signature_prefix_match_detects_prefix_mutation() {
         crate::message::Message::user("follow up"),
     ];
 
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "");
+    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", &[]);
+    let current = App::kv_cache_request_signature(&current_messages, &[], "system", &[]);
 
     assert!(!App::kv_cache_signatures_prefix_match(&current, &baseline));
     assert_eq!(App::kv_cache_common_prefix_messages(&current, &baseline), 0);
@@ -182,8 +192,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
     current_messages.push(Message::user("follow up"));
     current_messages.push(Message::assistant_text("second answer"));
 
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "");
+    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", &[]);
+    let current = App::kv_cache_request_signature(&current_messages, &[], "system", &[]);
 
     assert!(
         App::kv_cache_signatures_prefix_match(&current, &baseline),
@@ -214,7 +224,7 @@ fn cold_cache_warning_is_persisted_when_starting_next_request() {
     });
 
     app.display_messages.push(DisplayMessage::user("second"));
-    app.begin_kv_cache_request(&[Message::user("second")], &[], "system", "");
+    app.begin_kv_cache_request(&[Message::user("second")], &[], "system", &[]);
 
     let warning = app
         .display_messages()
@@ -283,7 +293,7 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
 
     // And the request-start fallback must not duplicate the idle warning.
     app.display_messages.push(DisplayMessage::user("second"));
-    app.begin_kv_cache_request(&[Message::user("second")], &[], "system", "");
+    app.begin_kv_cache_request(&[Message::user("second")], &[], "system", &[]);
     let count = app
         .display_messages()
         .iter()
@@ -358,7 +368,8 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
     ];
 
     // Baseline captured last turn with a *different* system static hash.
-    let baseline_signature = App::kv_cache_request_signature(&messages, &[], "system PROMPT A", "");
+    let baseline_signature =
+        App::kv_cache_request_signature(&messages, &[], "system PROMPT A", &[]);
     let session_id = app.kv_cache_session_id();
     // Match the live provider/model exactly so the miss is classified as a
     // harness system change rather than a provider/model switch.
@@ -378,7 +389,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
     // This turn: same provider/model, conversation grew, but the system prompt
     // changed (hash differs). Register the pending request, then complete the
     // stream with a near-zero cache read to model the bust.
-    app.begin_kv_cache_request(&messages, &[], "system PROMPT B", "");
+    app.begin_kv_cache_request(&messages, &[], "system PROMPT B", &[]);
     app.streaming.streaming_input_tokens = 50_000;
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
@@ -413,7 +424,8 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
         Message::assistant_text("first answer"),
         Message::user("second prompt"),
     ];
-    let baseline_signature = App::kv_cache_request_signature(&messages, &[], "system PROMPT A", "");
+    let baseline_signature =
+        App::kv_cache_request_signature(&messages, &[], "system PROMPT A", &[]);
     let session_id = app.kv_cache_session_id();
     let provider = app.kv_cache_provider_name();
     let model = app.kv_cache_provider_model();
@@ -431,7 +443,7 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
     // The documented cause lands between the baseline and the busted request.
     crate::cache_invalidation::record("config reload", "modified_changed=true");
 
-    app.begin_kv_cache_request(&messages, &[], "system PROMPT B", "");
+    app.begin_kv_cache_request(&messages, &[], "system PROMPT B", &[]);
     app.streaming.streaming_input_tokens = 50_000;
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
@@ -465,7 +477,7 @@ fn kv_cache_baseline_stores_effective_prompt_tokens() {
     crate::provider::anthropic::set_cache_ttl_1h(true);
 
     let messages = vec![Message::user("first prompt")];
-    app.begin_kv_cache_request(&messages, &[], "system", "");
+    app.begin_kv_cache_request(&messages, &[], "system", &[]);
     app.streaming.streaming_input_tokens = 700;
     app.streaming.streaming_cache_read_tokens = Some(90_000);
     app.streaming.streaming_cache_creation_tokens = Some(5_000);
@@ -495,7 +507,7 @@ fn legitimate_model_switch_miss_does_not_push_in_chat_alarm() {
         Message::assistant_text("first answer"),
         Message::user("second prompt"),
     ];
-    let baseline_signature = App::kv_cache_request_signature(&messages, &[], "system", "");
+    let baseline_signature = App::kv_cache_request_signature(&messages, &[], "system", &[]);
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id,
@@ -509,7 +521,7 @@ fn legitimate_model_switch_miss_does_not_push_in_chat_alarm() {
         signature: Some(baseline_signature),
     });
 
-    app.begin_kv_cache_request(&messages, &[], "system", "");
+    app.begin_kv_cache_request(&messages, &[], "system", &[]);
     app.streaming.streaming_input_tokens = 50_000;
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
@@ -539,7 +551,7 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
     let big_history: Vec<Message> = (0..40)
         .map(|i| Message::user(format!("big session message {i}").as_str()))
         .collect();
-    let big_signature = App::kv_cache_request_signature(&big_history, &[], "system", "");
+    let big_signature = App::kv_cache_request_signature(&big_history, &[], "system", &[]);
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id: Some("session_big".to_string()),
         cache_generation: app.kv_cache.cache_generation,
@@ -557,7 +569,7 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
         &[Message::user("hello from small session")],
         &[],
         "system",
-        "",
+        &[],
     );
     app.begin_remote_kv_cache_request(small_signature);
 
@@ -587,7 +599,7 @@ fn kv_cache_baseline_same_session_still_compares() {
         Message::user("first prompt"),
         Message::assistant_text("first answer"),
     ];
-    let baseline_signature = App::kv_cache_request_signature(&history, &[], "system", "");
+    let baseline_signature = App::kv_cache_request_signature(&history, &[], "system", &[]);
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id: Some("session_same".to_string()),
         cache_generation: app.kv_cache.cache_generation,
@@ -602,7 +614,7 @@ fn kv_cache_baseline_same_session_still_compares() {
     // Append-only growth in the same session keeps the prefix intact.
     let mut grown = history.clone();
     grown.push(Message::user("follow up"));
-    let grown_signature = App::kv_cache_request_signature(&grown, &[], "system", "");
+    let grown_signature = App::kv_cache_request_signature(&grown, &[], "system", &[]);
     app.begin_remote_kv_cache_request(grown_signature);
 
     let request = app
@@ -1035,7 +1047,8 @@ fn assert_local_skill_snapshot_lifecycle(external_global: bool) {
     app.input = "/frozen-skill".to_string();
     app.cursor_pos = app.input.len();
     app.submit_input();
-    let first = app.build_system_prompt_split(None).unwrap().dynamic_part;
+    let first = app.build_system_prompt_split().unwrap().static_part;
+    assert!(first.contains("# Active Skill"));
     assert!(first.contains("FROZEN_V1"));
 
     std::fs::write(
@@ -1043,10 +1056,7 @@ fn assert_local_skill_snapshot_lifecycle(external_global: bool) {
         "---\nname: frozen-skill\ndescription: Frozen skill\n---\nFROZEN_V2\n",
     )
     .expect("v2");
-    assert_eq!(
-        app.build_system_prompt_split(None).unwrap().dynamic_part,
-        first
-    );
+    assert_eq!(app.build_system_prompt_split().unwrap().static_part, first);
 
     let restored = App::new_minimal_with_session(
         std::sync::Arc::clone(&app.provider),
@@ -1058,7 +1068,7 @@ fn assert_local_skill_snapshot_lifecycle(external_global: bool) {
     app.input = "/frozen-skill".to_string();
     app.cursor_pos = app.input.len();
     app.submit_input();
-    let second = app.build_system_prompt_split(None).unwrap().dynamic_part;
+    let second = app.build_system_prompt_split().unwrap().static_part;
     assert!(second.contains("FROZEN_V2"));
     assert!(!second.contains("FROZEN_V1"));
 }
@@ -1879,8 +1889,8 @@ fn local_managed_effort_error_blocks_provider_preparation_without_changing_stati
         "---\nid: swarm-effort\nkind: system\n---\nLOCAL-EFFORT",
     )
     .unwrap();
-    let first = app.build_system_prompt_split(None).unwrap();
-    assert!(first.dynamic_part.ends_with("LOCAL-EFFORT"));
+    let first = app.build_system_prompt_split().unwrap();
+    assert!(first.static_part.ends_with("LOCAL-EFFORT"));
     let state = app.session.system_prompt.clone();
     std::fs::write(
         &source,
@@ -2018,7 +2028,6 @@ fn invalid_mission_prose_preserves_composer_pastes_images_and_prior_turn_state()
     app.cursor_pos = 3;
     app.pasted_contents = vec!["FULL PASTED CONTENT".into()];
     app.pending_images = vec![("image/png".into(), "ZmFrZQ==".into())];
-    app.current_turn_system_reminder = Some("PRIOR".into());
     let messages = serde_json::to_value(&app.session.messages).unwrap();
     app.submit_input();
     assert_eq!(app.input, "KEEP INPUT");
@@ -2028,7 +2037,6 @@ fn invalid_mission_prose_preserves_composer_pastes_images_and_prior_turn_state()
         app.pending_images,
         vec![("image/png".to_string(), "ZmFrZQ==".to_string())]
     );
-    assert_eq!(app.current_turn_system_reminder.as_deref(), Some("PRIOR"));
     assert_eq!(
         serde_json::to_value(&app.session.messages).unwrap(),
         messages

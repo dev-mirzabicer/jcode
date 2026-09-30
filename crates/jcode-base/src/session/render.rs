@@ -47,7 +47,12 @@ fn format_reasoning_markup(text: &str) -> String {
     out
 }
 
+/// Legacy recognition of unpersisted-style reminders by prose prefix. A
+/// delivered context message is identified structurally and rendered instead.
 fn is_internal_system_reminder(msg: &super::StoredMessage) -> bool {
+    if msg.context_delivery().is_some() {
+        return false;
+    }
     msg.content
         .iter()
         .find_map(|block| match block {
@@ -493,6 +498,18 @@ fn render_messages_and_images_with_compacted_history_inner(
             continue;
         }
         if is_internal_system_reminder(msg) {
+            continue;
+        }
+        // Delivered harness context shows as a system message with its body,
+        // exactly as the model received it, minus the reminder tags.
+        if let Some((_, body)) = msg.context_delivery() {
+            rendered.push(RenderedMessage {
+                role: "system".to_string(),
+                content: body.to_string(),
+                tool_calls: Vec::new(),
+                tool_data: None,
+                stored_index: Some(stored_index),
+            });
             continue;
         }
 

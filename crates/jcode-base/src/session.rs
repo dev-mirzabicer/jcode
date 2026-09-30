@@ -2803,6 +2803,23 @@ impl Session {
         Ok(id)
     }
 
+    /// Append model-visible harness context as persisted transcript content.
+    /// It is never rewritten or removed afterwards, so provider history stays
+    /// append-only. The caller persists it together with the operation it
+    /// belongs to (the input it accompanies, or the request it precedes).
+    /// Returns `None` when there is no text to deliver.
+    pub fn append_context_delivery(
+        &mut self,
+        channel: jcode_session_types::ContextDeliveryChannel,
+        body: &str,
+    ) -> Option<String> {
+        let id = new_id("message");
+        let message =
+            jcode_session_types::context_delivery_message(id.clone(), channel, body, Utc::now())?;
+        self.append_stored_message(message);
+        Some(id)
+    }
+
     pub fn add_human_message(&mut self, content: Vec<ContentBlock>) -> String {
         self.add_user_message_with_origin(
             content,

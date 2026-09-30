@@ -93,7 +93,7 @@ impl Agent {
                 crate::context::provider_validation::require_supported_projected_messages(self.provider.as_ref(), &messages, &operations)?;
             }
             let tools = self.tool_definitions_for_debug().await?;
-            let split = self.build_system_prompt_split(None)?;
+            let split = self.build_system_prompt_split()?;
             let report = self.evaluate_provider_request_preflight(&messages, 0, &split, &tools, None);
             ensure!(report.pressure != crate::protocol::ContextPressureLevel::Blocked,
                 "Child context preparation exceeds safe budget by {} tokens; no automatic compaction or provider request occurred", report.required_reduction_tokens);

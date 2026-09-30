@@ -41,21 +41,21 @@ impl SystemPromptComposer {
         Ok((composed.static_part, info))
     }
 
+    /// Static-prompt delivery: no active skill or memory slot. Callers add
+    /// active-skill text as a static section after composition.
     pub(crate) fn compatibility_split(
         &self,
-        skill: Option<&str>,
         skills: &[SkillInfo],
         selfdev: bool,
-        memory: Option<&str>,
         working_dir: Option<&Path>,
         capabilities: PromptCapabilities,
     ) -> Result<(prompt::SplitSystemPrompt, prompt::ContextInfo), SystemPromptActivationError> {
         self.compose_compatibility(
             CompatibilityInput {
-                skill,
+                skill: None,
                 skills,
                 selfdev,
-                memory,
+                memory: None,
                 working_dir,
                 capabilities,
             },
@@ -126,13 +126,9 @@ impl SystemPromptComposer {
                 parts.push(text);
             }
         }
-        let mut dynamic = Vec::new();
         if let Some(memory) = input.memory {
             info.memory_chars = memory.len();
-            match delivery {
-                Delivery::Full => parts.push(memory.to_string()),
-                Delivery::Split => dynamic.push(memory.to_string()),
-            }
+            parts.push(memory.to_string());
         }
         if !input.skills.is_empty() {
             let text = render_available_skills(&environment.runtime, input.skills)?;
@@ -140,17 +136,12 @@ impl SystemPromptComposer {
             parts.push(text);
         }
         if let Some(skill) = input.skill {
-            let text = format!("# Active Skill\n\n{skill}");
-            match delivery {
-                Delivery::Full => parts.push(text),
-                Delivery::Split => dynamic.push(text),
-            }
+            parts.push(format!("# Active Skill\n\n{skill}"));
         }
         let split = prompt::SplitSystemPrompt {
             static_part: parts.join("\n\n"),
-            dynamic_part: dynamic.join("\n\n"),
         };
-        info.total_chars = split.static_part.len() + split.dynamic_part.len();
+        info.total_chars = split.static_part.len();
         Ok((split, info))
     }
 }

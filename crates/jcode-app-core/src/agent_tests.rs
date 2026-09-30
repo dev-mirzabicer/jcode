@@ -104,7 +104,6 @@ fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
         );
         let mut split = crate::prompt::SplitSystemPrompt {
             static_part: "SYSTEM".into(),
-            dynamic_part: "DYNAMIC".into(),
         };
         crate::prompt::append_swarm_effort_directive(
             &mut split,
@@ -112,10 +111,7 @@ fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
             Some(home.root()),
         )
         .unwrap();
-        assert_eq!(
-            (split.static_part.as_str(), split.dynamic_part.as_str()),
-            ("SYSTEM", "DYNAMIC")
-        );
+        assert_eq!(split.static_part, "SYSTEM");
         // Request preparation must not initialize or read the dormant routing source.
         assert!(
             !home
@@ -126,13 +122,13 @@ fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
     });
 }
 
-struct AgentTestEnvRestore {
+pub(super) struct AgentTestEnvRestore {
     key: &'static str,
     previous: Option<OsString>,
 }
 
 impl AgentTestEnvRestore {
-    fn set_path(key: &'static str, value: &Path) -> Self {
+    pub(super) fn set_path(key: &'static str, value: &Path) -> Self {
         let previous = std::env::var_os(key);
         crate::env::set_var(key, value);
         crate::config::invalidate_config_cache();
@@ -3212,7 +3208,6 @@ fn seed_transient_session_state(agent: &mut Agent) {
     agent.tool_output_scan_index = 7;
     agent.last_upstream_provider = Some("upstream_old".to_string());
     agent.last_connection_type = Some("websocket".to_string());
-    agent.current_turn_system_reminder = Some("reminder".to_string());
     agent.last_usage = TokenUsage {
         input_tokens: 11,
         output_tokens: 17,
@@ -3249,7 +3244,6 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.tool_output_scan_index, 0);
     assert!(agent.last_upstream_provider.is_none());
     assert!(agent.last_connection_type.is_none());
-    assert!(agent.current_turn_system_reminder.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
@@ -3289,7 +3283,6 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.tool_output_scan_index, 0);
     assert!(agent.last_upstream_provider.is_none());
     assert!(agent.last_connection_type.is_none());
-    assert!(agent.current_turn_system_reminder.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
@@ -5569,7 +5562,6 @@ impl Provider for AdapterCapturedSdkProvider {
         &self,
         _: &[Message],
         _: &[ToolDefinition],
-        _: &str,
         _: &str,
         _: Option<&str>,
         context: jcode_provider_core::ProviderRequestContext,

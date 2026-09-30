@@ -138,6 +138,8 @@ jcode-base = { path = "../jcode-base", default-features = false, features = ["te
 jcode-context-core = { path = "../jcode-context-core" }
 # Provider-parity tests format the real registry through the Anthropic builder.
 jcode-provider-anthropic = { path = "../jcode-provider-anthropic" }
+# Append-only delivery tests format recorded requests through the OpenAI builder.
+jcode-provider-openai = { path = "../jcode-provider-openai" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

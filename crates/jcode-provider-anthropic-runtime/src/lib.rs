@@ -1155,13 +1155,7 @@ impl Default for AnthropicProvider {
     }
 }
 
-fn log_anthropic_canonical_input(
-    model: &str,
-    format: &str,
-    request: &ApiRequest,
-    is_oauth: bool,
-    split_prompt: bool,
-) {
+fn log_anthropic_canonical_input(model: &str, format: &str, request: &ApiRequest, is_oauth: bool) {
     let messages_value = serde_json::to_value(&request.messages).unwrap_or(Value::Null);
     let message_items = messages_value.as_array().cloned().unwrap_or_default();
     let system_value = request
@@ -1193,10 +1187,7 @@ fn log_anthropic_canonical_input(
         system_value.as_ref(),
         tools_value.as_ref(),
         request.tools.as_ref().map(|tools| tools.len()),
-        &[
-            ("oauth", is_oauth.to_string()),
-            ("split_prompt", split_prompt.to_string()),
-        ],
+        &[("oauth", is_oauth.to_string())],
     );
 }
 
@@ -1209,8 +1200,7 @@ impl Provider for AnthropicProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        self.start_stream(messages, tools, StreamSystem::Unified(system))
-            .await
+        self.start_stream(messages, tools, system).await
     }
 
     fn model(&self) -> String {
@@ -1518,36 +1508,6 @@ impl Provider for AnthropicProvider {
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         None // Direct API doesn't use native tool bridge
     }
-
-    /// Split system prompt completion for better cache efficiency
-    /// Static content is cached, dynamic content is not
-    async fn complete_split(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        system_static: &str,
-        system_dynamic: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        self.start_stream(
-            messages,
-            tools,
-            StreamSystem::Split {
-                system_static,
-                system_dynamic,
-            },
-        )
-        .await
-    }
-}
-
-/// How the caller supplied the system prompt.
-enum StreamSystem<'a> {
-    Unified(&'a str),
-    Split {
-        system_static: &'a str,
-        system_dynamic: &'a str,
-    },
 }
 
 impl AnthropicProvider {
@@ -1556,7 +1516,7 @@ impl AnthropicProvider {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-        system: StreamSystem<'_>,
+        system: &str,
     ) -> Result<EventStream> {
         let (token, is_oauth) = self.get_access_token().await?;
         if is_oauth {
@@ -1576,30 +1536,14 @@ impl AnthropicProvider {
         let model = self
             .model_after_oauth_quota_check(&token, is_oauth, selected_model)
             .await;
-        let (system_param, label, split) = match system {
-            StreamSystem::Unified(system) => (
-                build_system_param(system, is_oauth),
-                "anthropic_messages",
-                false,
-            ),
-            StreamSystem::Split {
-                system_static,
-                system_dynamic,
-            } => (
-                build_system_param_split(system_static, system_dynamic, is_oauth),
-                "anthropic_messages_split",
-                true,
-            ),
-        };
+        let system_param = build_system_param(system, is_oauth);
         let request = self.build_api_request(&model, messages, tools, system_param, is_oauth);
         let request_binding = bind_request(&model, &request);
 
-        log_anthropic_canonical_input(&model, label, &request, is_oauth, split);
+        log_anthropic_canonical_input(&model, "anthropic_messages", &request, is_oauth);
 
         jcode_base::logging::info(&format!(
-            "Anthropic transport: HTTPS SSE {} (oauth={})",
-            if split { "split stream" } else { "stream" },
-            is_oauth
+            "Anthropic transport: HTTPS SSE stream (oauth={is_oauth})"
         ));
 
         // Create channel for streaming events
@@ -2920,19 +2864,6 @@ fn record_input_transformations(
 
 fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
     jcode_provider_anthropic::build_system_param(system, is_oauth, is_cache_ttl_1h())
-}
-
-fn build_system_param_split(
-    static_part: &str,
-    dynamic_part: &str,
-    is_oauth: bool,
-) -> Option<ApiSystem> {
-    jcode_provider_anthropic::build_system_param_split(
-        static_part,
-        dynamic_part,
-        is_oauth,
-        is_cache_ttl_1h(),
-    )
 }
 
 fn format_messages_with_identity(messages: Vec<ApiMessage>, is_oauth: bool) -> Vec<ApiMessage> {

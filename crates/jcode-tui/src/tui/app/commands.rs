@@ -3417,13 +3417,19 @@ pub(super) fn apply_local_primary_agent_change(
             let projected = candidate
                 .projected_messages_for_provider()
                 .map_err(|error| error.to_string())?;
-            let mut split = app
-                .build_system_prompt_split(None)
-                .map_err(|error| error.to_string())?;
-            split.static_part = candidate
-                .system_prompt_text()
-                .unwrap_or_default()
-                .to_string();
+            let split = crate::prompt::compose_static_system_prompt(
+                candidate
+                    .system_prompt_text()
+                    .unwrap_or_default()
+                    .to_string(),
+                candidate
+                    .active_skill
+                    .as_ref()
+                    .map(|skill| skill.rendered_text.as_str()),
+                app.provider.reasoning_effort().as_deref(),
+                candidate.working_dir.as_deref().map(std::path::Path::new),
+            )
+            .map_err(|error| error.to_string())?;
             let mut tools = app.registry.try_definitions(None).map_err(str::to_string)?;
             crate::tool::instruction_guidance::preview(&app.session, &mut tools)
                 .map_err(|error| error.to_string())?;

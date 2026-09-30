@@ -63,9 +63,29 @@ impl Agent {
             self.apply_primary_location_changes().await?;
             self.require_native_scope_provider()?;
             self.session.require_published_primary()?;
+            let tools = self.tool_definitions().await?;
+            if Self::should_inject_batch_nudge(
+                batch_nudge_pending,
+                tools.iter().any(|tool| tool.name == "batch"),
+            ) {
+                // Delivered once as persisted transcript content, like every
+                // other model-visible harness context (INT-01, D2).
+                let prose = crate::instruction::notification::Notification::BatchNudge.render(
+                    self.session
+                        .working_dir
+                        .as_deref()
+                        .map(std::path::Path::new),
+                )?;
+                self.add_context_delivery(
+                    jcode_session_types::ContextDeliveryChannel::BatchNudge,
+                    &prose,
+                );
+                self.session.save()?;
+                batch_nudge_pending = false;
+                sequential_single_tool_rounds = 0;
+            }
             let messages = self.messages_for_provider()?;
 
-            let tools = self.tool_definitions().await?;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let pending_memory =
@@ -74,8 +94,7 @@ impl Agent {
                 self.session.id.clone(),
                 pending_memory,
             );
-            // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(None)?;
+            let split_prompt = self.build_system_prompt_split()?;
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
             // Build the complete ephemeral request before recording cache state,
@@ -90,22 +109,6 @@ impl Agent {
                     tokens
                 })
                 .unwrap_or_default();
-            if Self::should_inject_batch_nudge(
-                batch_nudge_pending,
-                tools.iter().any(|tool| tool.name == "batch"),
-            ) {
-                let prose = crate::instruction::notification::Notification::BatchNudge.render(
-                    self.session
-                        .working_dir
-                        .as_deref()
-                        .map(std::path::Path::new),
-                )?;
-                messages_with_memory.push(Message::user(&format!(
-                    "<system-reminder>{prose}</system-reminder>"
-                )));
-                batch_nudge_pending = false;
-                sequential_single_tool_rounds = 0;
-            }
             let preflight = self.evaluate_provider_request_preflight(
                 &messages_with_memory,
                 memory_tokens,
@@ -180,7 +183,6 @@ impl Agent {
                     send_messages,
                     &tools,
                     &split_prompt.static_part,
-                    &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                     provider_ingress.context(),
                 )

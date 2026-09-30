@@ -358,9 +358,6 @@ pub struct Agent {
     last_status_detail: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
-    /// Transient reminder injected into provider requests for the current turn only.
-    /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
     /// Exact pending-turn boundary used only for prompt-safe preflight and
     /// pre-output provider rejection rollback.
     active_turn_context: Option<ActiveTurnContext>,
@@ -454,7 +451,6 @@ impl Agent {
             last_connection_type: None,
             last_status_detail: None,
             pending_alerts: Vec::new(),
-            current_turn_system_reminder: None,
             active_turn_context: None,
             startup_context_persistence: Arc::new(DurableStartupContextSessionPersistence),
             tool_call_ids: HashSet::new(),
@@ -946,10 +942,7 @@ impl Agent {
     }
 
     fn memory_injection_message(memory: &crate::memory::PendingMemory) -> Message {
-        Message::user(&format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            memory.prompt
-        ))
+        memory.provider_message()
     }
 
     pub(super) fn prepare_memory_injection_message(
@@ -984,7 +977,6 @@ impl Agent {
         self.last_connection_type = None;
         self.last_status_detail = None;
         self.pending_alerts.clear();
-        self.current_turn_system_reminder = None;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();
@@ -1341,3 +1333,7 @@ impl Agent {
 #[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent/context_delivery_tests.rs"]
+mod context_delivery_tests;

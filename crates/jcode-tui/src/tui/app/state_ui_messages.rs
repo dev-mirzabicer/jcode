@@ -13,6 +13,10 @@ const OVERNIGHT_CARD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 fn display_message_from_stored_message(
     message: &crate::session::StoredMessage,
 ) -> Option<DisplayMessage> {
+    // Delivered harness context shows its body as a system message.
+    if let Some((_, body)) = message.context_delivery() {
+        return Some(DisplayMessage::system(body.to_string()));
+    }
     let text = stored_message_visible_text(message);
     if text.trim().is_empty() {
         return None;

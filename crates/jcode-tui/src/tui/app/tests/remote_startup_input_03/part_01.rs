@@ -480,17 +480,32 @@ fn test_restore_session_with_selfdev_reload_tool_result_queues_continuation() {
 }
 
 #[test]
-fn test_system_reminder_is_added_to_system_prompt_not_user_messages() {
+fn test_system_reminder_is_delivered_as_transcript_content_not_system_prompt() {
+    // INT-01 D2: reminders are persisted, append-only transcript content for
+    // every provider; the static system prompt never carries them.
     let mut app = create_test_app();
-    app.current_turn_system_reminder = Some(
-        "Your session was interrupted by a server reload. Continue where you left off.".to_string(),
+    let before = app.session.messages.len();
+    app.deliver_turn_reminder(
+        "Your session was interrupted by a server reload. Continue where you left off.",
     );
 
-    let split = app.build_system_prompt_split(None).unwrap();
-
-    assert!(split.dynamic_part.contains("# System Reminder"));
-    assert!(split.dynamic_part.contains("Continue where you left off."));
-    assert!(app.messages.is_empty());
+    let split = app.build_system_prompt_split().unwrap();
+    assert!(!split.static_part.contains("Continue where you left off."));
+    let delivered = &app.session.messages[before..];
+    assert_eq!(delivered.len(), 1);
+    let (channel, body) = delivered[0]
+        .context_delivery()
+        .expect("structurally identified delivery");
+    assert_eq!(
+        channel,
+        jcode_session_types::ContextDeliveryChannel::TurnReminder
+    );
+    assert!(body.starts_with("# System Reminder\n\n"));
+    assert!(body.contains("Continue where you left off."));
+    assert_eq!(
+        delivered[0].display_role,
+        Some(crate::session::StoredDisplayRole::System)
+    );
 }
 
 #[test]

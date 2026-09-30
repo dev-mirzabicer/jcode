@@ -407,7 +407,6 @@ impl App {
             return false;
         }
         self.session_save_pending = false;
-        self.current_turn_system_reminder = None;
         self.restore_blocked_composer_input(images);
         true
     }

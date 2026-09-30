@@ -11,6 +11,8 @@ mod context;
 pub use context::*;
 mod startup_context;
 pub use startup_context::*;
+mod context_delivery;
+pub use context_delivery::*;
 
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
@@ -273,6 +275,8 @@ pub enum StoredMessageOrigin {
     /// Exact ranges in the single stored text block. Only whitespace may sit
     /// between parts, including export-normalized queue separators.
     Composed(Vec<StoredMessagePart>),
+    /// Harness context delivered as append-only transcript content.
+    ContextDelivery(StoredContextDelivery),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

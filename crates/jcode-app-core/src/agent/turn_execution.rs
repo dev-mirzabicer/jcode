@@ -86,7 +86,8 @@ impl Agent {
             self.message_count(),
             PendingTurnOptions::default(),
         );
-        if let Err(error) = self.append_user_context_blocks_with_origin(blocks, None, Some(origin))
+        if let Err(error) =
+            self.append_user_context_blocks_with_origin(blocks, None, Some(origin), None)
         {
             self.abort_pending_turn_setup();
             return Err(error);
@@ -187,7 +188,7 @@ impl Agent {
             },
         );
         if let Err(error) =
-            self.append_user_context_blocks_with_origin(blocks, display_role, origin)
+            self.append_user_context_blocks_with_origin(blocks, display_role, origin, None)
         {
             self.abort_pending_turn_setup();
             return Err(error);
@@ -326,16 +327,13 @@ impl Agent {
             );
         }
 
-        self.current_turn_system_reminder =
-            system_reminder.filter(|value| !value.trim().is_empty());
-
         if let Err(error) = self.append_user_context_blocks_with_origin(
             blocks,
             context.display_role,
             context.origin,
+            system_reminder.as_deref(),
         ) {
             self.abort_pending_turn_setup();
-            self.current_turn_system_reminder = None;
             return Err(error);
         }
         crate::telemetry::record_turn();
@@ -354,7 +352,6 @@ impl Agent {
                 },
             );
         }
-        self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         self.finish_pending_turn();
         result
@@ -400,15 +397,21 @@ impl Agent {
         blocks: Vec<ContentBlock>,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
-        self.append_user_context_blocks_with_origin(blocks, display_role, None)
+        self.append_user_context_blocks_with_origin(blocks, display_role, None, None)
     }
 
+    /// Commit one input: its user content and the system reminder that
+    /// accompanies it, persisted together (with the durable input receipt for
+    /// primaries). The reminder is delivered exactly once, here, and is never
+    /// re-sent or rewritten afterwards.
     pub(super) fn append_user_context_blocks_with_origin(
         &mut self,
         blocks: Vec<ContentBlock>,
         display_role: Option<crate::session::StoredDisplayRole>,
         origin: Option<jcode_session_types::StoredMessageOrigin>,
+        reminder: Option<&str>,
     ) -> Result<()> {
+        let reminder = reminder.map(str::trim).filter(|value| !value.is_empty());
         if self.pending_primary_input.is_none() && self.session.isolated_child.is_none() {
             let mut input = jcode_session_types::PrimaryInputEnvelope::new(
                 self.session_id().into(),
@@ -430,7 +433,7 @@ impl Agent {
             }
             input.display_role = display_role;
             input.origin = origin.clone();
-            input.system_reminder = self.current_turn_system_reminder.clone();
+            input.system_reminder = reminder.map(str::to_string);
             input.unattended_context = self
                 .active_turn_context
                 .as_ref()
@@ -453,7 +456,7 @@ impl Agent {
             let before = self.session.clone();
             let start = self.message_count();
             let result = (|| {
-                self.add_user_message_with_origin(blocks, display_role, origin)?;
+                self.append_turn_content(blocks, display_role, origin, reminder)?;
                 self.session.record_primary_input(&input, start)?;
                 self.session.save()
             })();
@@ -472,9 +475,35 @@ impl Agent {
             }
             Ok(())
         } else {
-            self.add_user_message_with_origin(blocks, display_role, origin)?;
+            self.append_turn_content(blocks, display_role, origin, reminder)?;
             self.session.save()
         }
+    }
+
+    /// Append one input's content and its reminder delivery. A reminder-only
+    /// input, such as a reload resume, has the delivery as its entire content:
+    /// no empty prompt message is stored, so the turn still begins with user
+    /// content on every provider.
+    fn append_turn_content(
+        &mut self,
+        blocks: Vec<ContentBlock>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        origin: Option<jcode_session_types::StoredMessageOrigin>,
+        reminder: Option<&str>,
+    ) -> Result<()> {
+        let empty_prompt = blocks.iter().all(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text.trim().is_empty()),
+        );
+        if !(empty_prompt && reminder.is_some()) {
+            self.add_user_message_with_origin(blocks, display_role, origin)?;
+        }
+        if let Some(reminder) = reminder {
+            self.add_context_delivery(
+                jcode_session_types::ContextDeliveryChannel::TurnReminder,
+                reminder,
+            );
+        }
+        Ok(())
     }
 
     /// Fire the `turn_start` observer hook when a turn begins, before the model

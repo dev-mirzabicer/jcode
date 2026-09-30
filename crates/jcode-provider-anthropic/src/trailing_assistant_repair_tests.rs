@@ -1,10 +1,10 @@
 //! Regression coverage for #600.
 //!
 //! Anthropic rejects a request whose final message is an assistant turn on
-//! models without prefill support (notably `claude-fable-5`). The reload
-//! auto-resume path starts a turn with empty user content and delivers its
-//! continuation as a *system reminder*, so the transcript still ends on the
-//! interrupted assistant turn. `format_messages` must repair that shape.
+//! models without prefill support. Every turn now begins with persisted
+//! user-role content (a reload resume delivers its continuation as that
+//! content), so a trailing assistant turn means damaged history. The formatter
+//! still repairs the shape and logs the repair as a defect.
 
 use super::*;
 use jcode_message_types::{ContentBlock, Message, Role};

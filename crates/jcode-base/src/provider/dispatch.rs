@@ -7,7 +7,6 @@ pub(super) enum CompletionMode<'a> {
     },
     Split {
         system_static: &'a str,
-        system_dynamic: &'a str,
         context: Option<&'a jcode_provider_core::ProviderRequestContext>,
     },
 }
@@ -47,12 +46,8 @@ impl MultiProvider {
             CompletionMode::Unified { system } => {
                 chars += system.len();
             }
-            CompletionMode::Split {
-                system_static,
-                system_dynamic,
-                ..
-            } => {
-                chars += system_static.len() + system_dynamic.len();
+            CompletionMode::Split { system_static, .. } => {
+                chars += system_static.len();
             }
         }
         let tokens = chars / 4;
@@ -186,11 +181,10 @@ impl MultiProvider {
         provider: ActiveProvider,
         messages: &[Message],
         tools: &[ToolDefinition],
-        system: (&str, &str),
+        system_static: &str,
         resume_session_id: Option<&str>,
         context: Option<&jcode_provider_core::ProviderRequestContext>,
     ) -> Result<EventStream> {
-        let (system_static, system_dynamic) = system;
         self.reconcile_auth_if_provider_missing(provider);
         match provider {
             ActiveProvider::Claude => {
@@ -200,7 +194,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -211,7 +204,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -229,7 +221,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -252,7 +243,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -271,7 +261,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -294,7 +283,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -317,7 +305,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -335,7 +322,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )
@@ -354,7 +340,6 @@ impl MultiProvider {
                             messages,
                             tools,
                             system_static,
-                            system_dynamic,
                             resume_session_id,
                             context.cloned().unwrap_or_default(),
                         )

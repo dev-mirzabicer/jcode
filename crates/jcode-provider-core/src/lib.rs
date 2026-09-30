@@ -80,9 +80,7 @@ pub use usage_accounting::effective_context_tokens_from_usage;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
-use jcode_message_types::{
-    ContentBlock, Message, Role, StreamEvent, ToolDefinition, messages_with_dynamic_system_context,
-};
+use jcode_message_types::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -210,40 +208,33 @@ pub trait Provider: Send + Sync {
         resume_session_id: Option<&str>,
     ) -> Result<EventStream>;
 
-    /// Send messages with split system prompt for better caching.
+    /// Send messages with the composed static system prompt. Model-visible
+    /// dynamic context is never passed here: it is delivered as persisted
+    /// transcript content, so every request is an append of the previous one.
     async fn complete_split(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
-        system_dynamic: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let dynamic_messages = messages_with_dynamic_system_context(messages, system_dynamic);
-        self.complete(&dynamic_messages, tools, system_static, resume_session_id)
+        self.complete(messages, tools, system_static, resume_session_id)
             .await
     }
 
-    /// Send the unchanged split prompt with out-of-band request lifetime and
+    /// Send the static-prompt request with out-of-band request lifetime and
     /// result-capture metadata. Providers without an adapter hook retain their
-    /// existing split-request behavior.
+    /// existing request behavior.
     async fn complete_split_with_context(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
-        system_dynamic: &str,
         resume_session_id: Option<&str>,
         _context: ProviderRequestContext,
     ) -> Result<EventStream> {
-        self.complete_split(
-            messages,
-            tools,
-            system_static,
-            system_dynamic,
-            resume_session_id,
-        )
-        .await
+        self.complete_split(messages, tools, system_static, resume_session_id)
+            .await
     }
 
     /// Get the provider name.

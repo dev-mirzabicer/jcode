@@ -2061,6 +2061,70 @@ fn test_render_messages_hides_internal_system_reminders() {
 }
 
 #[test]
+fn context_delivery_is_persisted_and_rendered_as_a_system_message() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-context-delivery-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_context_delivery_roundtrip";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.add_human_message(vec![ContentBlock::Text {
+        text: "visible prompt".to_string(),
+        cache_control: None,
+    }]);
+    let delivered = session
+        .append_context_delivery(
+            jcode_session_types::ContextDeliveryChannel::TurnReminder,
+            "synthetic reminder",
+        )
+        .expect("non-empty delivery");
+    assert!(
+        session
+            .append_context_delivery(
+                jcode_session_types::ContextDeliveryChannel::TurnReminder,
+                "  ",
+            )
+            .is_none()
+    );
+    // A legacy reminder recognized only by its prose prefix stays hidden.
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<system-reminder>\nlegacy\n</system-reminder>".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+
+    let loaded = Session::load(session_id)?;
+    let message = loaded
+        .messages
+        .iter()
+        .find(|message| message.id == delivered)
+        .expect("delivery persisted");
+    assert_eq!(
+        message.context_delivery(),
+        Some((
+            jcode_session_types::ContextDeliveryChannel::TurnReminder,
+            "# System Reminder\n\nsynthetic reminder"
+        ))
+    );
+    let rendered = render_messages(&loaded);
+    let roles: Vec<&str> = rendered
+        .iter()
+        .map(|message| message.role.as_str())
+        .collect();
+    assert_eq!(roles, vec!["user", "system"]);
+    assert_eq!(
+        rendered[1].content,
+        "# System Reminder\n\nsynthetic reminder"
+    );
+    Ok(())
+}
+
+#[test]
 fn test_render_messages_shows_recent_compacted_history_by_default() {
     let mut session = Session::create_with_id(
         "session_render_compacted_history_test".to_string(),

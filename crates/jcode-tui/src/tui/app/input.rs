@@ -3910,14 +3910,12 @@ impl App {
             ));
         }
         if images.is_empty() {
-            self.current_turn_system_reminder = mission_reminder;
             self.add_provider_message(Message::user(&input));
             self.session.add_human_message(vec![ContentBlock::Text {
                 text: input.clone(),
                 cache_control: None,
             }]);
         } else {
-            self.current_turn_system_reminder = mission_reminder;
             self.add_provider_message(Message::user_with_images(&input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
@@ -3928,6 +3926,9 @@ impl App {
                 cache_control: None,
             });
             self.session.add_human_message(blocks);
+        }
+        if let Some(reminder) = mission_reminder.as_deref() {
+            self.deliver_turn_reminder(reminder);
         }
         crate::telemetry::record_turn();
         self.session_save_pending = true;
@@ -4044,7 +4045,7 @@ impl App {
                 }
             }
 
-            self.current_turn_system_reminder = merge_turn_reminders(reminder, mission_reminder);
+            let turn_reminder = merge_turn_reminders(reminder, mission_reminder);
 
             if has_combined {
                 if !preserve_visible_turn {
@@ -4067,6 +4068,11 @@ impl App {
                     break;
                 }
                 self.add_provider_message(Message::user(&combined));
+            }
+            // A reminder-only dispatch (for example a reload continuation) has
+            // the delivered reminder as its entire turn content.
+            if let Some(reminder) = turn_reminder.as_deref() {
+                self.deliver_turn_reminder(reminder);
             }
             self.session_save_pending = true;
             self.clear_streaming_render_state();
@@ -4112,7 +4118,6 @@ impl App {
                     self.handle_turn_error(err_str);
                 }
             }
-            self.current_turn_system_reminder = None;
             if self.context_protocol.action_required.is_some() {
                 break;
             }

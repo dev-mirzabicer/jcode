@@ -33,7 +33,6 @@ pub(super) struct PreparedLocalProviderInvocation {
     request_messages: Vec<Message>,
     tools: Vec<ToolDefinition>,
     static_part: String,
-    dynamic_part: String,
     session_id: Option<String>,
     memory_pending: Option<crate::memory::PendingMemoryReservation>,
     capture: crate::execution::ProviderCaptureScope,
@@ -46,7 +45,6 @@ impl PreparedLocalProviderInvocation {
                 &self.request_messages,
                 &self.tools,
                 &self.static_part,
-                &self.dynamic_part,
                 self.session_id.as_deref(),
                 self.capture.context(),
             )
@@ -94,24 +92,17 @@ impl App {
         let pending_memory = self.build_memory_prompt_nonblocking(&provider_messages);
         let memory_pending =
             crate::memory::PendingMemoryReservation::new(self.session.id.clone(), pending_memory);
-        let base_split_prompt = self
-            .build_system_prompt_split(None)
-            .map_err(|error| error.to_string())?;
         // Capture occurrence-rendered instructions once. Accounting and the
         // actual request must not read different files during the same send.
-        let mut split_prompt = base_split_prompt.clone();
-        if self.ambient_system_prompt.is_none()
-            && let Some(memory) = memory_pending.as_ref()
-            && !memory.prompt.is_empty()
-        {
-            let separator = if split_prompt.dynamic_part.is_empty() {
-                ""
-            } else {
-                "\n\n"
-            };
-            split_prompt.dynamic_part =
-                format!("{}{separator}{}", memory.prompt, split_prompt.dynamic_part);
-        }
+        let split_prompt = self
+            .build_system_prompt_split()
+            .map_err(|error| error.to_string())?;
+        // Dormant memory keeps its trailing request-only message, exactly as
+        // the agent loops send it (Phase 2, INT-01 D9).
+        let memory_message = memory_pending
+            .as_ref()
+            .filter(|memory| self.ambient_system_prompt.is_none() && !memory.prompt.is_empty())
+            .map(|memory| memory.provider_message());
         self.context_info.tool_defs_count = tools.len();
         self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
 
@@ -121,14 +112,15 @@ impl App {
             .filter(|pending| pending.local_session_len_before.is_some())
             .map(|pending| pending.pending_input_tokens)
             .unwrap_or_default();
-        let memory_tokens = split_prompt
-            .estimated_tokens()
-            .saturating_sub(base_split_prompt.estimated_tokens());
+        let memory_tokens = memory_message
+            .as_ref()
+            .map(jcode_context_core::estimate_message_tokens)
+            .unwrap_or_default();
         let mut breakdown = crate::context::request_token_breakdown(
             &provider_messages,
             pending_input_tokens,
             0,
-            &base_split_prompt,
+            &split_prompt,
             &tools,
         );
         breakdown.memory_tokens = memory_tokens;
@@ -196,47 +188,44 @@ impl App {
             self.replace_provider_messages(provider_messages.clone());
         }
 
-        let request_messages = if crate::config::config().features.message_timestamps {
+        let mut request_messages = if crate::config::config().features.message_timestamps {
             Message::with_timestamps(&provider_messages)
         } else {
             provider_messages
         };
+        let ephemeral_messages: Vec<Message> = memory_message.into_iter().collect();
         self.begin_kv_cache_request(
             &request_messages,
             &tools,
             &split_prompt.static_part,
-            &split_prompt.dynamic_part,
+            &ephemeral_messages,
         );
+        request_messages.extend(ephemeral_messages);
         Ok(PreparedLocalProviderInvocation {
             capture: crate::execution::ProviderCaptureScope::new(self.session.id.clone()),
             provider: self.provider.clone(),
             request_messages,
             tools,
             static_part: split_prompt.static_part,
-            dynamic_part: split_prompt.dynamic_part,
             session_id: self.provider_session_id.clone(),
             memory_pending: Some(memory_pending),
         })
     }
 
-    pub(super) fn append_current_turn_system_reminder(
-        &self,
-        split: &mut crate::prompt::SplitSystemPrompt,
-    ) {
-        let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        else {
+    /// Deliver a turn's system reminder as persisted transcript content, right
+    /// after the turn's user content (INT-01, D2). It is never re-sent or
+    /// rewritten; later requests carry it as ordinary history.
+    pub(super) fn deliver_turn_reminder(&mut self, reminder: &str) {
+        let Some(id) = self.session.append_context_delivery(
+            jcode_session_types::ContextDeliveryChannel::TurnReminder,
+            reminder,
+        ) else {
             return;
         };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
+        if let Some(message) = self.session.messages.iter().rev().find(|m| m.id == id) {
+            let message = message.to_message();
+            self.add_provider_message(message);
         }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
     }
 
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)

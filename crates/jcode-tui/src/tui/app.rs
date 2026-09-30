@@ -915,7 +915,6 @@ pub struct App {
     queued_messages: crate::todo::QueuedMessages,
     queued_instruction_error: Option<String>,
     hidden_queued_system_messages: Vec<String>,
-    current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
     upstream_provider: Option<String>,
     // Active stream connection type (websocket/https/etc.)
@@ -1815,7 +1814,7 @@ impl App {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
-        system_dynamic: &str,
+        ephemeral_messages: &[Message],
     ) {
         let turn_number = self
             .display_messages
@@ -1836,7 +1835,7 @@ impl App {
 
         let baseline = self.kv_cache_baseline_for_current_session();
         let signature =
-            Self::kv_cache_request_signature(messages, tools, system_static, system_dynamic);
+            Self::kv_cache_request_signature(messages, tools, system_static, ephemeral_messages);
         let baseline_messages_prefix_matches = baseline
             .as_ref()
             .and_then(|baseline| baseline.signature.as_ref())
@@ -2533,9 +2532,8 @@ impl App {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_static: &str,
-        system_dynamic: &str,
+        ephemeral_messages: &[Message],
     ) -> KvCacheRequestSignature {
-        let dynamic_trimmed = system_dynamic.trim();
         KvCacheRequestSignature {
             system_static_hash: stable_hash_str(system_static),
             tools_hash: stable_hash_json(tools),
@@ -2546,13 +2544,10 @@ impl App {
             system_static_chars: system_static.chars().count(),
             tools_json_chars: stable_json_len(tools),
             messages_json_chars: stable_json_len(messages),
-            ephemeral_hash: if dynamic_trimmed.is_empty() {
-                None
-            } else {
-                Some(stable_hash_str(dynamic_trimmed))
-            },
-            ephemeral_chars: dynamic_trimmed.chars().count(),
-            ephemeral_message_count: usize::from(!dynamic_trimmed.is_empty()),
+            ephemeral_hash: (!ephemeral_messages.is_empty())
+                .then(|| stable_hash_json(ephemeral_messages)),
+            ephemeral_chars: stable_json_len(ephemeral_messages),
+            ephemeral_message_count: ephemeral_messages.len(),
         }
     }
 

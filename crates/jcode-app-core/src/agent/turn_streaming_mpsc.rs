@@ -147,7 +147,7 @@ impl Agent {
                 pending_memory,
             );
             // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(None)?;
+            let split_prompt = self.build_system_prompt_split()?;
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
             let mut cache_signature_messages =
@@ -261,7 +261,6 @@ impl Agent {
                     send_messages,
                     &tools,
                     &split_prompt.static_part,
-                    &split_prompt.dynamic_part,
                     resume_session_id.as_deref(),
                     provider_ingress.context(),
                 ));
