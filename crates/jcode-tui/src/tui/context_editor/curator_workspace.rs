@@ -2614,13 +2614,17 @@ impl ContextEditor {
             ),
             CuratorWorkspaceOverlay::Apply => (
                 " Apply atomic context transaction ",
-                vec![
+                [
                     Line::from(
                         "Apply every required operation and the currently selected eligible distillations?",
                     ),
                     Line::from(
                         "This creates one context revision and one intentional cache transition.",
                     ),
+                ]
+                .into_iter()
+                .chain(self.apply_thinking_consequence().map(Line::from))
+                .chain([
                     Line::from(""),
                     Line::from(Span::styled(
                         "Enter/Y apply · Esc/N cancel",
@@ -2628,7 +2632,8 @@ impl ContextEditor {
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     )),
-                ],
+                ])
+                .collect(),
                 Color::Yellow,
             ),
             CuratorWorkspaceOverlay::Help => (
@@ -3078,6 +3083,24 @@ impl ContextEditor {
                 .sum::<usize>()
     }
 
+    /// The Claude thinking the reviewed apply suppresses or replays again,
+    /// for confirmations (INT-01 WP-04).
+    pub(super) fn apply_thinking_consequence(&self) -> Option<String> {
+        let draft = self.draft.as_ref()?;
+        let summary = self
+            .selection_preview
+            .as_ref()
+            .map(|preview| &preview.preview.reasoning_invalidation)
+            .unwrap_or(&draft.preview.reasoning_invalidation)
+            .as_ref()
+            .filter(|summary| summary.changes_anything())?;
+        Some(format!(
+            "Claude thinking: {} block(s) suppressed as invalid, {} replayed again.",
+            summary.invalidated_by_change + summary.invalidated_other,
+            summary.restored
+        ))
+    }
+
     pub(super) fn curator_review_detail_lines(&self) -> Vec<Line<'static>> {
         let Some(draft) = self.draft.as_ref() else {
             return vec![Line::from("The generated review is unavailable.")];
@@ -3107,6 +3130,16 @@ impl ContextEditor {
                     Style::default().fg(Color::Yellow),
                 )),
             ];
+            if let Some(summary) = self
+                .selection_preview
+                .as_ref()
+                .map(|preview| &preview.preview.reasoning_invalidation)
+                .unwrap_or(&draft.preview.reasoning_invalidation)
+                .as_ref()
+                .filter(|summary| summary.changes_anything())
+            {
+                super::push_reasoning_invalidation_lines(&mut lines, summary);
+            }
             push_economics_lines(&mut lines, economics);
             push_validation_lines(
                 &mut lines,
@@ -3510,7 +3543,16 @@ fn curator_review_labels(
     draft: &ContextDraft,
     selected_distillation_ids: &BTreeSet<String>,
 ) -> Vec<String> {
-    let mut labels = vec!["Overview & economics".to_string()];
+    let locked_thinking = draft
+        .preview
+        .reasoning_invalidation
+        .as_ref()
+        .is_some_and(|summary| summary.changes_anything());
+    let mut labels = vec![if locked_thinking {
+        "Overview & economics · Claude thinking".to_string()
+    } else {
+        "Overview & economics".to_string()
+    }];
     for operation in &draft.required_operations {
         labels.push(match operation {
             StoredContextOperation::RangeSummary(summary) => format!(

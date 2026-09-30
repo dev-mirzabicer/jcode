@@ -4213,17 +4213,9 @@ impl ContextEditor {
                 .to_string();
         };
         let preview = &selection_preview.preview;
-        let thinking = preview
-            .reasoning_invalidation
-            .as_ref()
-            .filter(|summary| summary.changes_anything())
-            .map(|summary| {
-                format!(
-                    "\nClaude thinking: {} block(s) suppressed as invalid, {} replayed again.",
-                    summary.invalidated_by_change + summary.invalidated_other,
-                    summary.restored
-                )
-            })
+        let thinking = self
+            .apply_thinking_consequence()
+            .map(|line| format!("\n{line}"))
             .unwrap_or_default();
         format!(
             "Apply {} required operation(s) and {} selected distillation(s)?\nProjected provider tokens {} → {}.{thinking}\nRaw stored messages remain unchanged.\n\nEnter/y confirm · n/Esc cancel",
@@ -9120,6 +9112,43 @@ mod tests {
     }
 
     #[test]
+    fn the_curator_workspace_review_shows_the_locked_claude_thinking_group() {
+        for (width, height) in [(140, 48), (72, 34)] {
+            let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+            editor
+                .apply_debug_fixture("reasoning-invalidation-review")
+                .expect("fixture");
+            assert!(
+                editor.curator_workspace_active(),
+                "the production review pane"
+            );
+            let text = lines_text(&editor.curator_review_detail_lines());
+            assert!(
+                text.contains("Claude thinking (locked; follows this edit)"),
+                "{text}"
+            );
+            assert!(
+                text.contains("Invalidated by this edit: 4 block(s)"),
+                "{text}"
+            );
+            let mut rendered = render_editor_text(&mut editor, width, height);
+            assert!(
+                rendered.contains("Overview & economics · Claude"),
+                "{rendered}"
+            );
+            if width < 100 {
+                // The narrow layout lists items first; Enter opens the detail.
+                editor.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+                rendered = render_editor_text(&mut editor, width, height);
+            }
+            assert!(
+                rendered.contains("Claude thinking (locked"),
+                "visible without scrolling at {width}x{height}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn review_shows_the_locked_claude_thinking_group_at_every_width() {
         let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
         editor
@@ -9156,6 +9185,25 @@ mod tests {
                 .expect("fixture");
             render_editor(&mut editor, width, height);
         }
+    }
+
+    #[test]
+    fn the_workspace_apply_overlay_states_the_claude_thinking_consequence() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor
+            .apply_debug_fixture("reasoning-invalidation-review")
+            .expect("fixture");
+        editor.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        let rendered = render_editor_text(&mut editor, 140, 48);
+        assert!(
+            rendered.contains("Apply atomic context transaction"),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("Claude thinking: 5 block(s) suppressed as invalid, 2 replayed again."),
+            "{rendered}"
+        );
     }
 
     #[test]
