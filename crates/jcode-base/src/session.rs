@@ -78,9 +78,9 @@ pub use crash::{
 };
 pub use export::{STARTUP_CONTEXT_FULL_EXPORT_WARNING, StartupContextExportPolicy};
 pub use jcode_session_types::{
-    EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
-    StoredContextViewState, StoredDisplayRole, StoredMemoryInjection, StoredMessage,
-    StoredStartupContextBlock, StoredStartupContextReceipt, StoredTokenUsage,
+    ContextDeliveryChannel, EnvSnapshot, GitState, SessionImproveMode, SessionStatus,
+    StoredCompactionState, StoredContextViewState, StoredDisplayRole, StoredMemoryInjection,
+    StoredMessage, StoredStartupContextBlock, StoredStartupContextReceipt, StoredTokenUsage,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 mod isolated;
