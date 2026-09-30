@@ -767,19 +767,18 @@ impl AnthropicProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
-    /// Effective reasoning effort for `model`, resolving the model default when
-    /// the user has not configured an explicit effort.
+    /// Effective reasoning effort for `model`: the configured effort, else
+    /// jcode's default for the model. `None` when neither exists: the request
+    /// leaves effort to the model. That is not `none`: callers persist the
+    /// surfaced value and restore it as an explicit choice, and an explicit
+    /// `none` turns thinking off where the model allows it.
     fn effort_for_model(&self, model: &str) -> Option<String> {
         if !Self::model_supports_reasoning_effort(model) {
             return None;
         }
-        let configured = self
-            .stored_reasoning_effort()
-            .or_else(|| Self::default_reasoning_effort_for_model(model));
-        Some(match configured {
-            Some(effort) => Self::effort_without_none(model, &effort),
-            None => "none".to_string(),
-        })
+        self.stored_reasoning_effort()
+            .or_else(|| Self::default_reasoning_effort_for_model(model))
+            .map(|effort| Self::effort_without_none(model, &effort))
     }
 
     fn model_supports_priority_service_tier(model: &str) -> bool {
@@ -857,15 +856,11 @@ impl AnthropicProvider {
     ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
         let caps = jcode_provider_core::anthropic_reasoning_caps(model);
         // `effort_for_model` resolves `none` to `low` where thinking cannot be
-        // turned off, and returns `none` both for an explicit `none` and when
-        // nothing is configured and the model has no jcode default. Only the
-        // explicit form turns thinking off and wins over the
-        // `display.show_thinking` fallback below.
-        let explicit_none = self
-            .stored_reasoning_effort()
-            .or_else(|| Self::default_reasoning_effort_for_model(model))
-            .is_some_and(|effort| Self::effort_without_none(model, &effort) == "none");
+        // turned off, and is `None` when nothing is configured and the model
+        // has no jcode default. An explicit `none` turns thinking off and wins
+        // over the `display.show_thinking` fallback below.
         let effort = self.effort_for_model(model);
+        let explicit_none = effort.as_deref() == Some("none");
         let effort = effort.as_deref().filter(|effort| *effort != "none");
         let show_thinking = show_thinking && !explicit_none;
 

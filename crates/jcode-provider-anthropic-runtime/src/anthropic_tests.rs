@@ -2716,3 +2716,41 @@ fn production_requests_read_where_the_previous_request_wrote() {
         );
     }
 }
+
+#[test]
+fn an_unconfigured_effort_is_the_model_default_not_none() {
+    // The surfaced effort is persisted into the session and restored as an
+    // explicit choice (`restore_reasoning_effort_from_session`). Reporting the
+    // model default as `none` would turn thinking off on Sonnet 5 and lower
+    // Sonnet 5.5 to `low` after a restore (INT-01 WP-05).
+    let provider = AnthropicProvider::new();
+    *provider.reasoning_effort.write().unwrap() = None;
+    for model in ["claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6"] {
+        use_model(&provider, model);
+        let surfaced = provider.reasoning_effort();
+        assert_eq!(surfaced, None, "{model}");
+        let before = provider.build_reasoning_request_parts_inner(
+            model,
+            true,
+            false,
+            PrefixMismatchBehavior::DropBlock,
+        );
+        // Restoring the surfaced value (absent) leaves the request unchanged.
+        provider.set_reasoning_effort("").unwrap();
+        let after = provider.build_reasoning_request_parts_inner(
+            model,
+            true,
+            false,
+            PrefixMismatchBehavior::DropBlock,
+        );
+        assert_eq!(
+            serde_json::to_value(&before.0).unwrap(),
+            serde_json::to_value(&after.0).unwrap(),
+            "{model}"
+        );
+        assert!(before.1.is_none() && after.1.is_none(), "{model}");
+    }
+    // A jcode default is surfaced as itself.
+    use_model(&provider, "claude-opus-5-5");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
+}
