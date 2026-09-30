@@ -24,6 +24,9 @@ pub enum ProjectedMessageSource {
     RawMessage {
         message_id: String,
         stored_index: usize,
+        /// Stored block ordinal of each projected block, in order. Suppressed
+        /// blocks are absent, so projected and stored positions can differ.
+        block_ordinals: Vec<usize>,
     },
     RangeSummary {
         operation: ContextOperationRef,
@@ -431,6 +434,7 @@ pub fn project_context(
         let source = &raw[raw_index];
         let mut message = source.to_message();
         let mut projected_content = Vec::with_capacity(message.content.len());
+        let mut block_ordinals = Vec::with_capacity(message.content.len());
         let mut suppressed_replay_block = false;
         for (block_index, block) in message.content.into_iter().enumerate() {
             let key = (raw_index, block_index);
@@ -438,6 +442,7 @@ pub fn project_context(
                 suppressed_replay_block = true;
                 continue;
             }
+            block_ordinals.push(block_index);
             if let Some(distillation) = distillation_map.get(&key) {
                 let ContentBlock::ToolResult {
                     tool_use_id,
@@ -474,6 +479,7 @@ pub fn project_context(
             sources.push(ProjectedMessageSource::RawMessage {
                 message_id: source.id.clone(),
                 stored_index: raw_index,
+                block_ordinals,
             });
         }
         raw_index += 1;

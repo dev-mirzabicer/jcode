@@ -251,7 +251,7 @@ impl Agent {
                 .filter(|kind| kind.is_swarm_mode())
         };
         if swarm_mode(previous.as_deref()) != swarm_mode(current.as_deref()) {
-            crate::cache_invalidation::record(
+            self.record_prefix_transition(
                 "swarm effort directive",
                 format!(
                     "reasoning effort changed to {}",

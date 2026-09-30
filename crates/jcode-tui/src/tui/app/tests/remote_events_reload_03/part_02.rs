@@ -446,6 +446,7 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
 
     fn draft() -> crate::protocol::ContextDraft {
         crate::protocol::ContextDraft {
+            request_prefix_digest: None,
             identity: identity(),
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
             active_agent_profile_message_id: None,
@@ -454,6 +455,7 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),
             preview: crate::protocol::ContextDraftPreview {
+                reasoning_invalidation: None,
                 raw_stored_message_count: 1,
                 current_context_revision: 4,
                 proposed_context_revision: 5,
@@ -495,6 +497,7 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
 
     fn transaction_result() -> crate::protocol::ContextTransactionResult {
         crate::protocol::ContextTransactionResult {
+            reasoning_invalidation: None,
             transaction: transaction_summary(),
             revision: 5,
             status: StoredContextTransactionStatusKind::Applied,

@@ -313,6 +313,82 @@ pub fn analyze_request(request: &ApiRequest) -> RequestBindingReport {
     }
 }
 
+/// Fingerprint of a stored replayable thinking block, equal to the one
+/// [`analyze_request`] uses for the same block on the wire. `None` for every
+/// other block, including thinking stored without a binding record, which the
+/// formatter never replays.
+pub fn stored_thinking_fingerprint(block: &jcode_message_types::ContentBlock) -> Option<String> {
+    match block {
+        jcode_message_types::ContentBlock::AnthropicThinking {
+            signature,
+            binding: Some(_),
+            ..
+        } => Some(thinking_fingerprint(ThinkingPayload::Signature, signature)),
+        jcode_message_types::ContentBlock::AnthropicRedactedThinking { data, .. } => {
+            Some(thinking_fingerprint(ThinkingPayload::RedactedData, data))
+        }
+        _ => None,
+    }
+}
+
+/// One replayed thinking block that must be suppressed before the request is
+/// sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuppressedReplay {
+    /// [`thinking_fingerprint`] of the block.
+    pub fingerprint: String,
+    /// Wire path, as in [`ReplayedThinking::path`].
+    pub path: String,
+    /// `PrefixChanged` or `ChainBroken`; never `Valid` or `FollowsInvalid`.
+    pub validity: ReplayValidity,
+}
+
+/// The replayed thinking blocks jcode must suppress so that every block it
+/// still sends is valid.
+///
+/// This is [`analyze_request`]'s rule applied as if each invalid block were
+/// already removed. A block is kept when the prefix before it matches its
+/// recorded digest and it chains to the last kept block (or no block was kept
+/// before it: removing a leading run is allowed). Removing a block never
+/// changes a later block's prefix digest, because thinking is not part of the
+/// prefix, so one pass decides every block.
+pub fn blocks_to_suppress(request: &ApiRequest) -> Vec<SuppressedReplay> {
+    let mut digester = PrefixDigester::new(request.system.as_ref(), request.tools.as_deref());
+    let mut last_kept: Option<String> = None;
+    let mut suppressed = Vec::new();
+    for (message_index, message) in request.messages.iter().enumerate() {
+        let mut prefix: Option<String> = None;
+        for (block_index, block) in message.content.iter().enumerate() {
+            let Some(binding) = thinking_block_binding(block) else {
+                continue;
+            };
+            let Some(fingerprint) = thinking_block_fingerprint(block) else {
+                continue;
+            };
+            let prefix = prefix.get_or_insert_with(|| digester.digest());
+            let validity = match binding {
+                None => ReplayValidity::PrefixChanged,
+                Some(binding) if binding.prefix_digest != *prefix => ReplayValidity::PrefixChanged,
+                Some(binding) if last_kept.is_some() && binding.predecessor != last_kept => {
+                    ReplayValidity::ChainBroken
+                }
+                Some(_) => ReplayValidity::Valid,
+            };
+            if validity == ReplayValidity::Valid {
+                last_kept = Some(fingerprint);
+            } else {
+                suppressed.push(SuppressedReplay {
+                    fingerprint,
+                    path: format!("messages.{message_index}.content.{block_index}"),
+                    validity,
+                });
+            }
+        }
+        digester.push_message(message);
+    }
+    suppressed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +741,164 @@ mod tests {
             analyze_request(&request("sys", tools, &stripped))
                 .binding
                 .prefix_digest,
+        );
+    }
+
+    fn suppressed_signatures(request: &ApiRequest, messages: &[Message]) -> Vec<String> {
+        let by_fingerprint: std::collections::HashMap<String, String> = messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::AnthropicThinking { signature, .. } => {
+                    stored_thinking_fingerprint(block).map(|f| (f, signature.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        blocks_to_suppress(request)
+            .into_iter()
+            .map(|block| by_fingerprint[&block.fingerprint].clone())
+            .collect()
+    }
+
+    /// Suppress the planned blocks from the stored history and re-analyze:
+    /// every block still replayed must be valid.
+    fn assert_plan_leaves_only_valid_blocks(
+        system: &str,
+        tools: Vec<ApiTool>,
+        messages: &[Message],
+    ) {
+        let plan = blocks_to_suppress(&request(system, tools.clone(), messages));
+        let suppressed: std::collections::HashSet<String> =
+            plan.iter().map(|block| block.fingerprint.clone()).collect();
+        let mut kept = messages.to_vec();
+        for message in &mut kept {
+            message.content.retain(|block| {
+                stored_thinking_fingerprint(block)
+                    .is_none_or(|fingerprint| !suppressed.contains(&fingerprint))
+            });
+        }
+        let report = analyze_request(&request(system, tools, &kept));
+        assert!(
+            report.invalid().next().is_none(),
+            "plan {plan:?} left {:?}",
+            report.replayed
+        );
+    }
+
+    #[test]
+    fn an_unchanged_history_suppresses_nothing() {
+        let messages = conversation();
+        let tools = vec![tool("bash"), tool("read")];
+        assert!(blocks_to_suppress(&request("sys", tools, &messages)).is_empty());
+    }
+
+    #[test]
+    fn an_edit_suppresses_the_blocks_after_it_and_keeps_the_ones_before() {
+        let tools = vec![tool("bash"), tool("read")];
+        let mut messages = conversation();
+        messages[2] = Message::tool_result("t1", "ok (summarized)", false);
+        let request = request("sys", tools.clone(), &messages);
+        assert_eq!(
+            suppressed_signatures(&request, &messages),
+            vec!["sig-b".to_string(), "sig-c".to_string()]
+        );
+        let plan = blocks_to_suppress(&request);
+        assert_eq!(plan[0].validity, ReplayValidity::PrefixChanged);
+        assert_eq!(plan[0].path, "messages.3.content.0");
+        assert_eq!(plan[1].validity, ReplayValidity::PrefixChanged);
+        assert_plan_leaves_only_valid_blocks("sys", tools, &messages);
+    }
+
+    #[test]
+    fn a_suppressed_middle_block_breaks_the_chain_of_the_blocks_after_it() {
+        let tools = vec![tool("bash"), tool("read")];
+        let mut messages = conversation();
+        messages[3].content.retain(|block| {
+            !matches!(block, ContentBlock::AnthropicThinking { signature, .. } if signature == "sig-b")
+        });
+        let request = request("sys", tools.clone(), &messages);
+        assert_eq!(
+            suppressed_signatures(&request, &messages),
+            vec!["sig-c".to_string()]
+        );
+        assert_eq!(
+            blocks_to_suppress(&request)[0].validity,
+            ReplayValidity::ChainBroken
+        );
+        assert_plan_leaves_only_valid_blocks("sys", tools, &messages);
+    }
+
+    #[test]
+    fn a_suppressed_leading_run_keeps_the_later_blocks() {
+        let tools = vec![tool("bash"), tool("read")];
+        let mut messages = conversation();
+        messages[1]
+            .content
+            .retain(|block| !matches!(block, ContentBlock::AnthropicThinking { .. }));
+        assert!(blocks_to_suppress(&request("sys", tools, &messages)).is_empty());
+    }
+
+    #[test]
+    fn a_changed_system_prompt_or_tool_set_suppresses_every_block() {
+        let messages = conversation();
+        let system_changed = request("sys (skill)", vec![tool("bash"), tool("read")], &messages);
+        assert_eq!(
+            suppressed_signatures(&system_changed, &messages),
+            vec!["sig-a", "sig-b", "sig-c"]
+        );
+        let tools_changed = request("sys", vec![tool("bash")], &messages);
+        assert_eq!(blocks_to_suppress(&tools_changed).len(), 3);
+        assert_plan_leaves_only_valid_blocks(
+            "sys (skill)",
+            vec![tool("bash"), tool("read")],
+            &messages,
+        );
+    }
+
+    #[test]
+    fn an_invalid_first_block_is_suppressed_and_a_valid_later_block_is_kept() {
+        // The first turn's block no longer matches (an edit inside the first
+        // user message would do it, but so does a block recorded under another
+        // digest); suppressing it leaves the next turn's block first, and its
+        // own prefix still matches.
+        let tools = vec![tool("bash"), tool("read")];
+        let mut messages = conversation();
+        if let ContentBlock::AnthropicThinking {
+            binding: Some(binding),
+            ..
+        } = &mut messages[1].content[0]
+        {
+            binding.prefix_digest = format!("{PREFIX_DIGEST_SCHEME}:other");
+        }
+        let request = request("sys", tools.clone(), &messages);
+        assert_eq!(suppressed_signatures(&request, &messages), vec!["sig-a"]);
+        assert_plan_leaves_only_valid_blocks("sys", tools, &messages);
+    }
+
+    #[test]
+    fn stored_and_wire_fingerprints_agree_and_skip_unbound_thinking() {
+        let messages = conversation();
+        let request = request("sys", vec![tool("bash"), tool("read")], &messages);
+        let wire: Vec<String> = request
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(thinking_block_fingerprint)
+            .collect();
+        let stored: Vec<String> = messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(stored_thinking_fingerprint)
+            .collect();
+        assert_eq!(wire, stored);
+        assert_eq!(
+            stored_thinking_fingerprint(&ContentBlock::AnthropicThinking {
+                thinking: "old".to_string(),
+                signature: "sig".to_string(),
+                binding: None,
+            }),
+            None
         );
     }
 

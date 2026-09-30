@@ -3199,7 +3199,10 @@ fn redact_context_view(context_view: &mut StoredContextViewState) {
                     *value = crate::message::redact_secrets(value);
                 }
             }
-            jcode_session_types::StoredContextAuthorization::LegacyMigration { .. } => {}
+            // Managed invalidations carry only transaction IDs and code-owned
+            // transition labels, never source text.
+            jcode_session_types::StoredContextAuthorization::LegacyMigration { .. }
+            | jcode_session_types::StoredContextAuthorization::ReasoningInvalidation => {}
         }
         for status in &mut transaction.status_events {
             if let Some(reason) = status.reason.as_mut() {

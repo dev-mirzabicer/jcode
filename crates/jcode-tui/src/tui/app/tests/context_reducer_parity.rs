@@ -57,6 +57,7 @@ fn parity_identity() -> crate::protocol::ContextDraftIdentity {
 
 fn parity_draft() -> crate::protocol::ContextDraft {
     crate::protocol::ContextDraft {
+        request_prefix_digest: None,
         identity: parity_identity(),
         authorization: jcode_session_types::StoredContextAuthorization::Manual { initiated_by: None },
         active_agent_profile_message_id: None,
@@ -65,6 +66,7 @@ fn parity_draft() -> crate::protocol::ContextDraft {
         distillation_proposals: Vec::new(),
         ineligible_distillations: Vec::new(),
         preview: crate::protocol::ContextDraftPreview {
+            reasoning_invalidation: None,
             raw_stored_message_count: 0,
             current_context_revision: 4,
             proposed_context_revision: 5,
@@ -143,6 +145,7 @@ fn parity_transaction_result(
     status: jcode_session_types::StoredContextTransactionStatusKind,
 ) -> crate::protocol::ContextTransactionResult {
     crate::protocol::ContextTransactionResult {
+        reasoning_invalidation: None,
         transaction: parity_transaction_summary(),
         revision: 5,
         status,

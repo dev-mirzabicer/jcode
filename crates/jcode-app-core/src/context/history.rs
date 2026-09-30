@@ -1,13 +1,13 @@
 use crate::agent::Agent;
 use crate::context::commit::{
-    ContextSessionTransition, prepare_context_transition, prepare_context_transition_for_session,
+    ContextSessionTransition, LocalContextRoute, prepare_context_transition,
+    prepare_context_transition_for_session,
 };
 use crate::context::draft::ContextTransactionService;
 use crate::protocol::{
     ContextOperationCounts, ContextServiceError, ContextTransactionResult,
     ContextTransactionSummary,
 };
-use crate::provider::Provider;
 use crate::session::Session;
 use chrono::Utc;
 use jcode_session_types::{
@@ -73,7 +73,7 @@ impl ContextTransactionService {
             .map_err(|_| ContextServiceError::SessionBusy)?;
         let _runtime = super::admit_mutation(Some(agent.session_id().into()))?;
         let previous_state = agent.context_view_state().clone();
-        let transaction_index = transaction_index(&previous_state, transaction_id)?;
+        let transaction_index = user_transaction_index(&previous_state, transaction_id)?;
         if !previous_state.transactions[transaction_index].is_active() {
             return Err(ContextServiceError::TransactionNotActive(
                 transaction_id.to_string(),
@@ -117,7 +117,7 @@ impl ContextTransactionService {
             .map_err(|_| ContextServiceError::SessionBusy)?;
         let _runtime = super::admit_mutation(Some(agent.session_id().into()))?;
         let previous_state = agent.context_view_state().clone();
-        let transaction_index = transaction_index(&previous_state, transaction_id)?;
+        let transaction_index = user_transaction_index(&previous_state, transaction_id)?;
         if previous_state.transactions[transaction_index].is_active() {
             return Err(ContextServiceError::TransactionAlreadyActive(
                 transaction_id.to_string(),
@@ -150,53 +150,27 @@ impl ContextTransactionService {
     pub fn revert_transaction_in_session(
         &self,
         session: &mut Session,
-        provider: &dyn Provider,
-        route: &str,
-        estimated_total_request_tokens_before: Option<usize>,
+        local: LocalContextRoute<'_>,
         transaction_id: &str,
         processing: bool,
     ) -> Result<ContextSessionTransition, ContextServiceError> {
-        self.transition_transaction_in_session(
-            session,
-            provider,
-            route,
-            estimated_total_request_tokens_before,
-            transaction_id,
-            processing,
-            false,
-        )
+        self.transition_transaction_in_session(session, local, transaction_id, processing, false)
     }
 
     pub fn reapply_transaction_in_session(
         &self,
         session: &mut Session,
-        provider: &dyn Provider,
-        route: &str,
-        estimated_total_request_tokens_before: Option<usize>,
+        local: LocalContextRoute<'_>,
         transaction_id: &str,
         processing: bool,
     ) -> Result<ContextSessionTransition, ContextServiceError> {
-        self.transition_transaction_in_session(
-            session,
-            provider,
-            route,
-            estimated_total_request_tokens_before,
-            transaction_id,
-            processing,
-            true,
-        )
+        self.transition_transaction_in_session(session, local, transaction_id, processing, true)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "shared local transition helper keeps apply semantics exact without duplication"
-    )]
     fn transition_transaction_in_session(
         &self,
         session: &mut Session,
-        provider: &dyn Provider,
-        route: &str,
-        estimated_total_request_tokens_before: Option<usize>,
+        local: LocalContextRoute<'_>,
         transaction_id: &str,
         processing: bool,
         reapply: bool,
@@ -207,7 +181,7 @@ impl ContextTransactionService {
         let _runtime = super::admit_mutation(Some(session.id.clone()))?;
         let previous_state = session.context_view.clone();
         let previous_provider_session_id = session.provider_session_id.clone();
-        let transaction_index = transaction_index(&previous_state, transaction_id)?;
+        let transaction_index = user_transaction_index(&previous_state, transaction_id)?;
         let active = previous_state.transactions[transaction_index].is_active();
         if reapply && active {
             return Err(ContextServiceError::TransactionAlreadyActive(
@@ -242,14 +216,15 @@ impl ContextTransactionService {
                 }),
             });
         let prepared = prepare_context_transition_for_session(
-            provider,
+            local.provider,
             &session.messages,
             &previous_state,
             proposed_state,
             transaction_index,
             reapply,
-            route,
-            estimated_total_request_tokens_before,
+            local.route,
+            local.estimated_total_request_tokens_before,
+            local.prefix,
         )?;
         session.context_view = prepared.state;
         session.provider_session_id = None;
@@ -265,15 +240,21 @@ impl ContextTransactionService {
     }
 }
 
-fn transaction_index(
+/// A transaction a person may revert or reapply. jcode-managed reasoning
+/// invalidations follow the transactions that cause them instead.
+fn user_transaction_index(
     state: &StoredContextViewState,
     transaction_id: &str,
 ) -> Result<usize, ContextServiceError> {
-    state
+    let index = state
         .transactions
         .iter()
         .position(|transaction| transaction.id == transaction_id)
-        .ok_or_else(|| ContextServiceError::TransactionNotFound(transaction_id.to_string()))
+        .ok_or_else(|| ContextServiceError::TransactionNotFound(transaction_id.to_string()))?;
+    if state.transactions[index].is_reasoning_invalidation() {
+        return Err(super::commit::managed_invalidation_is_not_user_controlled());
+    }
+    Ok(index)
 }
 
 #[cfg(test)]

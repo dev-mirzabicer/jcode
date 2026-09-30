@@ -61,14 +61,14 @@ pub use jcode_provider_core::{
     ContextProjectionValidationReport, ContextProjectionValidationStage,
     ContextProjectionValidationStatus, ContextProviderFamily, ContextProviderValidationIdentity,
     ContextReasoningBlockKind, ContextRequestBuilderValidation, CredentialMode,
-    DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT, ModelCapabilities,
-    ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod, NativeToolResult,
-    NativeToolResultSender, PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate,
-    RouteCostConfidence, RouteCostSource, RouteSelection, RuntimeKey,
-    context_projection_validation_report, dedupe_model_routes, effective_context_tokens_from_usage,
-    explicit_model_provider_prefix, fresh_transport_client, inferred_reasoning_efforts,
-    model_name_for_provider, normalize_copilot_model_name, provider_from_model_key,
-    shared_http_client, summarize_model_catalog_refresh,
+    DEFAULT_CONTEXT_LIMIT, EventStream, InvalidReplayedReasoning, JCODE_USER_AGENT,
+    ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod,
+    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, ReplayedReasoningInvalidity,
+    RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteSelection,
+    RuntimeKey, context_projection_validation_report, dedupe_model_routes,
+    effective_context_tokens_from_usage, explicit_model_provider_prefix, fresh_transport_client,
+    inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
+    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -2328,6 +2328,16 @@ impl Provider for MultiProvider {
             .runtime_for(self.active_provider())?
             .reasoning_replay_kind();
         top_level_replay_kind(runtime_kind, TOP_LEVEL_ANTHROPIC_THINKING_REPLAY)
+    }
+
+    fn replayed_reasoning_invalidations(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Option<Vec<jcode_provider_core::InvalidReplayedReasoning>> {
+        self.runtime_for(self.active_provider())?
+            .replayed_reasoning_invalidations(messages, tools, system)
     }
 
     fn validate_projected_context(

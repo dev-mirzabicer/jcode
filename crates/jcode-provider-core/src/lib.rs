@@ -40,7 +40,7 @@ pub use context_validation::{
     ContextProjectionValidationOperation, ContextProjectionValidationReport,
     ContextProjectionValidationStage, ContextProjectionValidationStatus, ContextProviderFamily,
     ContextProviderValidationIdentity, ContextReasoningBlockKind, ContextRequestBuilderValidation,
-    context_projection_validation_report,
+    InvalidReplayedReasoning, ReplayedReasoningInvalidity, context_projection_validation_report,
 };
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
@@ -445,6 +445,24 @@ pub trait Provider: Send + Sync {
     /// receive them reports their kind. Orchestrators delegate to the runtime
     /// they would dispatch to.
     fn reasoning_replay_kind(&self) -> Option<ContextReasoningBlockKind> {
+        None
+    }
+
+    /// The replayed reasoning blocks in `messages` that this runtime's next
+    /// request, carrying exactly `system` and `tools`, would have to drop
+    /// because its model binds replayed reasoning to the request prefix
+    /// (INT-01 D11). A returned block is invalid in itself or follows one that
+    /// is; suppressing all of them leaves every remaining block valid.
+    ///
+    /// `None` means this route or model does not bind reasoning to its
+    /// prefix, so no edit invalidates replayed reasoning. Orchestrators
+    /// delegate to the runtime they would dispatch to.
+    fn replayed_reasoning_invalidations(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+    ) -> Option<Vec<InvalidReplayedReasoning>> {
         None
     }
 

@@ -908,6 +908,7 @@ impl Agent {
             logging::info("Tool list unlocked — next request will pick up current tools");
             self.locked_tools = None;
             self.cache_tracker.reset();
+            self.note_prefix_transition("tool set unlocked");
         }
         // Allow the late-MCP-registration recheck to fire once for the next
         // snapshot (e.g. after an explicit `mcp` reload).
@@ -1008,7 +1009,7 @@ impl Agent {
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
                 self.cache_tracker.reset();
-                crate::cache_invalidation::record(
+                self.record_prefix_transition(
                     "Swarm globally disabled",
                     "removed unavailable tool from locked definitions",
                 );
@@ -1054,6 +1055,7 @@ impl Agent {
                 self.mcp_late_register_resolved = true;
                 self.locked_tools = None;
                 self.cache_tracker.reset();
+                self.note_prefix_transition("late MCP tool registration");
             } else {
                 // No MCP tools have appeared. They may still be connecting, so
                 // leave the guard unset and re-check on the next turn. Once they
@@ -1072,6 +1074,34 @@ impl Agent {
             tools.len()
         ));
         self.locked_tools = Some(tools.clone());
+        Ok(tools)
+    }
+
+    /// The tool definitions the next request carries, read without waiting:
+    /// the locked set, or the set the next request would lock from the
+    /// registry now. A self-dev session registers its self-dev tools at its
+    /// first request, and a late MCP registration can still trigger the
+    /// one-shot rebuild; the request-time reasoning check covers both.
+    pub(crate) fn next_request_tool_definitions(
+        &self,
+    ) -> Result<Vec<ToolDefinition>, crate::protocol::ContextServiceError> {
+        if let Some(locked) = &self.locked_tools {
+            let mut tools = locked.clone();
+            tools.retain(|tool| crate::tool::tool_is_globally_available(&tool.name));
+            return Ok(tools);
+        }
+        let mut tools = self
+            .registry
+            .try_definitions(self.allowed_tools.as_ref())
+            .map_err(|reason| crate::protocol::ContextServiceError::Runtime(reason.to_string()))?;
+        if !self.disabled_tools.is_empty() {
+            tools.retain(|tool| {
+                !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
+            });
+        }
+        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        crate::tool::instruction_guidance::preview(&self.session, &mut tools)
+            .map_err(|error| crate::protocol::ContextServiceError::Runtime(error.to_string()))?;
         Ok(tools)
     }
 
@@ -1129,7 +1159,7 @@ impl Agent {
             self.provider
                 .invalidate_context_continuation("managed tool guidance activation");
             self.cache_tracker.reset();
-            crate::cache_invalidation::record(
+            self.record_prefix_transition(
                 "managed tool guidance activation",
                 "captured session-owned tool instructions",
             );

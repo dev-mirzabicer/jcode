@@ -84,6 +84,11 @@ impl Agent {
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
             }
+            let split_prompt = self.build_system_prompt_split()?;
+            // Replayed reasoning that no longer matches this request's prefix
+            // is suppressed, persisted, before the messages are projected.
+            let reasoning_notice =
+                self.reconcile_replayed_reasoning(&split_prompt.static_part, &tools)?;
             let messages = self.messages_for_provider()?;
 
             let messages: std::sync::Arc<[Message]> = messages.into();
@@ -94,7 +99,6 @@ impl Agent {
                 self.session.id.clone(),
                 pending_memory,
             );
-            let split_prompt = self.build_system_prompt_split()?;
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
             // Build the complete ephemeral request before recording cache state,
@@ -174,7 +178,7 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let request_payload = crate::context::request_payload_pressure(send_messages);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
-            self.last_status_detail = None;
+            self.last_status_detail = reasoning_notice;
             let provider_ingress =
                 crate::execution::ProviderCaptureScope::new(self.session.id.clone());
             let mut stream = match self

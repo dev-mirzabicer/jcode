@@ -431,6 +431,41 @@ pub struct ContextDraftPreview {
     pub operation_previews: Vec<ContextOperationPreview>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+    /// Replayed reasoning this change would invalidate or restore. Present
+    /// only when the route's model binds replayed reasoning to its prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_invalidation: Option<ContextReasoningInvalidationSummary>,
+}
+
+/// How a context change affects replayed reasoning that is bound to its
+/// request prefix (Claude preserved thinking, INT-01 WP-04). Suppressed
+/// blocks are held by one jcode-managed reasoning-invalidation transaction.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextReasoningInvalidationSummary {
+    /// Blocks this change suppresses because it changed the history before
+    /// them (or broke the chain they belong to).
+    pub invalidated_by_change: usize,
+    pub invalidated_by_change_tokens: usize,
+    /// Blocks newly suppressed for another recorded cause: the system
+    /// prompt, tool set or credential route changed since they were produced,
+    /// or an earlier transition invalidated them.
+    pub invalidated_other: usize,
+    pub invalidated_other_tokens: usize,
+    /// Previously suppressed blocks that match again and are replayed again.
+    pub restored: usize,
+    pub restored_tokens: usize,
+    /// Blocks suppressed as invalid after the change, in total.
+    pub active: usize,
+    /// The managed transaction holding them after the change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+}
+
+impl ContextReasoningInvalidationSummary {
+    /// Whether the change suppresses or restores anything.
+    pub fn changes_anything(&self) -> bool {
+        self.invalidated_by_change > 0 || self.invalidated_other > 0 || self.restored > 0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -504,6 +539,11 @@ pub struct ContextDraft {
     pub preview: ContextDraftPreview,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub curator_usage: Vec<StoredContextCuratorUsage>,
+    /// Fingerprint of the system prompt and tool set the review computed its
+    /// reasoning invalidation under. Apply refuses a draft whose fingerprint
+    /// no longer matches, because the reviewed set would differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_prefix_digest: Option<u64>,
 }
 
 impl ContextDraft {
@@ -664,6 +704,10 @@ pub struct ContextTransactionResult {
     pub status: StoredContextTransactionStatusKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Replayed reasoning the transition suppressed or restored, when it
+    /// changed anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_invalidation: Option<ContextReasoningInvalidationSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

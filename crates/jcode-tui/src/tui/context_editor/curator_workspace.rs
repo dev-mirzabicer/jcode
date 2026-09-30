@@ -3658,10 +3658,21 @@ fn required_operation_detail_lines(operation: &StoredContextOperation) -> Vec<Li
                 StoredReasoningSelection::MessageRanges { ranges } => {
                     format!("{} manual message range(s)", ranges.len())
                 }
+                StoredReasoningSelection::Invalidated { cause } => {
+                    super::reasoning_invalidation_cause_label(cause)
+                }
+            };
+            let heading = if matches!(
+                reasoning.selection,
+                StoredReasoningSelection::Invalidated { .. }
+            ) {
+                "Invalidated Claude thinking (managed by jcode)"
+            } else {
+                "Required reasoning suppression"
             };
             let mut lines = vec![
                 Line::from(Span::styled(
-                    "Required reasoning suppression",
+                    heading,
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),

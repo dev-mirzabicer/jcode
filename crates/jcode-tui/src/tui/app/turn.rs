@@ -68,6 +68,24 @@ impl App {
         }
         self.partial_output_checkpointed = false;
         self.partial_output_persistence_error = None;
+        let mut tools = self.registry.definitions(None).await;
+        crate::tool::instruction_guidance::preview(&self.session, &mut tools)
+            .map_err(|error| error.to_string())?;
+        // Capture occurrence-rendered instructions once. Accounting and the
+        // actual request must not read different files during the same send.
+        let split_prompt = self
+            .build_system_prompt_split()
+            .map_err(|error| error.to_string())?;
+        // Replayed reasoning that no longer matches this request's prefix is
+        // suppressed, persisted, before the messages are projected.
+        match self.reconcile_local_replayed_reasoning(&split_prompt.static_part, &tools) {
+            Ok(Some(notice)) => self.set_status_notice(notice),
+            Ok(None) => {}
+            Err(error) => {
+                self.rollback_pending_local_turn_before_output();
+                return Err(error);
+            }
+        }
         let workspace =
             crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
         let mut scope_candidate = workspace
@@ -86,17 +104,9 @@ impl App {
             pending.request_payload_pressure =
                 Some(crate::context::request_payload_pressure(&provider_messages));
         }
-        let mut tools = self.registry.definitions(None).await;
-        crate::tool::instruction_guidance::preview(&self.session, &mut tools)
-            .map_err(|error| error.to_string())?;
         let pending_memory = self.build_memory_prompt_nonblocking(&provider_messages);
         let memory_pending =
             crate::memory::PendingMemoryReservation::new(self.session.id.clone(), pending_memory);
-        // Capture occurrence-rendered instructions once. Accounting and the
-        // actual request must not read different files during the same send.
-        let split_prompt = self
-            .build_system_prompt_split()
-            .map_err(|error| error.to_string())?;
         // Dormant memory keeps its trailing request-only message, exactly as
         // the agent loops send it (Phase 2, INT-01 D9).
         let memory_message = memory_pending
@@ -313,7 +323,7 @@ impl App {
                 invocation.session_id = None;
                 self.provider
                     .invalidate_context_continuation("managed swarm routing migration");
-                crate::cache_invalidation::record(
+                self.record_local_prefix_transition(
                     "managed swarm routing migration",
                     "captured session-owned tool instructions",
                 );

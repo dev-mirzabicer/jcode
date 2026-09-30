@@ -139,11 +139,13 @@ fn context_transaction_result(
         revision: 5,
         status,
         warnings: Vec::new(),
+        reasoning_invalidation: None,
     }
 }
 
 fn context_draft() -> ContextDraft {
     ContextDraft {
+        request_prefix_digest: None,
         identity: context_identity(),
         authorization: jcode_session_types::StoredContextAuthorization::Manual {
             initiated_by: None,
@@ -162,6 +164,7 @@ fn context_draft() -> ContextDraft {
             formatter_placeholder_count: 0,
             operation_previews: Vec::new(),
             notices: Vec::new(),
+            reasoning_invalidation: None,
         },
         curator_usage: Vec::new(),
     }
@@ -839,4 +842,40 @@ fn pending_input_metadata_matches_exact_unicode_content_and_images() {
         serde_json::from_value(legacy).expect("legacy metadata remains decodable");
     assert!(legacy.content_sha256.is_empty());
     assert!(!legacy.matches(73, content, 2));
+}
+
+#[test]
+fn reasoning_invalidation_fields_round_trip_and_default_on_older_wire_forms() {
+    let mut result = context_transaction_result(
+        jcode_session_types::StoredContextTransactionStatusKind::Reverted,
+    );
+    result.reasoning_invalidation = Some(ContextReasoningInvalidationSummary {
+        invalidated_by_change: 1,
+        invalidated_by_change_tokens: 40,
+        invalidated_other: 0,
+        invalidated_other_tokens: 0,
+        restored: 2,
+        restored_tokens: 90,
+        active: 1,
+        transaction_id: Some("reasoning-invalidation-1".to_string()),
+    });
+    let encoded = serde_json::to_value(&result).expect("encode");
+    let decoded: ContextTransactionResult = serde_json::from_value(encoded).expect("decode");
+    assert_eq!(decoded, result);
+    assert!(decoded.reasoning_invalidation.unwrap().changes_anything());
+
+    let mut draft = context_draft();
+    let mut older = serde_json::to_value(&draft).expect("encode draft");
+    older.as_object_mut().unwrap().remove("request_prefix_digest");
+    older["preview"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reasoning_invalidation");
+    let decoded: ContextDraft = serde_json::from_value(older).expect("older draft decodes");
+    assert_eq!(decoded.request_prefix_digest, None);
+    assert_eq!(decoded.preview.reasoning_invalidation, None);
+    draft.request_prefix_digest = Some(7);
+    let decoded: ContextDraft =
+        serde_json::from_value(serde_json::to_value(&draft).unwrap()).unwrap();
+    assert_eq!(decoded.request_prefix_digest, Some(7));
 }

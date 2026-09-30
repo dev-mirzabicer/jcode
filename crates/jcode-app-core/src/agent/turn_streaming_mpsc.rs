@@ -128,9 +128,17 @@ impl Agent {
             self.apply_primary_location_changes().await?;
             self.require_native_scope_provider()?;
             self.session.require_published_primary()?;
-            let messages = self.messages_for_provider()?;
-
             let tools = self.tool_definitions().await?;
+            // Use split prompt for better caching - static content cached, dynamic not
+            let split_prompt = self.build_system_prompt_split()?;
+            // Replayed reasoning that no longer matches this request's prefix
+            // is suppressed, persisted, before the messages are projected.
+            if let Some(detail) =
+                self.reconcile_replayed_reasoning(&split_prompt.static_part, &tools)?
+            {
+                let _ = event_tx.send(ServerEvent::StatusDetail { detail });
+            }
+            let messages = self.messages_for_provider()?;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let pending_memory = self.build_memory_prompt_nonblocking_shared(
@@ -146,8 +154,6 @@ impl Agent {
                 self.session.id.clone(),
                 pending_memory,
             );
-            // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split()?;
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
             let mut cache_signature_messages =

@@ -714,7 +714,8 @@ fn validate_draft_request(request: &ContextDraftRequest) -> Result<(), ContextSe
             }
         }
         StoredContextAuthorization::UnattendedEmergency { .. }
-        | StoredContextAuthorization::LegacyMigration { .. } => {
+        | StoredContextAuthorization::LegacyMigration { .. }
+        | StoredContextAuthorization::ReasoningInvalidation => {
             return Err(ContextServiceError::InvalidSelection(
                 "client-prepared context drafts must use manual authorization".to_string(),
             ));

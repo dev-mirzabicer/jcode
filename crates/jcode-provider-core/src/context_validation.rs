@@ -53,6 +53,28 @@ impl ContextReasoningBlockKind {
     }
 }
 
+/// Why a replayed reasoning block would not be accepted with the request
+/// prefix it is about to be sent under (Anthropic preserved thinking).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayedReasoningInvalidity {
+    /// Something before the block (system prompt, tool set or an earlier
+    /// message) differs from the request that produced it.
+    PrefixChanged,
+    /// The block no longer follows the block it was chained to, because a
+    /// block before it is not replayed (only a leading run may be removed).
+    ChainBroken,
+}
+
+/// One replayed reasoning block a request would have to drop. The indices
+/// refer to the messages the caller passed and to each message's `content`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidReplayedReasoning {
+    pub message_index: usize,
+    pub block_index: usize,
+    pub invalidity: ReplayedReasoningInvalidity,
+}
+
 /// One provider-neutral operation in a projected-history validation request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

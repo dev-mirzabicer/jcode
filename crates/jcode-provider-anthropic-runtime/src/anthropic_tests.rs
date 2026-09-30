@@ -2727,3 +2727,181 @@ fn several_signed_blocks_interleaved_with_text_and_a_redacted_block_replay_in_or
     assert!(bindings[1].predecessor.is_some() && bindings[2].predecessor.is_some());
     assert_ne!(bindings[1].predecessor, bindings[2].predecessor);
 }
+
+/// Bind one produced assistant turn the way the runtime binds it: to the
+/// request `build_api_request` builds for the history before it.
+fn produced_turn_for(
+    provider: &AnthropicProvider,
+    history: &[Message],
+    tools: &[ToolDefinition],
+    is_oauth: bool,
+    signature: &str,
+    tool_id: &str,
+) -> Message {
+    let model = provider.model();
+    let request = provider.build_api_request(
+        &model,
+        history,
+        tools,
+        build_system_param("probe system", is_oauth),
+        is_oauth,
+    );
+    let binding = jcode_provider_anthropic::binding::analyze_request(&request).binding;
+    Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::AnthropicThinking {
+                thinking: format!("thought {signature}"),
+                signature: signature.to_string(),
+                binding: Some(AnthropicThinkingBinding {
+                    model: model.clone(),
+                    prefix_digest: binding.prefix_digest,
+                    predecessor: binding.last_thinking,
+                }),
+            },
+            ContentBlock::ToolUse {
+                id: tool_id.to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "true"}),
+                thought_signature: None,
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }
+}
+
+fn probe_tools() -> Vec<ToolDefinition> {
+    vec![ToolDefinition {
+        name: "bash".to_string(),
+        description: "Run a command".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"]
+        }),
+    }]
+}
+
+/// Three tool rounds on a prefix-bound model, each turn bound to the exact
+/// production request that produced it.
+fn bound_history(provider: &AnthropicProvider, is_oauth: bool) -> Vec<Message> {
+    let tools = probe_tools();
+    let mut history = vec![Message::user("task")];
+    for (signature, tool_id) in [("sig-1", "t1"), ("sig-2", "t2"), ("sig-3", "t3")] {
+        let turn = produced_turn_for(provider, &history, &tools, is_oauth, signature, tool_id);
+        history.push(turn);
+        history.push(Message::tool_result(tool_id, "ok", false));
+    }
+    history
+}
+
+#[test]
+fn replayed_reasoning_invalidations_use_the_production_request_prefix() {
+    use jcode_provider_core::{InvalidReplayedReasoning, ReplayedReasoningInvalidity};
+    let provider = AnthropicProvider::new();
+    provider.set_model("claude-sonnet-5-5").unwrap();
+    provider
+        .last_request_route
+        .store(ROUTE_API_KEY, Ordering::Relaxed);
+    let tools = probe_tools();
+    let history = bound_history(&provider, false);
+
+    assert_eq!(
+        provider.replayed_reasoning_invalidations(&history, &tools, "probe system"),
+        Some(Vec::new()),
+        "an append-only history keeps every block"
+    );
+
+    // A summary of the first round changes the history before the second and
+    // third turns; the first turn's block precedes the edit.
+    let mut summarized = history.clone();
+    summarized[2] = Message::tool_result("t1", "ok (summarized)", false);
+    assert_eq!(
+        provider.replayed_reasoning_invalidations(&summarized, &tools, "probe system"),
+        Some(vec![
+            InvalidReplayedReasoning {
+                message_index: 3,
+                block_index: 0,
+                invalidity: ReplayedReasoningInvalidity::PrefixChanged,
+            },
+            InvalidReplayedReasoning {
+                message_index: 5,
+                block_index: 0,
+                invalidity: ReplayedReasoningInvalidity::PrefixChanged,
+            },
+        ])
+    );
+
+    // Suppressing the middle block breaks the third block's chain.
+    let mut middle_removed = history.clone();
+    middle_removed[3]
+        .content
+        .retain(|block| !matches!(block, ContentBlock::AnthropicThinking { .. }));
+    assert_eq!(
+        provider.replayed_reasoning_invalidations(&middle_removed, &tools, "probe system"),
+        Some(vec![InvalidReplayedReasoning {
+            message_index: 5,
+            block_index: 0,
+            invalidity: ReplayedReasoningInvalidity::ChainBroken,
+        }])
+    );
+
+    // A changed static prompt or tool set invalidates every block.
+    assert_eq!(
+        provider
+            .replayed_reasoning_invalidations(&history, &tools, "probe system + skill")
+            .map(|blocks| blocks.len()),
+        Some(3)
+    );
+    assert_eq!(
+        provider
+            .replayed_reasoning_invalidations(&history, &[], "probe system")
+            .map(|blocks| blocks.len()),
+        Some(3)
+    );
+}
+
+#[test]
+fn replayed_reasoning_invalidations_follow_the_credential_route() {
+    let provider = AnthropicProvider::new();
+    provider.set_model("claude-opus-5-5").unwrap();
+    let tools = probe_tools();
+    provider
+        .last_request_route
+        .store(ROUTE_OAUTH, Ordering::Relaxed);
+    let history = bound_history(&provider, true);
+    assert_eq!(
+        provider.replayed_reasoning_invalidations(&history, &tools, "probe system"),
+        Some(Vec::new())
+    );
+    // The OAuth identity blocks are part of the bound prefix, so the same
+    // history on the API-key route matches nothing.
+    provider
+        .last_request_route
+        .store(ROUTE_API_KEY, Ordering::Relaxed);
+    assert_eq!(
+        provider
+            .replayed_reasoning_invalidations(&history, &tools, "probe system")
+            .map(|blocks| blocks.len()),
+        Some(3)
+    );
+}
+
+#[test]
+fn unbound_models_report_no_replayed_reasoning_invalidation() {
+    let provider = AnthropicProvider::new();
+    provider.set_model("claude-sonnet-5-5").unwrap();
+    provider
+        .last_request_route
+        .store(ROUTE_API_KEY, Ordering::Relaxed);
+    let tools = probe_tools();
+    let mut history = bound_history(&provider, false);
+    history[2] = Message::tool_result("t1", "edited", false);
+    provider.set_model("claude-opus-5").unwrap();
+    assert_eq!(
+        provider.replayed_reasoning_invalidations(&history, &tools, "probe system"),
+        None,
+        "Opus 5 does not bind thinking to its prefix (D11)"
+    );
+}

@@ -3779,7 +3779,7 @@ impl App {
                         return;
                     }
                     self.active_skill = Some(skill_name.clone());
-                    crate::cache_invalidation::record(
+                    self.record_local_prefix_transition(
                         "skill activation",
                         format!(
                             "activated skill {} from {}",

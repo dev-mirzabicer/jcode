@@ -5,6 +5,9 @@ mod draft;
 mod history;
 pub mod preflight;
 pub mod provider_validation;
+mod reasoning_invalidation;
+#[cfg(test)]
+pub(crate) mod reasoning_invalidation_tests;
 mod snapshot;
 
 pub use crate::protocol::{
@@ -23,6 +26,10 @@ pub use curator::*;
 pub use draft::*;
 pub use history::*;
 pub use preflight::*;
+pub use reasoning_invalidation::{
+    ContextRequestPrefix, ReasoningInvalidationOutcome, RequestPrefixSource,
+    describe_reasoning_invalidation, reasoning_reconciliation_needed, reconcile_before_request,
+};
 pub use snapshot::*;
 
 pub(crate) fn admit_mutation(

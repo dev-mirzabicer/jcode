@@ -334,6 +334,7 @@ impl Agent {
             self.context_route_identity(),
             self.provider.model_routes(),
             Some(report.projected_input_tokens),
+            self,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let draft_id = service

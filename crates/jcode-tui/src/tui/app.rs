@@ -89,6 +89,7 @@ mod onboarding_repair;
 mod onboarding_sim;
 mod productivity;
 mod prompt_history;
+mod reasoning_invalidation;
 mod remote;
 mod remote_notifications;
 mod replay;
@@ -925,6 +926,9 @@ pub struct App {
     token_accounting: TokenAccounting,
     // KV cache baseline tracking + per-turn miss attribution.
     kv_cache: KvCacheState,
+    // Labels of recorded prompt or tool-set transitions since the previous
+    // local request: the cause of replayed reasoning they invalidate.
+    pending_prefix_transitions: Vec<String>,
     // Accumulated session cost + cached per-model pricing.
     cost: CostState,
     // Context limit and authoritative request-pressure state.

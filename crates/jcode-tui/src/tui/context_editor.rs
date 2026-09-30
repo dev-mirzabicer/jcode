@@ -728,7 +728,7 @@ impl ContextEditor {
                     if let Some(index) = self
                         .history
                         .iter()
-                        .position(|transaction| transaction.active)
+                        .position(|transaction| transaction.active && user_controlled(transaction))
                     {
                         self.history_cursor = index;
                         self.modal = Some(ContextEditorModal::RevertConfirmation);
@@ -758,6 +758,16 @@ impl ContextEditor {
                     "{action} transaction {} at context revision {}.",
                     outcome.result.transaction.id, outcome.result.revision
                 );
+                if let Some(description) = outcome
+                    .result
+                    .reasoning_invalidation
+                    .as_ref()
+                    .and_then(crate::context::describe_reasoning_invalidation)
+                {
+                    status.push(' ');
+                    status.push_str(&description);
+                    status.push('.');
+                }
                 if !outcome.result.warnings.is_empty() {
                     status.push_str(" Warnings: ");
                     status.push_str(&outcome.result.warnings.join(" | "));
@@ -1782,6 +1792,11 @@ impl ContextEditor {
             KeyCode::Char('r') => {
                 if self
                     .current_transaction()
+                    .is_some_and(|transaction| !user_controlled(&transaction))
+                {
+                    self.status = Some(MANAGED_TRANSACTION_NOTICE.to_string());
+                } else if self
+                    .current_transaction()
                     .is_some_and(|transaction| transaction.active)
                 {
                     self.modal = Some(ContextEditorModal::RevertConfirmation);
@@ -1790,6 +1805,11 @@ impl ContextEditor {
             }
             KeyCode::Char('p') => {
                 if self
+                    .current_transaction()
+                    .is_some_and(|transaction| !user_controlled(&transaction))
+                {
+                    self.status = Some(MANAGED_TRANSACTION_NOTICE.to_string());
+                } else if self
                     .current_transaction()
                     .is_some_and(|transaction| !transaction.active)
                 {
@@ -2398,10 +2418,10 @@ impl ContextEditor {
             }
             ContextEditorToolbarAction::Revert => self
                 .current_transaction()
-                .is_some_and(|transaction| transaction.active),
+                .is_some_and(|transaction| transaction.active && user_controlled(&transaction)),
             ContextEditorToolbarAction::Reapply => self
                 .current_transaction()
-                .is_some_and(|transaction| !transaction.active),
+                .is_some_and(|transaction| !transaction.active && user_controlled(&transaction)),
             ContextEditorToolbarAction::NextHistoryPage => self.history_next_offset.is_some(),
         }
     }
@@ -3497,6 +3517,13 @@ impl ContextEditor {
         for notice in &preview.notices {
             lines.push(Line::from(format!("Notice: {notice}")));
         }
+        if let Some(summary) = preview
+            .reasoning_invalidation
+            .as_ref()
+            .filter(|summary| summary.changes_anything())
+        {
+            push_reasoning_invalidation_lines(&mut lines, summary);
+        }
 
         for (operation_index, operation) in draft.required_operations.iter().enumerate() {
             match operation {
@@ -4186,8 +4213,20 @@ impl ContextEditor {
                 .to_string();
         };
         let preview = &selection_preview.preview;
+        let thinking = preview
+            .reasoning_invalidation
+            .as_ref()
+            .filter(|summary| summary.changes_anything())
+            .map(|summary| {
+                format!(
+                    "\nClaude thinking: {} block(s) suppressed as invalid, {} replayed again.",
+                    summary.invalidated_by_change + summary.invalidated_other,
+                    summary.restored
+                )
+            })
+            .unwrap_or_default();
         format!(
-            "Apply {} required operation(s) and {} selected distillation(s)?\nProjected provider tokens {} → {}.\nRaw stored messages remain unchanged.\n\nEnter/y confirm · n/Esc cancel",
+            "Apply {} required operation(s) and {} selected distillation(s)?\nProjected provider tokens {} → {}.{thinking}\nRaw stored messages remain unchanged.\n\nEnter/y confirm · n/Esc cancel",
             draft.required_operations.len(),
             self.selected_distillation_ids.len(),
             format_tokens(preview.economics.projected_tokens_before),
@@ -4713,7 +4752,84 @@ fn reasoning_selection_label(selection: &jcode_session_types::StoredReasoningSel
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        jcode_session_types::StoredReasoningSelection::Invalidated { cause } => format!(
+            "managed by jcode · {}",
+            reasoning_invalidation_cause_label(cause)
+        ),
     }
+}
+
+/// Why jcode suppresses a replayed Claude thinking block (INT-01 WP-04).
+pub(crate) fn reasoning_invalidation_cause_label(
+    cause: &jcode_session_types::StoredReasoningInvalidationCause,
+) -> String {
+    match cause {
+        jcode_session_types::StoredReasoningInvalidationCause::ContextTransition {
+            transaction_id,
+            transition,
+        } => format!(
+            "invalidated by the {} of context transaction {}: Claude thinking is bound to the conversation before it",
+            transition.label(),
+            short_id(transaction_id)
+        ),
+        jcode_session_types::StoredReasoningInvalidationCause::RequestPrefixChanged {
+            recorded_transitions,
+        } if recorded_transitions.is_empty() => {
+            "invalidated because the system prompt, tool set or credential route changed since it was produced"
+                .to_string()
+        }
+        jcode_session_types::StoredReasoningInvalidationCause::RequestPrefixChanged {
+            recorded_transitions,
+        } => format!(
+            "invalidated because the system prompt or tool set changed ({})",
+            recorded_transitions.join(", ")
+        ),
+    }
+}
+
+const MANAGED_TRANSACTION_NOTICE: &str = "jcode manages this Claude thinking invalidation. Revert or reapply the transaction that caused it.";
+
+/// Whether a person reverts and reapplies this transaction. jcode-managed
+/// reasoning invalidations follow the transactions that cause them.
+fn user_controlled(transaction: &ContextTransactionSummary) -> bool {
+    !matches!(
+        transaction.authorization,
+        jcode_session_types::StoredContextAuthorization::ReasoningInvalidation
+    )
+}
+
+/// The locked group a review shows for the Claude thinking it suppresses or
+/// replays again (INT-01 DESIGN §5).
+fn push_reasoning_invalidation_lines(
+    lines: &mut Vec<Line<'static>>,
+    summary: &crate::protocol::ContextReasoningInvalidationSummary,
+) {
+    lines.push(Line::from(""));
+    lines.push(Line::from("Claude thinking (locked; follows this edit)"));
+    if summary.invalidated_by_change > 0 {
+        lines.push(Line::from(format!(
+            "Invalidated by this edit: {} block(s) · {} · Claude thinking is bound to the conversation before it.",
+            summary.invalidated_by_change,
+            format_tokens(summary.invalidated_by_change_tokens)
+        )));
+    }
+    if summary.invalidated_other > 0 {
+        lines.push(Line::from(format!(
+            "Already invalid for another cause: {} block(s) · {}",
+            summary.invalidated_other,
+            format_tokens(summary.invalidated_other_tokens)
+        )));
+    }
+    if summary.restored > 0 {
+        lines.push(Line::from(format!(
+            "Match again and are replayed: {} block(s) · {}",
+            summary.restored,
+            format_tokens(summary.restored_tokens)
+        )));
+    }
+    lines.push(Line::from(
+        "These cannot be deselected; cancel the review to keep this thinking. Reverting the edit later replays what matches again.",
+    ));
 }
 
 fn replayed_reasoning_kind(kind: StoredContextBlockKind) -> bool {
@@ -4884,6 +5000,7 @@ fn transaction_status(transaction: &ContextTransactionSummary) -> &'static str {
         Some(StoredContextTransactionStatusKind::Reverted) => "reverted",
         Some(StoredContextTransactionStatusKind::Reapplied) => "reapplied",
         Some(StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit) => "invalidated",
+        Some(StoredContextTransactionStatusKind::Superseded) => "superseded",
         None => "unknown",
     }
 }
@@ -4902,6 +5019,9 @@ fn context_authorization_label(
             .unwrap_or_else(|| "unattended emergency · session authorization".to_string()),
         jcode_session_types::StoredContextAuthorization::LegacyMigration { source } => {
             format!("legacy migration · {source:?}")
+        }
+        jcode_session_types::StoredContextAuthorization::ReasoningInvalidation => {
+            "jcode · Claude thinking invalidation".to_string()
         }
     }
 }
@@ -5326,6 +5446,7 @@ mod tests {
 
     fn draft() -> ContextDraft {
         ContextDraft {
+            request_prefix_digest: None,
             identity: ContextDraftIdentity {
                 draft_id: "draft-1".to_string(),
                 session_id: "session-1".to_string(),
@@ -5357,6 +5478,7 @@ mod tests {
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),
             preview: ContextDraftPreview {
+                reasoning_invalidation: None,
                 raw_stored_message_count: 3,
                 current_context_revision: 4,
                 proposed_context_revision: 5,
@@ -7559,6 +7681,7 @@ mod tests {
                 request: kind,
                 correlation_id: correlation_id.to_string(),
                 result: ContextTransactionResult {
+                    reasoning_invalidation: None,
                     transaction: result_transaction,
                     revision: 5,
                     status: StoredContextTransactionStatusKind::Applied,
@@ -8981,5 +9104,126 @@ mod tests {
         assert!(encoded.contains("draft-1"));
         assert!(encoded.contains("transaction"));
         assert!(encoded.contains("loaded_detail_blocks"));
+    }
+
+    fn lines_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn review_shows_the_locked_claude_thinking_group_at_every_width() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor
+            .apply_debug_fixture("reasoning-invalidation-review")
+            .expect("fixture");
+        let text = lines_text(&editor.review_lines(140));
+        assert!(
+            text.contains("Claude thinking (locked; follows this edit)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Invalidated by this edit: 4 block(s)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Already invalid for another cause: 1 block(s)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Match again and are replayed: 2 block(s)"),
+            "{text}"
+        );
+        assert!(text.contains("cannot be deselected"), "{text}");
+        // The review of a change that touches no Claude thinking shows no group.
+        let mut plain = ContextEditor::new(ContextEditorOpenMode::Edit);
+        plain
+            .apply_debug_fixture("long-final-review")
+            .expect("fixture");
+        assert!(!lines_text(&plain.review_lines(140)).contains("Claude thinking"));
+        for (width, height) in [(140, 48), (72, 34)] {
+            let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+            editor
+                .apply_debug_fixture("reasoning-invalidation-review")
+                .expect("fixture");
+            render_editor(&mut editor, width, height);
+        }
+    }
+
+    #[test]
+    fn apply_confirmation_states_the_claude_thinking_consequence() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::Edit);
+        editor
+            .apply_debug_fixture("reasoning-invalidation-confirmation")
+            .expect("fixture");
+        let draft = editor.draft.clone().expect("draft");
+        editor.selection_preview = Some(ContextDraftSelectionPreview {
+            draft_id: draft.identity.draft_id.clone(),
+            selected_distillation_ids: editor.selected_distillation_ids.iter().cloned().collect(),
+            preview: draft.preview.clone(),
+        });
+        let text = editor.apply_confirmation_text();
+        assert!(
+            text.contains("Claude thinking: 5 block(s) suppressed as invalid, 2 replayed again."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_managed_invalidation_in_history_is_labeled_and_cannot_be_reverted_or_reapplied() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::History);
+        editor
+            .apply_debug_fixture("reasoning-invalidation-history")
+            .expect("fixture");
+        let rendered = render_editor_text(&mut editor, 140, 48);
+        assert!(
+            rendered.contains("jcode · Claude thinking invalidation"),
+            "{rendered}"
+        );
+        assert!(!editor.toolbar_action_enabled(ContextEditorToolbarAction::Revert));
+        assert!(!editor.toolbar_action_enabled(ContextEditorToolbarAction::Reapply));
+        for key in ['r', 'p'] {
+            let (_, action) = editor.handle_key(KeyCode::Char(key), KeyModifiers::NONE);
+            assert!(action.is_none());
+            assert_eq!(editor.modal, None, "{key}");
+            assert_eq!(editor.status.as_deref(), Some(MANAGED_TRANSACTION_NOTICE));
+        }
+        // An ordinary transaction next to it still reverts.
+        editor.history_cursor = 1;
+        assert!(editor.toolbar_action_enabled(ContextEditorToolbarAction::Revert));
+        editor.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(editor.modal, Some(ContextEditorModal::RevertConfirmation));
+    }
+
+    #[test]
+    fn a_managed_invalidation_detail_names_each_cause() {
+        let mut editor = ContextEditor::new(ContextEditorOpenMode::History);
+        editor
+            .apply_debug_fixture("reasoning-invalidation-detail")
+            .expect("fixture");
+        let text = lines_text(&editor.transaction_detail_lines(140));
+        assert!(
+            text.contains("jcode · Claude thinking invalidation"),
+            "{text}"
+        );
+        assert!(
+            text.contains("invalidated by the apply of context transaction"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "invalidated because the system prompt or tool set changed (skill activation)"
+            ),
+            "{text}"
+        );
+        render_editor(&mut editor, 72, 34);
     }
 }

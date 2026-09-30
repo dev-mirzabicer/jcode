@@ -11,6 +11,7 @@ use crate::context::curator::{
     resolve_context_curator_route, run_context_curator_plan,
 };
 use crate::context::provider_validation::require_supported_projected_messages;
+use crate::context::reasoning_invalidation::{ContextRequestPrefix, RequestPrefixSource};
 use crate::context::{
     ContextPersistence, DirectContextSessionPersistence, DirectSessionContextPersistence,
     SessionContextPersistence,
@@ -256,6 +257,14 @@ impl InstructionProtection {
     }
 }
 
+/// What a directly owned session's draft needs once its artifacts exist.
+struct LocalDraftBuild {
+    provider: Arc<dyn Provider>,
+    estimated_total_request_tokens_before: Option<usize>,
+    /// Captured only when replayed reasoning must be checked.
+    prefix: Option<ContextRequestPrefix>,
+}
+
 pub struct ContextDraftRuntimeInput {
     session_id: String,
     messages: Vec<StoredMessage>,
@@ -265,6 +274,8 @@ pub struct ContextDraftRuntimeInput {
     model_routes: Vec<ModelRoute>,
     estimated_total_request_tokens_before: Option<usize>,
     instruction_protection: InstructionProtection,
+    /// Captured only when replayed reasoning must be checked.
+    prefix: Option<ContextRequestPrefix>,
 }
 
 impl ContextDraftRuntimeInput {
@@ -274,10 +285,18 @@ impl ContextDraftRuntimeInput {
         route: String,
         model_routes: Vec<ModelRoute>,
         estimated_total_request_tokens_before: Option<usize>,
+        prefix: &dyn RequestPrefixSource,
     ) -> Result<Self, ContextServiceError> {
         session
             .validate_active_agent_profile()
             .map_err(|error| ContextServiceError::Stale(error.to_string()))?;
+        let prefix = crate::context::reasoning_reconciliation_needed(
+            provider.as_ref(),
+            &session.messages,
+            &session.context_view,
+        )
+        .then(|| prefix.request_prefix())
+        .transpose()?;
         Ok(Self {
             session_id: session.id.clone(),
             messages: session.messages.clone(),
@@ -287,6 +306,7 @@ impl ContextDraftRuntimeInput {
             model_routes,
             estimated_total_request_tokens_before,
             instruction_protection: InstructionProtection::from_session(session),
+            prefix,
         })
     }
 }
@@ -1087,8 +1107,12 @@ impl ContextTransactionService {
                         capture,
                         route,
                         plan,
-                        input.provider,
-                        input.estimated_total_request_tokens_before,
+                        LocalDraftBuild {
+                            provider: input.provider,
+                            estimated_total_request_tokens_before: input
+                                .estimated_total_request_tokens_before,
+                            prefix: input.prefix,
+                        },
                         cancellation,
                     )
                     .await;
@@ -1130,6 +1154,7 @@ impl ContextTransactionService {
         validate_capture_identity(&agent, &draft.identity)?;
         build_draft_selection_preview(
             agent.provider_handle().as_ref(),
+            &*agent,
             agent.messages(),
             agent.context_view_state(),
             agent.current_context_request_token_estimate(),
@@ -1138,35 +1163,28 @@ impl ContextTransactionService {
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "local preview revalidates every independent provider-context identity dimension"
-    )]
     pub fn preview_draft_selection_for_session(
         &self,
-        session_id: &str,
-        messages: &[StoredMessage],
-        context_view: &StoredContextViewState,
-        provider: &dyn Provider,
-        route: &str,
-        estimated_total_request_tokens_before: Option<usize>,
+        session: &Session,
+        local: super::commit::LocalContextRoute<'_>,
         draft_id: &str,
         selected_distillation_ids: Vec<String>,
     ) -> Result<ContextDraftSelectionPreview, ContextServiceError> {
-        let draft = self.ready_draft_for_session(draft_id, session_id)?;
+        let draft = self.ready_draft_for_session(draft_id, &session.id)?;
         validate_capture_identity_parts(
-            session_id,
-            messages,
-            context_view,
-            provider,
-            route,
+            &session.id,
+            &session.messages,
+            &session.context_view,
+            local.provider,
+            local.route,
             &draft.identity,
         )?;
         build_draft_selection_preview(
-            provider,
-            messages,
-            context_view,
-            estimated_total_request_tokens_before,
+            local.provider,
+            local.prefix,
+            &session.messages,
+            &session.context_view,
+            local.estimated_total_request_tokens_before,
             &draft,
             selected_distillation_ids,
         )
@@ -1416,6 +1434,7 @@ impl ContextTransactionService {
         let draft = build_ready_draft(
             provider.as_ref(),
             estimated_total_request_tokens_before,
+            &*guard,
             capture,
             route,
             artifacts,
@@ -1432,10 +1451,14 @@ impl ContextTransactionService {
         capture: CapturedContextDraft,
         route: Option<ContextCuratorRoute>,
         plan: Option<ContextCuratorPlan>,
-        provider: Arc<dyn Provider>,
-        estimated_total_request_tokens_before: Option<usize>,
+        build: LocalDraftBuild,
         cancellation: CancellationToken,
     ) {
+        let LocalDraftBuild {
+            provider,
+            estimated_total_request_tokens_before,
+            prefix,
+        } = build;
         let draft_id = capture.identity.draft_id.clone();
         self.update_progress(
             &draft_id,
@@ -1493,6 +1516,7 @@ impl ContextTransactionService {
         let draft = build_ready_draft(
             provider.as_ref(),
             estimated_total_request_tokens_before,
+            &prefix,
             capture,
             route,
             artifacts,
@@ -2170,7 +2194,13 @@ fn filter_effective_reasoning(
     let target_index = ContextTargetIndex::new(messages);
     let mut active_summary_intervals = Vec::new();
     let mut active_suppression_targets = BTreeSet::new();
-    for transaction in state.active_transactions() {
+    // A person's selection is recorded even for blocks jcode currently
+    // suppresses as invalid: that set is derived, and a later transition can
+    // restore those blocks, which must not undo the person's choice.
+    for transaction in state
+        .active_transactions()
+        .filter(|transaction| !transaction.is_reasoning_invalidation())
+    {
         for operation in &transaction.operations {
             match operation {
                 StoredContextOperation::RangeSummary(summary) => {
@@ -2268,6 +2298,7 @@ struct DraftBuildFailure {
 fn build_ready_draft(
     provider: &dyn Provider,
     estimated_total_request_tokens_before: Option<usize>,
+    prefix: &dyn RequestPrefixSource,
     capture: CapturedContextDraft,
     route: Option<ContextCuratorRoute>,
     artifacts: ContextCuratorArtifacts,
@@ -2276,6 +2307,7 @@ fn build_ready_draft(
     build_ready_draft_inner(
         provider,
         estimated_total_request_tokens_before,
+        prefix,
         capture,
         route,
         artifacts,
@@ -2286,6 +2318,7 @@ fn build_ready_draft(
 fn build_ready_draft_inner(
     provider: &dyn Provider,
     estimated_total_request_tokens_before: Option<usize>,
+    prefix: &dyn RequestPrefixSource,
     capture: CapturedContextDraft,
     route: Option<ContextCuratorRoute>,
     artifacts: ContextCuratorArtifacts,
@@ -2460,6 +2493,7 @@ fn build_ready_draft_inner(
     }
     let preview = build_preview(ContextDraftPreviewInput {
         provider,
+        prefix,
         messages: &capture.messages,
         base_state: &capture.base_context_view,
         transaction_id: &capture.identity.draft_id,
@@ -2480,6 +2514,11 @@ fn build_ready_draft_inner(
         required_operations,
         distillation_proposals: proposals,
         ineligible_distillations: ineligible,
+        request_prefix_digest: preview
+            .reasoning_invalidation
+            .is_some()
+            .then(|| prefix.request_prefix().map(|prefix| prefix.digest()))
+            .transpose()?,
         preview,
         curator_usage: artifacts.usage,
     })
@@ -2493,8 +2532,14 @@ fn fill_range_replacement_estimates(
     authorization: StoredContextAuthorization,
     operations: &mut [StoredContextOperation],
 ) -> Result<(), ContextServiceError> {
+    // Summary text does not depend on managed reasoning invalidations, and a
+    // new selection may target blocks they hold.
+    let mut base_state = base_state.clone();
+    base_state
+        .transactions
+        .retain(|transaction| !transaction.is_reasoning_invalidation());
     let state = state_with_transaction(
-        base_state,
+        &base_state,
         transaction_id,
         revision,
         authorization,
@@ -2538,6 +2583,8 @@ fn copy_filled_range_estimates(
 
 pub(crate) struct ContextDraftPreviewInput<'a> {
     pub(crate) provider: &'a dyn crate::provider::Provider,
+    /// What the next request carries before its messages.
+    pub(crate) prefix: &'a dyn RequestPrefixSource,
     pub(crate) messages: &'a [StoredMessage],
     pub(crate) base_state: &'a StoredContextViewState,
     pub(crate) transaction_id: &'a str,
@@ -2556,6 +2603,7 @@ pub(crate) fn build_preview(
 ) -> Result<ContextDraftPreview, ContextServiceError> {
     let ContextDraftPreviewInput {
         provider,
+        prefix,
         messages,
         base_state,
         transaction_id,
@@ -2579,6 +2627,15 @@ pub(crate) fn build_preview(
     )?;
     validate_context_state(&proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    let (proposed_state, reasoning_invalidation) = stage_preview_reasoning_invalidation(
+        provider,
+        messages,
+        base_state,
+        proposed_state,
+        prefix,
+        transaction_id,
+        !operations.is_empty(),
+    )?;
     let after = project_context(messages, &proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let validation_operations = projection_validation_operations(&proposed_state);
@@ -2674,11 +2731,47 @@ pub(crate) fn build_preview(
         validation,
         operation_previews,
         notices,
+        reasoning_invalidation,
     })
+}
+
+/// Stage the reasoning invalidation a reviewed change would carry, exactly as
+/// apply stages it. A no-change review stages nothing.
+fn stage_preview_reasoning_invalidation(
+    provider: &dyn Provider,
+    messages: &[StoredMessage],
+    base_state: &StoredContextViewState,
+    proposed_state: StoredContextViewState,
+    prefix: &dyn RequestPrefixSource,
+    transaction_id: &str,
+    changes_context: bool,
+) -> Result<
+    (
+        StoredContextViewState,
+        Option<crate::protocol::ContextReasoningInvalidationSummary>,
+    ),
+    ContextServiceError,
+> {
+    if !changes_context {
+        return Ok((proposed_state, None));
+    }
+    let staged = super::reasoning_invalidation::stage_for_transition(
+        provider,
+        messages,
+        base_state,
+        proposed_state,
+        prefix,
+        transaction_id,
+        jcode_session_types::StoredContextTransitionKind::Apply,
+    )?;
+    validate_context_state(&staged.state)
+        .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    Ok((staged.state, staged.summary))
 }
 
 fn build_draft_selection_preview(
     provider: &dyn crate::provider::Provider,
+    prefix: &dyn RequestPrefixSource,
     messages: &[StoredMessage],
     base_state: &StoredContextViewState,
     estimated_total_request_tokens_before: Option<usize>,
@@ -2692,6 +2785,7 @@ fn build_draft_selection_preview(
     let proposed_revision = proposed_revision(base_state, &operations)?;
     let before = project_context(messages, base_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    super::commit::validate_reviewed_request_prefix(draft.request_prefix_digest, prefix)?;
     let proposed_state = proposed_state_for_operations(
         base_state,
         &draft.identity.draft_id,
@@ -2701,6 +2795,15 @@ fn build_draft_selection_preview(
     )?;
     validate_context_state(&proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    let (proposed_state, reasoning_invalidation) = stage_preview_reasoning_invalidation(
+        provider,
+        messages,
+        base_state,
+        proposed_state,
+        prefix,
+        &draft.identity.draft_id,
+        !operations.is_empty(),
+    )?;
     let after = project_context(messages, &proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let validation_operations = projection_validation_operations(&proposed_state);
@@ -2735,6 +2838,7 @@ fn build_draft_selection_preview(
     preview.economics = economics;
     preview.formatter_placeholder_count = validation.formatter_placeholder_count;
     preview.validation = validation;
+    preview.reasoning_invalidation = reasoning_invalidation;
     Ok(ContextDraftSelectionPreview {
         draft_id: draft.identity.draft_id.clone(),
         selected_distillation_ids,
@@ -2863,7 +2967,13 @@ pub(crate) fn projection_validation_operations(
     state: &StoredContextViewState,
 ) -> Vec<ContextProjectionValidationOperation> {
     let mut operations = Vec::new();
-    for transaction in state.active_transactions() {
+    // Managed invalidations suppress only blocks the provider would reject or
+    // drop; on a route that does not replay their kind they are inert, so
+    // they never block a provider switch.
+    for transaction in state
+        .active_transactions()
+        .filter(|transaction| !transaction.is_reasoning_invalidation())
+    {
         for (operation_index, operation) in transaction.operations.iter().enumerate() {
             match operation {
                 StoredContextOperation::RangeSummary(_) => {
@@ -3213,6 +3323,7 @@ mod store_tests {
 
     fn draft(id: &str, expires_at: DateTime<Utc>) -> ContextDraft {
         ContextDraft {
+            request_prefix_digest: None,
             identity: identity(id, expires_at),
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
             active_agent_profile_message_id: None,
@@ -3221,6 +3332,7 @@ mod store_tests {
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),
             preview: ContextDraftPreview {
+                reasoning_invalidation: None,
                 raw_stored_message_count: 0,
                 current_context_revision: 0,
                 proposed_context_revision: 1,
@@ -5523,6 +5635,7 @@ mod orchestration_tests {
         let draft = build_ready_draft_inner(
             &provider,
             None,
+            &crate::context::ContextRequestPrefix::for_tests(),
             capture,
             None,
             ContextCuratorArtifacts::default(),
@@ -5660,6 +5773,7 @@ mod orchestration_tests {
                         guard.context_route_identity(),
                         guard.model_routes(),
                         None,
+                        &crate::context::ContextRequestPrefix::for_tests(),
                     )?;
                     service.prepare_draft_for_session(input, request, false)?
                 } else {
@@ -5757,9 +5871,12 @@ mod orchestration_tests {
                         service.apply_draft(&agent, &draft, None, false),
                         service.apply_draft_to_session(
                             &mut session,
-                            concrete.as_ref(),
-                            &route,
-                            None,
+                            crate::context::LocalContextRoute {
+                                provider: concrete.as_ref(),
+                                route: &route,
+                                estimated_total_request_tokens_before: None,
+                                prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                            },
                             &draft,
                             None,
                             false,
@@ -5769,9 +5886,12 @@ mod orchestration_tests {
                         service.revert_transaction(&agent, &draft, false),
                         service.revert_transaction_in_session(
                             &mut session,
-                            concrete.as_ref(),
-                            &route,
-                            None,
+                            crate::context::LocalContextRoute {
+                                provider: concrete.as_ref(),
+                                route: &route,
+                                estimated_total_request_tokens_before: None,
+                                prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                            },
                             &draft,
                             false,
                         ),
@@ -5780,9 +5900,12 @@ mod orchestration_tests {
                         service.reapply_transaction(&agent, &draft, false),
                         service.reapply_transaction_in_session(
                             &mut session,
-                            concrete.as_ref(),
-                            &route,
-                            None,
+                            crate::context::LocalContextRoute {
+                                provider: concrete.as_ref(),
+                                route: &route,
+                                estimated_total_request_tokens_before: None,
+                                prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                            },
                             &draft,
                             false,
                         ),

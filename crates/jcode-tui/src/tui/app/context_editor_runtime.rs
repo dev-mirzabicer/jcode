@@ -1,5 +1,5 @@
 use super::App;
-use crate::context::ContextDraftRuntimeInput;
+use crate::context::{ContextDraftRuntimeInput, LocalContextRoute};
 use crate::protocol::{
     ContextDraftStatus, ContextRequestKind, ContextServiceError, ContextTransactionDetail, Request,
     ServerEvent,
@@ -983,13 +983,16 @@ impl App {
             }
             ContextEditorAction::PrepareDraft(request) => {
                 self.context_protocol.begin_prepare_draft(id);
-                let input = match ContextDraftRuntimeInput::from_session(
-                    &self.session,
-                    Arc::clone(&self.provider),
-                    self.local_context_route_identity(),
-                    self.provider.model_routes(),
-                    self.local_context_request_token_estimate(),
-                ) {
+                let input = match self.local_request_prefix_if_needed().and_then(|prefix| {
+                    ContextDraftRuntimeInput::from_session(
+                        &self.session,
+                        Arc::clone(&self.provider),
+                        self.local_context_route_identity(),
+                        self.provider.model_routes(),
+                        self.local_context_request_token_estimate(),
+                        &prefix,
+                    )
+                }) {
                     Ok(input) => input,
                     Err(error) => {
                         self.send_local_context_rejection(
@@ -1058,19 +1061,23 @@ impl App {
                     draft_id.clone(),
                     selected_distillation_ids.clone(),
                 );
-                let event = self
-                    .context_transactions
-                    .preview_draft_selection_for_session(
-                        &self.session.id,
-                        &self.session.messages,
-                        &self.session.context_view,
-                        self.provider.as_ref(),
-                        &self.local_context_route_identity(),
-                        self.local_context_request_token_estimate(),
-                        &draft_id,
-                        selected_distillation_ids,
-                    )
-                    .map(|preview| ServerEvent::ContextDraftSelectionPreview { id, preview });
+                let route = self.local_context_route_identity();
+                let estimate = self.local_context_request_token_estimate();
+                let event = self.local_request_prefix_if_needed().and_then(|prefix| {
+                    self.context_transactions
+                        .preview_draft_selection_for_session(
+                            &self.session,
+                            LocalContextRoute {
+                                provider: self.provider.as_ref(),
+                                route: &route,
+                                estimated_total_request_tokens_before: estimate,
+                                prefix: &prefix,
+                            },
+                            &draft_id,
+                            selected_distillation_ids,
+                        )
+                        .map(|preview| ServerEvent::ContextDraftSelectionPreview { id, preview })
+                });
                 self.send_local_context_result(
                     id,
                     ContextRequestKind::DraftSelectionPreview,
@@ -1091,15 +1098,21 @@ impl App {
                 let service = Arc::clone(&self.context_transactions);
                 let route = self.local_context_route_identity();
                 let estimate = self.local_context_request_token_estimate();
-                match service.apply_draft_to_session(
-                    &mut self.session,
-                    self.provider.as_ref(),
-                    &route,
-                    estimate,
-                    &draft_id,
-                    Some(selected_distillation_ids),
-                    self.is_processing,
-                ) {
+                let provider = Arc::clone(&self.provider);
+                match self.local_request_prefix_if_needed().and_then(|prefix| {
+                    service.apply_draft_to_session(
+                        &mut self.session,
+                        LocalContextRoute {
+                            provider: provider.as_ref(),
+                            route: &route,
+                            estimated_total_request_tokens_before: estimate,
+                            prefix: &prefix,
+                        },
+                        &draft_id,
+                        Some(selected_distillation_ids),
+                        self.is_processing,
+                    )
+                }) {
                     Ok(mut transition) => {
                         if let Err(error) = self.after_local_provider_context_changed(
                             "context transaction",
@@ -1205,14 +1218,20 @@ impl App {
                 let route = self.local_context_route_identity();
                 let estimate = self.local_context_request_token_estimate();
                 let service = Arc::clone(&self.context_transactions);
-                match service.revert_transaction_in_session(
-                    &mut self.session,
-                    self.provider.as_ref(),
-                    &route,
-                    estimate,
-                    &transaction_id,
-                    self.is_processing,
-                ) {
+                let provider = Arc::clone(&self.provider);
+                match self.local_request_prefix_if_needed().and_then(|prefix| {
+                    service.revert_transaction_in_session(
+                        &mut self.session,
+                        LocalContextRoute {
+                            provider: provider.as_ref(),
+                            route: &route,
+                            estimated_total_request_tokens_before: estimate,
+                            prefix: &prefix,
+                        },
+                        &transaction_id,
+                        self.is_processing,
+                    )
+                }) {
                     Ok(mut transition) => {
                         if let Err(error) = self.after_local_provider_context_changed(
                             "context transaction",
@@ -1246,14 +1265,20 @@ impl App {
                 let route = self.local_context_route_identity();
                 let estimate = self.local_context_request_token_estimate();
                 let service = Arc::clone(&self.context_transactions);
-                match service.reapply_transaction_in_session(
-                    &mut self.session,
-                    self.provider.as_ref(),
-                    &route,
-                    estimate,
-                    &transaction_id,
-                    self.is_processing,
-                ) {
+                let provider = Arc::clone(&self.provider);
+                match self.local_request_prefix_if_needed().and_then(|prefix| {
+                    service.reapply_transaction_in_session(
+                        &mut self.session,
+                        LocalContextRoute {
+                            provider: provider.as_ref(),
+                            route: &route,
+                            estimated_total_request_tokens_before: estimate,
+                            prefix: &prefix,
+                        },
+                        &transaction_id,
+                        self.is_processing,
+                    )
+                }) {
                     Ok(mut transition) => {
                         if let Err(error) = self.after_local_provider_context_changed(
                             "context transaction",
@@ -1417,7 +1442,7 @@ impl App {
             self.context_reset_counters.hook_calls += 1;
             self.context_reset_counters.invalidation_records += 1;
         }
-        crate::cache_invalidation::record(source, detail.to_string());
+        self.record_local_prefix_transition(source, detail.to_string());
         #[cfg(test)]
         {
             self.context_reset_counters.cache_generation_advances += 1;

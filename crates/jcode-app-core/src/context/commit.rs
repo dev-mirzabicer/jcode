@@ -6,6 +6,9 @@ use crate::context::draft::{
 };
 use crate::context::history::summarize_context_transaction;
 use crate::context::provider_validation::require_supported_projected_messages;
+use crate::context::reasoning_invalidation::{
+    RequestPrefixSource, describe_reasoning_invalidation, stage_for_transition,
+};
 use crate::protocol::{
     ContextDraft, ContextServiceError, ContextTransactionResult, ContextTransactionSummary,
 };
@@ -22,8 +25,8 @@ use jcode_session_types::{
     StoredContextApplication, StoredContextAuthorization, StoredContextCacheWarmth,
     StoredContextEmergencyAudit, StoredContextEmergencyOperationKind, StoredContextEmergencyPolicy,
     StoredContextEmergencyRetryOutcome, StoredContextEmergencyTriggerKind, StoredContextOperation,
-    StoredContextTransactionStatusKind, StoredContextViewState, StoredProviderValidationEvidence,
-    StoredProviderValidationOutcome,
+    StoredContextTransactionStatusKind, StoredContextTransitionKind, StoredContextViewState,
+    StoredProviderValidationEvidence, StoredProviderValidationOutcome,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -59,6 +62,36 @@ impl DirectContextSessionPersistence for DirectSessionContextPersistence {
     fn persist(&self, session: &mut Session) -> Result<()> {
         session.save()
     }
+}
+
+/// The provider route a transition of a directly owned (local TUI) session
+/// validates against.
+pub struct LocalContextRoute<'a> {
+    pub provider: &'a dyn Provider,
+    pub route: &'a str,
+    pub estimated_total_request_tokens_before: Option<usize>,
+    /// What the session's next request carries before its messages, read
+    /// only when replayed reasoning must be checked.
+    pub prefix: &'a dyn RequestPrefixSource,
+}
+
+/// A review's reasoning invalidation was computed under one system prompt and
+/// tool set. Under another, the set it showed would differ, so the draft is
+/// stale.
+pub(crate) fn validate_reviewed_request_prefix(
+    reviewed: Option<u64>,
+    prefix: &dyn RequestPrefixSource,
+) -> Result<(), ContextServiceError> {
+    let Some(reviewed) = reviewed else {
+        return Ok(());
+    };
+    if reviewed != prefix.request_prefix()?.digest() {
+        return Err(ContextServiceError::Stale(
+            "the system prompt or tool set changed since this review, so its Claude thinking invalidation would differ"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct PreparedContextTransition {
@@ -252,7 +285,9 @@ impl ContextTransactionService {
                     return Err(error);
                 }
             };
-        if let Err(error) = validate_capture_identity(&agent, &draft.identity) {
+        if let Err(error) = validate_capture_identity(&agent, &draft.identity)
+            .and_then(|()| validate_reviewed_request_prefix(draft.request_prefix_digest, &*agent))
+        {
             self.fail_applying_draft(draft_id, error.clone());
             return Err(error);
         }
@@ -315,20 +350,20 @@ impl ContextTransactionService {
         Ok(result)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "local apply revalidates every independent provider-context identity dimension"
-    )]
     pub fn apply_draft_to_session(
         &self,
         session: &mut Session,
-        provider: &dyn Provider,
-        route: &str,
-        estimated_total_request_tokens_before: Option<usize>,
+        local: LocalContextRoute<'_>,
         draft_id: &str,
         selected_distillation_ids: Option<Vec<String>>,
         processing: bool,
     ) -> Result<ContextSessionTransition, ContextServiceError> {
+        let LocalContextRoute {
+            provider,
+            route,
+            estimated_total_request_tokens_before,
+            prefix,
+        } = local;
         if processing {
             return Err(ContextServiceError::SessionBusy);
         }
@@ -349,7 +384,9 @@ impl ContextTransactionService {
             provider,
             route,
             &draft.identity,
-        ) {
+        )
+        .and_then(|()| validate_reviewed_request_prefix(draft.request_prefix_digest, prefix))
+        {
             self.fail_applying_draft(draft_id, error.clone());
             return Err(error);
         }
@@ -402,6 +439,7 @@ impl ContextTransactionService {
             true,
             route,
             estimated_total_request_tokens_before,
+            prefix,
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -749,6 +787,7 @@ pub(crate) fn prepare_context_transition(
         update_application_identity,
         &agent.context_route_identity(),
         agent.current_context_request_token_estimate(),
+        agent,
     )
 }
 
@@ -760,12 +799,55 @@ pub(crate) fn prepare_context_transition_for_session(
     provider: &dyn Provider,
     messages: &[jcode_session_types::StoredMessage],
     previous_state: &StoredContextViewState,
-    mut proposed_state: StoredContextViewState,
+    proposed_state: StoredContextViewState,
     economics_transaction_index: usize,
     update_application_identity: bool,
     route: &str,
     estimated_total_request_tokens_before: Option<usize>,
+    prefix: &dyn RequestPrefixSource,
 ) -> Result<PreparedContextTransition, ContextServiceError> {
+    if proposed_state
+        .transactions
+        .get(economics_transaction_index)
+        .is_some_and(|transaction| transaction.is_reasoning_invalidation())
+    {
+        return Err(managed_invalidation_is_not_user_controlled());
+    }
+    validate_context_state(&proposed_state)
+        .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
+    // Stage, in this same transition, the replayed reasoning it invalidates
+    // and restore what matches again (INT-01 D6, D-WP04-1).
+    let (transaction_id, transition) = {
+        let transaction = proposed_state
+            .transactions
+            .get(economics_transaction_index)
+            .ok_or_else(|| {
+                ContextServiceError::Projection(format!(
+                    "transition transaction index {economics_transaction_index} is missing"
+                ))
+            })?;
+        let transition = transaction
+            .latest_status()
+            .and_then(|status| StoredContextTransitionKind::for_status(status.kind))
+            .ok_or_else(|| {
+                ContextServiceError::Projection(format!(
+                    "context transaction {} has no apply, revert or reapply status",
+                    transaction.id
+                ))
+            })?;
+        (transaction.id.clone(), transition)
+    };
+    let staged = stage_for_transition(
+        provider,
+        messages,
+        previous_state,
+        proposed_state,
+        prefix,
+        &transaction_id,
+        transition,
+    )?;
+    let mut proposed_state = staged.state;
+    let reasoning_invalidation = staged.summary.filter(|summary| summary.changes_anything());
     validate_context_state(&proposed_state)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
     let before = project_context(messages, previous_state)
@@ -835,7 +917,14 @@ pub(crate) fn prepare_context_transition_for_session(
             latest_status.kind,
         )
     };
-    let invalidation_detail = context_invalidation_detail(&summary, status);
+    let mut invalidation_detail = context_invalidation_detail(&summary, status);
+    if let Some(description) = reasoning_invalidation
+        .as_ref()
+        .and_then(describe_reasoning_invalidation)
+    {
+        invalidation_detail.push_str("; ");
+        invalidation_detail.push_str(&description);
+    }
     Ok(PreparedContextTransition {
         state: proposed_state,
         result: ContextTransactionResult {
@@ -843,6 +932,7 @@ pub(crate) fn prepare_context_transition_for_session(
             revision,
             status,
             warnings: Vec::new(),
+            reasoning_invalidation,
         },
         invalidation_detail,
     })
@@ -887,6 +977,13 @@ pub(crate) fn selected_distillation_operations(
         .filter(|proposal| selected.contains(proposal.proposal_id.as_str()))
         .map(|proposal| StoredContextOperation::ToolResultDistillation(proposal.operation.clone()))
         .collect())
+}
+
+pub(crate) fn managed_invalidation_is_not_user_controlled() -> ContextServiceError {
+    ContextServiceError::InvalidSelection(
+        "jcode manages this reasoning invalidation; revert or reapply the transaction that caused it"
+            .to_string(),
+    )
 }
 
 fn record_provider_validation_evidence(
@@ -1302,6 +1399,7 @@ mod tests {
         ));
         let preview = build_preview(ContextDraftPreviewInput {
             provider,
+            prefix: &crate::context::ContextRequestPrefix::for_tests(),
             messages,
             base_state: agent.context_view_state(),
             transaction_id: draft_id,
@@ -1316,6 +1414,7 @@ mod tests {
         })
         .expect("ready preview");
         ContextDraft {
+            request_prefix_digest: None,
             identity: ContextDraftIdentity {
                 draft_id: draft_id.to_string(),
                 session_id: agent.session_id().to_string(),
@@ -1577,6 +1676,7 @@ mod tests {
         let operations = vec![operation];
         let preview = build_preview(ContextDraftPreviewInput {
             provider: &provider,
+            prefix: &crate::context::ContextRequestPrefix::for_tests(),
             messages: agent.messages(),
             base_state: agent.context_view_state(),
             transaction_id: "draft-startup-context",
@@ -1591,6 +1691,7 @@ mod tests {
         })
         .expect("Startup Context summary preview");
         let draft = ContextDraft {
+            request_prefix_digest: None,
             identity: ContextDraftIdentity {
                 draft_id: "draft-startup-context".to_string(),
                 session_id: source.id.clone(),
@@ -1665,9 +1766,12 @@ mod tests {
         let applied = service
             .apply_draft_to_session(
                 &mut session,
-                &provider,
-                &route,
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: &route,
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 "draft-local-1",
                 None,
                 false,
@@ -1686,9 +1790,12 @@ mod tests {
         service
             .revert_transaction_in_session(
                 &mut session,
-                &provider,
-                &route,
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: &route,
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 &applied.result.transaction.id,
                 false,
             )
@@ -1708,9 +1815,12 @@ mod tests {
         service
             .reapply_transaction_in_session(
                 &mut session,
-                &provider,
-                &route,
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: &route,
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 &applied.result.transaction.id,
                 false,
             )
@@ -1749,9 +1859,12 @@ mod tests {
         let applied = service
             .apply_draft_to_session(
                 &mut session,
-                &provider,
-                &route,
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: &route,
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 "draft-startup-context",
                 None,
                 false,
@@ -1772,9 +1885,12 @@ mod tests {
         service
             .revert_transaction_in_session(
                 &mut session,
-                &provider,
-                &route,
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: &route,
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 &applied.result.transaction.id,
                 false,
             )
@@ -1794,9 +1910,12 @@ mod tests {
         service
             .reapply_transaction_in_session(
                 &mut session,
-                &provider,
-                &route,
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: &route,
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 &applied.result.transaction.id,
                 false,
             )
@@ -1873,6 +1992,7 @@ mod tests {
         });
         let preview = build_preview(ContextDraftPreviewInput {
             provider: &provider,
+            prefix: &crate::context::ContextRequestPrefix::for_tests(),
             messages: &session.messages,
             base_state: &session.context_view,
             transaction_id: "draft-profile-commit",
@@ -1887,6 +2007,7 @@ mod tests {
         })
         .expect("draft preview");
         let draft = ContextDraft {
+            request_prefix_digest: None,
             identity: ContextDraftIdentity {
                 draft_id: "draft-profile-commit".to_string(),
                 session_id: session.id.clone(),
@@ -1940,9 +2061,12 @@ mod tests {
         let error = service
             .apply_draft_to_session(
                 &mut session,
-                &provider,
-                "profile-commit-route",
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: "profile-commit-route",
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 "draft-profile-commit",
                 None,
                 false,
@@ -1967,9 +2091,12 @@ mod tests {
         let error = service
             .apply_draft_to_session(
                 &mut session,
-                &provider,
-                &route,
-                None,
+                crate::context::LocalContextRoute {
+                    provider: &provider,
+                    route: &route,
+                    estimated_total_request_tokens_before: None,
+                    prefix: &crate::context::ContextRequestPrefix::for_tests(),
+                },
                 "draft-local-1",
                 None,
                 false,

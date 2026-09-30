@@ -51,7 +51,7 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -383,7 +383,15 @@ pub struct AnthropicProvider {
     oauth_preflight_done: Arc<AtomicBool>,
     /// Whether this provider already announced unreplayed legacy thinking.
     unbound_thinking_noticed: Arc<AtomicBool>,
+    /// Credential route of this provider's latest request (`ROUTE_*`). The
+    /// OAuth route adds identity blocks that are part of the prefix Claude
+    /// thinking is bound to.
+    last_request_route: Arc<AtomicU8>,
 }
+
+const ROUTE_UNKNOWN: u8 = 0;
+const ROUTE_OAUTH: u8 = 1;
+const ROUTE_API_KEY: u8 = 2;
 
 impl AnthropicProvider {
     fn is_usage_exhausted() -> bool {
@@ -643,6 +651,7 @@ impl AnthropicProvider {
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
             unbound_thinking_noticed: Arc::new(AtomicBool::new(false)),
+            last_request_route: Arc::new(AtomicU8::new(ROUTE_UNKNOWN)),
         }
     }
 
@@ -1094,6 +1103,24 @@ impl AnthropicProvider {
         Ok(())
     }
 
+    /// Whether the next request is expected to use the OAuth route, without
+    /// resolving a token: the route of this provider's latest request, or
+    /// before any request the configured mode, with `Auto` preferring OAuth
+    /// while Claude credentials load (as `get_access_token` does). A request
+    /// that then resolves differently changes the prefix; the per-request
+    /// binding check logs it as INV-1 and the API safety net handles it.
+    fn expected_oauth_route(&self) -> bool {
+        match self.last_request_route.load(Ordering::Relaxed) {
+            ROUTE_OAUTH => true,
+            ROUTE_API_KEY => false,
+            _ => match self.credential_mode_snapshot() {
+                AnthropicCredentialMode::ApiKey => false,
+                AnthropicCredentialMode::OAuth => true,
+                AnthropicCredentialMode::Auto => auth::claude::load_credentials().is_ok(),
+            },
+        }
+    }
+
     pub(crate) fn credential_mode_snapshot(&self) -> AnthropicCredentialMode {
         self.credential_mode
             .try_read()
@@ -1430,6 +1457,65 @@ impl Provider for AnthropicProvider {
         Some(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking)
     }
 
+    fn replayed_reasoning_invalidations(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Option<Vec<jcode_provider_core::InvalidReplayedReasoning>> {
+        let model = self.model();
+        if jcode_provider_core::anthropic_reasoning_binding(&model)
+            != jcode_provider_core::ReasoningBinding::PrefixBound
+        {
+            return None;
+        }
+        let position: std::collections::HashMap<String, (usize, usize)> = messages
+            .iter()
+            .enumerate()
+            .flat_map(|(message_index, message)| {
+                message
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(block_index, block)| {
+                        jcode_provider_anthropic::binding::stored_thinking_fingerprint(block)
+                            .map(|fingerprint| (fingerprint, (message_index, block_index)))
+                    })
+            })
+            .collect();
+        if position.is_empty() {
+            return Some(Vec::new());
+        }
+        // The exact request the next send builds, on the route it is expected
+        // to use (see `expected_oauth_route`).
+        let is_oauth = self.expected_oauth_route();
+        let request = self.build_api_request(
+            &model,
+            messages,
+            tools,
+            build_system_param(system, is_oauth),
+            is_oauth,
+        );
+        Some(
+            jcode_provider_anthropic::binding::blocks_to_suppress(&request)
+                .into_iter()
+                .filter_map(|block| {
+                    let (message_index, block_index) = *position.get(&block.fingerprint)?;
+                    Some(jcode_provider_core::InvalidReplayedReasoning {
+                        message_index,
+                        block_index,
+                        invalidity: match block.validity {
+                            jcode_provider_anthropic::binding::ReplayValidity::ChainBroken => {
+                                jcode_provider_core::ReplayedReasoningInvalidity::ChainBroken
+                            }
+                            _ => jcode_provider_core::ReplayedReasoningInvalidity::PrefixChanged,
+                        },
+                    })
+                })
+                .collect(),
+        )
+    }
+
     fn context_window(&self) -> usize {
         context_window::resolve(&self.model())
     }
@@ -1497,6 +1583,7 @@ impl Provider for AnthropicProvider {
                 self.oauth_preflight_done.load(Ordering::Relaxed),
             )),
             unbound_thinking_noticed: Arc::new(AtomicBool::new(false)),
+            last_request_route: Arc::new(AtomicU8::new(ROUTE_UNKNOWN)),
         })
     }
 
@@ -1519,6 +1606,10 @@ impl AnthropicProvider {
         system: &str,
     ) -> Result<EventStream> {
         let (token, is_oauth) = self.get_access_token().await?;
+        self.last_request_route.store(
+            if is_oauth { ROUTE_OAUTH } else { ROUTE_API_KEY },
+            Ordering::Relaxed,
+        );
         if is_oauth {
             ensure_oauth_preflight(
                 &self.client,

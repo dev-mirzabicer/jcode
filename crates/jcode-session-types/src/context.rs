@@ -62,6 +62,19 @@ impl StoredContextViewState {
     pub fn latest_active_transaction(&self) -> Option<&StoredContextTransaction> {
         self.active_transactions().next_back()
     }
+
+    /// The latest active transaction a person or authorized emergency created,
+    /// skipping jcode-managed reasoning invalidations.
+    pub fn latest_active_user_transaction(&self) -> Option<&StoredContextTransaction> {
+        self.active_transactions()
+            .rfind(|transaction| !transaction.is_reasoning_invalidation())
+    }
+
+    /// The jcode-managed reasoning invalidation currently in force, if any.
+    pub fn active_reasoning_invalidation(&self) -> Option<&StoredContextTransaction> {
+        self.active_transactions()
+            .find(|transaction| transaction.is_reasoning_invalidation())
+    }
 }
 
 /// One atomic provider-context revision. Source transcript content is never duplicated here.
@@ -94,6 +107,16 @@ impl StoredContextTransaction {
         self.latest_status()
             .map(|event| event.kind.is_active())
             .unwrap_or(false)
+    }
+
+    /// Whether jcode manages this transaction: it holds the replayed reasoning
+    /// that no longer matches its request prefix, and no person reverts or
+    /// reapplies it directly.
+    pub fn is_reasoning_invalidation(&self) -> bool {
+        matches!(
+            self.authorization,
+            StoredContextAuthorization::ReasoningInvalidation
+        )
     }
 
     pub fn operation_counts(&self) -> StoredContextOperationCounts {
@@ -137,6 +160,11 @@ pub enum StoredContextAuthorization {
     LegacyMigration {
         source: StoredLegacyContextSource,
     },
+    /// jcode-managed set of replayed provider reasoning that no longer matches
+    /// the request prefix it was produced under (Claude preserved thinking,
+    /// INT-01). jcode recomputes it at every context transition and before
+    /// every request, and replaces it atomically when it changes.
+    ReasoningInvalidation,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,6 +190,9 @@ pub enum StoredContextTransactionStatusKind {
     Reverted,
     Reapplied,
     InvalidatedByTranscriptEdit,
+    /// A newer reasoning invalidation replaced this one. Terminal, and only
+    /// for jcode-managed reasoning invalidations.
+    Superseded,
 }
 
 impl StoredContextTransactionStatusKind {
@@ -371,6 +402,59 @@ pub enum StoredReasoningSelection {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ranges: Vec<StoredMessageRange>,
     },
+    /// The targets no longer match the request prefix they were produced
+    /// under, so the provider would reject or drop them. Only a jcode-managed
+    /// reasoning invalidation carries this selection.
+    Invalidated {
+        cause: StoredReasoningInvalidationCause,
+    },
+}
+
+/// Why replayed reasoning stopped matching its request prefix.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StoredReasoningInvalidationCause {
+    /// A context transaction's apply, revert or reapply changed the history
+    /// before these blocks.
+    ContextTransition {
+        transaction_id: String,
+        transition: StoredContextTransitionKind,
+    },
+    /// The system prompt, tool set or credential route differs from the
+    /// request that produced these blocks. `recorded_transitions` names the
+    /// harness transitions recorded since the previous request, when known.
+    RequestPrefixChanged {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        recorded_transitions: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredContextTransitionKind {
+    Apply,
+    Revert,
+    Reapply,
+}
+
+impl StoredContextTransitionKind {
+    pub fn for_status(kind: StoredContextTransactionStatusKind) -> Option<Self> {
+        match kind {
+            StoredContextTransactionStatusKind::Applied => Some(Self::Apply),
+            StoredContextTransactionStatusKind::Reverted => Some(Self::Revert),
+            StoredContextTransactionStatusKind::Reapplied => Some(Self::Reapply),
+            StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit
+            | StoredContextTransactionStatusKind::Superseded => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Revert => "revert",
+            Self::Reapply => "reapply",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1025,6 +1109,92 @@ mod tests {
         });
         assert!(!transaction.is_active());
         assert_eq!(transaction.status_events.len(), 2);
+    }
+
+    #[test]
+    fn managed_reasoning_invalidation_round_trips_with_causes_and_supersession() {
+        let transaction = StoredContextTransaction {
+            id: "reasoning-invalidation-3".to_string(),
+            base_revision: 2,
+            created_at: timestamp(),
+            authorization: StoredContextAuthorization::ReasoningInvalidation,
+            operations: vec![
+                StoredContextOperation::ReasoningSuppression(StoredReasoningSuppression {
+                    selection: StoredReasoningSelection::Invalidated {
+                        cause: StoredReasoningInvalidationCause::ContextTransition {
+                            transaction_id: "summary-1".to_string(),
+                            transition: StoredContextTransitionKind::Revert,
+                        },
+                    },
+                    targets: vec![target(StoredContextBlockKind::AnthropicThinking, 4, 7)],
+                    assistant_turns_affected: 1,
+                    replay_block_kinds: vec![StoredContextBlockKind::AnthropicThinking],
+                    original_token_estimate: 120,
+                    validation_evidence_version: 1,
+                    validation: Vec::new(),
+                }),
+                StoredContextOperation::ReasoningSuppression(StoredReasoningSuppression {
+                    selection: StoredReasoningSelection::Invalidated {
+                        cause: StoredReasoningInvalidationCause::RequestPrefixChanged {
+                            recorded_transitions: vec!["skill activation".to_string()],
+                        },
+                    },
+                    targets: vec![target(StoredContextBlockKind::AnthropicThinking, 6, 9)],
+                    assistant_turns_affected: 1,
+                    replay_block_kinds: vec![StoredContextBlockKind::AnthropicThinking],
+                    original_token_estimate: 80,
+                    validation_evidence_version: 1,
+                    validation: Vec::new(),
+                }),
+            ],
+            status_events: vec![
+                StoredContextStatusEvent {
+                    revision: 3,
+                    timestamp: timestamp(),
+                    kind: StoredContextTransactionStatusKind::Applied,
+                    reason: None,
+                },
+                StoredContextStatusEvent {
+                    revision: 4,
+                    timestamp: timestamp(),
+                    kind: StoredContextTransactionStatusKind::Superseded,
+                    reason: Some("replaced by reasoning-invalidation-4".to_string()),
+                },
+            ],
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
+            emergency_audit: None,
+        };
+        let encoded = serde_json::to_value(&transaction).expect("serialize");
+        assert_eq!(
+            encoded["authorization"],
+            serde_json::json!({"kind": "reasoning_invalidation"})
+        );
+        assert_eq!(
+            encoded["operations"][0]["operation"]["selection"],
+            serde_json::json!({
+                "kind": "invalidated",
+                "cause": {
+                    "kind": "context_transition",
+                    "transaction_id": "summary-1",
+                    "transition": "revert"
+                }
+            })
+        );
+        let decoded: StoredContextTransaction =
+            serde_json::from_value(encoded).expect("deserialize");
+        assert_eq!(decoded, transaction);
+        assert!(decoded.is_reasoning_invalidation());
+        assert!(!decoded.is_active());
+
+        let state = StoredContextViewState {
+            revision: 4,
+            transactions: vec![decoded],
+            ..StoredContextViewState::default()
+        };
+        assert!(state.active_reasoning_invalidation().is_none());
+        assert!(state.latest_active_user_transaction().is_none());
     }
 
     #[test]

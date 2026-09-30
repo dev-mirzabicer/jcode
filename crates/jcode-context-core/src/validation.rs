@@ -2,8 +2,9 @@ use jcode_message_types::{ContentBlock, Message};
 use jcode_session_types::{
     STORED_CONTEXT_EVIDENCE_MAX_PATH_CHARS, STORED_CONTEXT_EVIDENCE_MAX_PATHS_PER_CATEGORY,
     STORED_CONTEXT_EVIDENCE_MAX_WARNING_CHARS, STORED_CONTEXT_EVIDENCE_MAX_WARNINGS_PER_CATEGORY,
-    STORED_CONTEXT_VIEW_SCHEMA_VERSION, StoredContextOperation, StoredContextPathEvidence,
-    StoredContextTransactionStatusKind, StoredContextViewState, StoredMessage,
+    STORED_CONTEXT_VIEW_SCHEMA_VERSION, StoredContextBlockKind, StoredContextOperation,
+    StoredContextPathEvidence, StoredContextTransaction, StoredContextTransactionStatusKind,
+    StoredContextViewState, StoredMessage, StoredReasoningSelection, StoredReasoningSuppression,
 };
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -56,6 +57,16 @@ pub enum ContextStateValidationError {
         operation_index: usize,
         category: String,
         reason: String,
+    },
+    /// A jcode-managed reasoning invalidation, or a selection only it may
+    /// carry, has the wrong shape.
+    InvalidReasoningInvalidation {
+        transaction_id: String,
+        reason: &'static str,
+    },
+    MultipleActiveReasoningInvalidations {
+        first: String,
+        second: String,
     },
 }
 
@@ -127,6 +138,17 @@ impl fmt::Display for ContextStateValidationError {
                 formatter,
                 "transaction {transaction_id} operation {operation_index} has invalid {category} file evidence: {reason}"
             ),
+            Self::InvalidReasoningInvalidation {
+                transaction_id,
+                reason,
+            } => write!(
+                formatter,
+                "transaction {transaction_id} is not a valid reasoning invalidation: {reason}"
+            ),
+            Self::MultipleActiveReasoningInvalidations { first, second } => write!(
+                formatter,
+                "reasoning invalidations {first} and {second} are both active"
+            ),
         }
     }
 }
@@ -143,11 +165,24 @@ pub fn validate_context_state(
         });
     }
     let mut transaction_ids = HashSet::new();
+    let mut active_invalidation: Option<&str> = None;
     for transaction in &state.transactions {
         if !transaction_ids.insert(transaction.id.as_str()) {
             return Err(ContextStateValidationError::DuplicateTransactionId {
                 transaction_id: transaction.id.clone(),
             });
+        }
+        validate_reasoning_invalidation_shape(transaction)?;
+        if transaction.is_reasoning_invalidation() && transaction.is_active() {
+            if let Some(first) = active_invalidation {
+                return Err(
+                    ContextStateValidationError::MultipleActiveReasoningInvalidations {
+                        first: first.to_string(),
+                        second: transaction.id.clone(),
+                    },
+                );
+            }
+            active_invalidation = Some(transaction.id.as_str());
         }
         if transaction.base_revision > state.revision {
             return Err(ContextStateValidationError::BaseRevisionInFuture {
@@ -209,7 +244,12 @@ pub fn validate_context_state(
                     revision: status.revision,
                 });
             }
-            if !valid_status_transition(previous_status, status.kind) {
+            let valid = if transaction.is_reasoning_invalidation() {
+                valid_reasoning_invalidation_transition(previous_status, status.kind)
+            } else {
+                valid_status_transition(previous_status, status.kind)
+            };
+            if !valid {
                 return Err(ContextStateValidationError::InvalidStatusTransition {
                     transaction_id: transaction.id.clone(),
                     previous: previous_status,
@@ -254,6 +294,68 @@ fn invalid_file_evidence_reason(evidence: &StoredContextPathEvidence) -> Option<
         return Some("incomplete evidence must explain why it may be incomplete".to_string());
     }
     None
+}
+
+/// A managed reasoning invalidation holds only `Invalidated` suppressions of
+/// replayed provider reasoning, and only it may hold them.
+fn validate_reasoning_invalidation_shape(
+    transaction: &StoredContextTransaction,
+) -> Result<(), ContextStateValidationError> {
+    let invalid = |reason| ContextStateValidationError::InvalidReasoningInvalidation {
+        transaction_id: transaction.id.clone(),
+        reason,
+    };
+    let managed = transaction.is_reasoning_invalidation();
+    if managed && transaction.operations.is_empty() {
+        return Err(invalid("it has no operations"));
+    }
+    for operation in &transaction.operations {
+        let invalidated = matches!(
+            operation,
+            StoredContextOperation::ReasoningSuppression(StoredReasoningSuppression {
+                selection: StoredReasoningSelection::Invalidated { .. },
+                ..
+            })
+        );
+        if managed != invalidated {
+            return Err(invalid(if managed {
+                "every operation must be an invalidated-reasoning suppression"
+            } else {
+                "only a managed reasoning invalidation may carry an invalidated selection"
+            }));
+        }
+        if let StoredContextOperation::ReasoningSuppression(suppression) = operation
+            && managed
+            && (suppression.targets.is_empty()
+                || suppression
+                    .targets
+                    .iter()
+                    .any(|target| target.kind != StoredContextBlockKind::AnthropicThinking))
+        {
+            return Err(invalid(
+                "each suppression must target at least one signed-thinking block and nothing else",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Managed reasoning invalidations are applied once and end when a newer set
+/// replaces them or a transcript edit removes their targets. No one reverts or
+/// reapplies them.
+fn valid_reasoning_invalidation_transition(
+    previous: Option<StoredContextTransactionStatusKind>,
+    next: StoredContextTransactionStatusKind,
+) -> bool {
+    matches!(
+        (previous, next),
+        (None, StoredContextTransactionStatusKind::Applied)
+            | (
+                Some(StoredContextTransactionStatusKind::Applied),
+                StoredContextTransactionStatusKind::Superseded
+                    | StoredContextTransactionStatusKind::InvalidatedByTranscriptEdit,
+            )
+    )
 }
 
 fn valid_status_transition(
@@ -518,6 +620,195 @@ mod tests {
         assert!(matches!(
             validate_context_state(&invalid_transition),
             Err(ContextStateValidationError::InvalidStatusTransition { .. })
+        ));
+    }
+
+    fn managed(
+        id: &str,
+        statuses: &[(u64, StoredContextTransactionStatusKind)],
+        selection: jcode_session_types::StoredReasoningSelection,
+        target_kind: StoredContextBlockKind,
+    ) -> StoredContextTransaction {
+        StoredContextTransaction {
+            id: id.to_string(),
+            base_revision: 0,
+            created_at: Utc::now(),
+            authorization: StoredContextAuthorization::ReasoningInvalidation,
+            operations: vec![StoredContextOperation::ReasoningSuppression(
+                StoredReasoningSuppression {
+                    selection,
+                    targets: vec![jcode_session_types::StoredContentTarget {
+                        message_id: "m".to_string(),
+                        stored_index_hint: 1,
+                        block_ordinal_hint: 0,
+                        kind: target_kind,
+                        semantic_id: None,
+                        expected_hash: 1,
+                    }],
+                    assistant_turns_affected: 1,
+                    replay_block_kinds: vec![target_kind],
+                    original_token_estimate: 1,
+                    validation_evidence_version: 1,
+                    validation: Vec::new(),
+                },
+            )],
+            status_events: statuses
+                .iter()
+                .map(|(revision, kind)| StoredContextStatusEvent {
+                    revision: *revision,
+                    timestamp: Utc::now(),
+                    kind: *kind,
+                    reason: None,
+                })
+                .collect(),
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
+            emergency_audit: None,
+        }
+    }
+
+    fn invalidated() -> jcode_session_types::StoredReasoningSelection {
+        jcode_session_types::StoredReasoningSelection::Invalidated {
+            cause: jcode_session_types::StoredReasoningInvalidationCause::RequestPrefixChanged {
+                recorded_transitions: Vec::new(),
+            },
+        }
+    }
+
+    fn state_of(
+        revision: u64,
+        transactions: Vec<StoredContextTransaction>,
+    ) -> StoredContextViewState {
+        StoredContextViewState {
+            revision,
+            transactions,
+            ..StoredContextViewState::default()
+        }
+    }
+
+    #[test]
+    fn managed_reasoning_invalidations_are_applied_once_then_superseded() {
+        use StoredContextTransactionStatusKind::{
+            Applied, InvalidatedByTranscriptEdit, Reapplied, Reverted, Superseded,
+        };
+        let thinking = StoredContextBlockKind::AnthropicThinking;
+        let valid = state_of(
+            2,
+            vec![
+                managed(
+                    "first",
+                    &[(1, Applied), (2, Superseded)],
+                    invalidated(),
+                    thinking,
+                ),
+                managed("second", &[(2, Applied)], invalidated(), thinking),
+            ],
+        );
+        validate_context_state(&valid).expect("one active managed set replaces the other");
+        validate_context_state(&state_of(
+            2,
+            vec![managed(
+                "rewound",
+                &[(1, Applied), (2, InvalidatedByTranscriptEdit)],
+                invalidated(),
+                thinking,
+            )],
+        ))
+        .expect("a transcript edit may end a managed set");
+
+        for statuses in [
+            vec![(1, Applied), (2, Reverted)],
+            vec![(1, Applied), (2, Superseded), (3, Reapplied)],
+            vec![
+                (1, Applied),
+                (2, InvalidatedByTranscriptEdit),
+                (3, Reapplied),
+            ],
+        ] {
+            assert!(
+                matches!(
+                    validate_context_state(&state_of(
+                        3,
+                        vec![managed("managed", &statuses, invalidated(), thinking)]
+                    )),
+                    Err(ContextStateValidationError::InvalidStatusTransition { .. })
+                ),
+                "{statuses:?}"
+            );
+        }
+
+        assert!(matches!(
+            validate_context_state(&state_of(
+                2,
+                vec![
+                    managed("first", &[(1, Applied)], invalidated(), thinking),
+                    managed("second", &[(2, Applied)], invalidated(), thinking),
+                ]
+            )),
+            Err(ContextStateValidationError::MultipleActiveReasoningInvalidations { .. })
+        ));
+    }
+
+    #[test]
+    fn invalidated_selections_belong_only_to_managed_signed_thinking_sets() {
+        use StoredContextTransactionStatusKind::{Applied, Superseded};
+        let thinking = StoredContextBlockKind::AnthropicThinking;
+        let mut user = managed("user", &[(1, Applied)], invalidated(), thinking);
+        user.authorization = StoredContextAuthorization::Manual { initiated_by: None };
+        assert!(matches!(
+            validate_context_state(&state_of(1, vec![user.clone()])),
+            Err(ContextStateValidationError::InvalidReasoningInvalidation { .. })
+        ));
+
+        user.operations = Vec::new();
+        user.status_events.push(StoredContextStatusEvent {
+            revision: 2,
+            timestamp: Utc::now(),
+            kind: Superseded,
+            reason: None,
+        });
+        assert!(
+            matches!(
+                validate_context_state(&state_of(2, vec![user])),
+                Err(ContextStateValidationError::InvalidStatusTransition { .. })
+            ),
+            "only a managed set may be superseded"
+        );
+
+        let user_selection =
+            jcode_session_types::StoredReasoningSelection::KeepLatestAssistantTurns {
+                protected_recent_assistant_turns: 1,
+            };
+        assert!(matches!(
+            validate_context_state(&state_of(
+                1,
+                vec![managed(
+                    "wrong-selection",
+                    &[(1, Applied)],
+                    user_selection,
+                    thinking
+                )]
+            )),
+            Err(ContextStateValidationError::InvalidReasoningInvalidation { .. })
+        ));
+        assert!(matches!(
+            validate_context_state(&state_of(
+                1,
+                vec![managed(
+                    "wrong-kind",
+                    &[(1, Applied)],
+                    invalidated(),
+                    StoredContextBlockKind::OpenAiReasoning
+                )]
+            )),
+            Err(ContextStateValidationError::InvalidReasoningInvalidation { .. })
+        ));
+        let mut empty = managed("empty", &[(1, Applied)], invalidated(), thinking);
+        empty.operations.clear();
+        assert!(matches!(
+            validate_context_state(&state_of(1, vec![empty])),
+            Err(ContextStateValidationError::InvalidReasoningInvalidation { .. })
         ));
     }
 

@@ -4,6 +4,7 @@ mod swarm_retirement;
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/context_budget.rs");
+include!("tests/reasoning_invalidation.rs");
 include!("tests/startup_context_ui.rs");
 include!("tests/instruction_manager.rs");
 include!("tests/context_reducer_parity.rs");

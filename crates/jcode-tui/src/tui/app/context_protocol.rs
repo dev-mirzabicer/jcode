@@ -1150,6 +1150,7 @@ mod tests {
 
     fn transaction_result() -> ContextTransactionResult {
         ContextTransactionResult {
+            reasoning_invalidation: None,
             transaction: transaction_summary(),
             revision: 5,
             status: StoredContextTransactionStatusKind::Applied,
@@ -1159,6 +1160,7 @@ mod tests {
 
     fn draft() -> ContextDraft {
         ContextDraft {
+            request_prefix_digest: None,
             identity: identity(),
             authorization: StoredContextAuthorization::Manual { initiated_by: None },
             active_agent_profile_message_id: None,
@@ -1167,6 +1169,7 @@ mod tests {
             distillation_proposals: Vec::new(),
             ineligible_distillations: Vec::new(),
             preview: ContextDraftPreview {
+                reasoning_invalidation: None,
                 raw_stored_message_count: 1,
                 current_context_revision: 4,
                 proposed_context_revision: 5,

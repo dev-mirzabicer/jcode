@@ -384,6 +384,10 @@ pub struct Agent {
     /// to avoid cache invalidation when MCP tools arrive asynchronously.
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
+    /// Labels of recorded prompt or tool-set transitions since the previous
+    /// provider request. They name why replayed reasoning stopped matching
+    /// its prefix, and are cleared once a request reconciles it.
+    pending_prefix_transitions: Vec<String>,
     /// One-shot guard for the async MCP-registration race (#206).
     ///
     /// MCP servers connect on a background task and register `mcp__*` tools
@@ -462,6 +466,7 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            pending_prefix_transitions: Vec::new(),
             mcp_late_register_resolved: false,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
@@ -535,7 +540,7 @@ impl Agent {
             .save()
             .map_err(ActiveSkillActivationError::Persistence)?;
         self.session = candidate;
-        crate::cache_invalidation::record(
+        self.record_prefix_transition(
             "skill activation",
             format!(
                 "activated skill {} from {}",
@@ -1016,7 +1021,9 @@ impl Agent {
     ) -> Result<()> {
         let detail = detail.into();
         if document_cache_invalidation {
-            crate::cache_invalidation::record(source, detail.clone());
+            self.record_prefix_transition(source, detail.clone());
+        } else {
+            self.note_prefix_transition(source);
         }
 
         self.cache_tracker.reset();
@@ -1138,6 +1145,101 @@ impl Agent {
 
     pub(crate) fn context_view_state(&self) -> &jcode_session_types::StoredContextViewState {
         &self.session.context_view
+    }
+
+    /// Record an intentional change to what the next request carries before
+    /// its messages: documented in the cache-invalidation journal, and kept
+    /// as a cause for replayed reasoning it may invalidate.
+    pub(crate) fn record_prefix_transition(
+        &mut self,
+        source: &'static str,
+        detail: impl Into<String>,
+    ) {
+        crate::cache_invalidation::record(source, detail);
+        self.note_prefix_transition(source);
+    }
+
+    /// Keep `source` as a cause for replayed reasoning the next request may
+    /// find invalid, without a journal entry.
+    pub(crate) fn note_prefix_transition(&mut self, source: &'static str) {
+        if !self
+            .pending_prefix_transitions
+            .iter()
+            .any(|label| label == source)
+        {
+            self.pending_prefix_transitions.push(source.to_string());
+        }
+    }
+
+    /// What the next provider request carries before its messages, read
+    /// without waiting (INT-01 WP-04). Context transitions stage replayed
+    /// reasoning invalidation against it.
+    pub(crate) fn context_request_prefix(
+        &self,
+    ) -> Result<crate::context::ContextRequestPrefix, crate::protocol::ContextServiceError> {
+        let system = self
+            .build_system_prompt_split()
+            .map_err(|error| crate::protocol::ContextServiceError::Runtime(error.to_string()))?
+            .static_part;
+        Ok(crate::context::ContextRequestPrefix {
+            system,
+            tools: self.next_request_tool_definitions()?,
+            recorded_transitions: self.pending_prefix_transitions.clone(),
+        })
+    }
+
+    /// Before a provider request, suppress replayed reasoning that no longer
+    /// matches the prefix this request carries, and restore reasoning that
+    /// matches again (INT-01 DESIGN §4.3). The change is persisted before the
+    /// request is sent; if persistence fails the request is not sent. Returns
+    /// a notice when anything changed.
+    pub(crate) fn reconcile_replayed_reasoning(
+        &mut self,
+        system: &str,
+        tools: &[ToolDefinition],
+    ) -> Result<Option<String>> {
+        let prefix = crate::context::ContextRequestPrefix {
+            system: system.to_string(),
+            tools: tools.to_vec(),
+            recorded_transitions: self.pending_prefix_transitions.clone(),
+        };
+        let outcome = crate::context::reconcile_before_request(
+            self.provider.as_ref(),
+            &self.session.messages,
+            &self.session.context_view,
+            &prefix,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "Replayed reasoning could not be checked against the request prefix: {error}. The provider request was not sent."
+            )
+        })?;
+        self.pending_prefix_transitions.clear();
+        let Some(outcome) = outcome else {
+            return Ok(None);
+        };
+        let previous = self.session.context_view.clone();
+        self.replace_context_view_state(outcome.state);
+        if let Err(error) = self.session.save() {
+            self.replace_context_view_state(previous);
+            return Err(error.context(
+                "Invalid replayed reasoning could not be persisted as suppressed; the provider request was not sent",
+            ));
+        }
+        let notice = outcome
+            .summary
+            .as_ref()
+            .and_then(crate::context::describe_reasoning_invalidation)
+            .unwrap_or_else(|| "Replayed reasoning suppression updated".to_string());
+        crate::cache_invalidation::record("reasoning invalidation", notice.clone());
+        logging::info(&format!(
+            "Reasoning invalidation for session {} at context revision {}: {notice}",
+            self.session.id, self.session.context_view.revision
+        ));
+        self.cache_tracker.reset();
+        self.provider
+            .invalidate_context_continuation("replayed reasoning invalidation changed");
+        Ok(Some(notice))
     }
 
     pub(crate) fn replace_context_view_state(
@@ -1337,3 +1439,13 @@ mod tests;
 #[cfg(test)]
 #[path = "agent/context_delivery_tests.rs"]
 mod context_delivery_tests;
+#[cfg(test)]
+mod reasoning_invalidation_tests;
+
+impl crate::context::RequestPrefixSource for Agent {
+    fn request_prefix(
+        &self,
+    ) -> Result<crate::context::ContextRequestPrefix, crate::protocol::ContextServiceError> {
+        self.context_request_prefix()
+    }
+}

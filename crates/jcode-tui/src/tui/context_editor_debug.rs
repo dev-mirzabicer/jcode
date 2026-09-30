@@ -65,6 +65,10 @@ const DEBUG_FIXTURE_NAMES: &[&str] = &[
     "narrow-terminal",
     "emergency-policy-block",
     "emergency-policy-authorized",
+    "reasoning-invalidation-review",
+    "reasoning-invalidation-confirmation",
+    "reasoning-invalidation-history",
+    "reasoning-invalidation-detail",
 ];
 
 impl ContextEditor {
@@ -568,6 +572,27 @@ impl ContextEditor {
             }
             "history" | "revert-reapply-refresh" => {
                 self.apply_debug_history(name == "revert-reapply-refresh");
+            }
+            "reasoning-invalidation-review" | "reasoning-invalidation-confirmation" => {
+                self.apply_snapshot(debug_snapshot(32, 32, false, CuratorFixture::Available));
+                let mut draft = debug_draft(PricingFixture::Metered, 3);
+                draft.preview.reasoning_invalidation = Some(debug_reasoning_invalidation());
+                draft.request_prefix_digest = Some(0x5afe);
+                self.apply_draft_state(ContextClientDraftState::Ready(Box::new(draft)));
+                if name == "reasoning-invalidation-confirmation" {
+                    self.modal = Some(ContextEditorModal::ApplyConfirmation);
+                }
+            }
+            "reasoning-invalidation-history" | "reasoning-invalidation-detail" => {
+                self.apply_debug_history(false);
+                self.history
+                    .insert(0, debug_reasoning_invalidation_summary());
+                self.history_cursor = 0;
+                if name == "reasoning-invalidation-detail" {
+                    self.transaction_detail = Some(debug_reasoning_invalidation_detail());
+                    self.phase = ContextEditorPhase::InspectTransaction;
+                    self.preview_scroll = 0;
+                }
             }
             "transaction-detail" => {
                 self.apply_debug_history(false);
@@ -1340,7 +1365,9 @@ fn debug_draft(pricing: PricingFixture, proposal_count: usize) -> ContextDraft {
                 "Raw stored message count remains exactly 32.".to_string(),
                 "Provider continuation will restart from one fresh full request.".to_string(),
             ],
+            reasoning_invalidation: None,
         },
+        request_prefix_digest: None,
         curator_usage: vec![jcode_session_types::StoredContextCuratorUsage {
             provider: "synthetic-curator".to_string(),
             model: "synthetic-curator-model".to_string(),
@@ -1432,6 +1459,97 @@ fn debug_transaction_detail() -> ContextTransactionDetail {
             }),
             economics: Some(debug_economics(PricingFixture::Metered)),
             curator_usage: draft.curator_usage,
+            emergency_audit: None,
+        },
+    }
+}
+
+fn debug_reasoning_invalidation() -> crate::protocol::ContextReasoningInvalidationSummary {
+    crate::protocol::ContextReasoningInvalidationSummary {
+        invalidated_by_change: 4,
+        invalidated_by_change_tokens: 9_600,
+        invalidated_other: 1,
+        invalidated_other_tokens: 1_200,
+        restored: 2,
+        restored_tokens: 3_100,
+        active: 5,
+        transaction_id: Some("reasoning-invalidation-debug".to_string()),
+    }
+}
+
+fn debug_reasoning_invalidation_summary() -> ContextTransactionSummary {
+    ContextTransactionSummary {
+        id: "reasoning-invalidation-debug".to_string(),
+        created_at: debug_timestamp(),
+        base_revision: 12,
+        active: true,
+        latest_status: Some(StoredContextTransactionStatusKind::Applied),
+        latest_status_revision: Some(13),
+        authorization: StoredContextAuthorization::ReasoningInvalidation,
+        operation_counts: crate::protocol::ContextOperationCounts {
+            range_summaries: 0,
+            reasoning_suppressions: 2,
+            tool_result_distillations: 0,
+        },
+        application: None,
+        economics: None,
+    }
+}
+
+fn debug_reasoning_invalidation_detail() -> ContextTransactionDetail {
+    let target = |index: usize| jcode_session_types::StoredContentTarget {
+        message_id: format!("debug-message-{index}"),
+        stored_index_hint: index,
+        block_ordinal_hint: 0,
+        kind: StoredContextBlockKind::AnthropicThinking,
+        semantic_id: None,
+        expected_hash: 0x7000 + index as u64,
+    };
+    let suppression = |cause, targets: Vec<usize>, tokens| {
+        StoredContextOperation::ReasoningSuppression(StoredReasoningSuppression {
+            selection: StoredReasoningSelection::Invalidated { cause },
+            assistant_turns_affected: targets.len(),
+            targets: targets.into_iter().map(target).collect(),
+            replay_block_kinds: vec![StoredContextBlockKind::AnthropicThinking],
+            original_token_estimate: tokens,
+            validation_evidence_version: 1,
+            validation: Vec::new(),
+        })
+    };
+    ContextTransactionDetail {
+        session_id: "debug-session-context-editor".to_string(),
+        context_revision: 13,
+        transaction: StoredContextTransaction {
+            id: "reasoning-invalidation-debug".to_string(),
+            base_revision: 12,
+            created_at: debug_timestamp(),
+            authorization: StoredContextAuthorization::ReasoningInvalidation,
+            operations: vec![
+                suppression(
+                    jcode_session_types::StoredReasoningInvalidationCause::ContextTransition {
+                        transaction_id: "debug-transaction-0".to_string(),
+                        transition: jcode_session_types::StoredContextTransitionKind::Apply,
+                    },
+                    vec![11, 13, 15, 17],
+                    9_600,
+                ),
+                suppression(
+                    jcode_session_types::StoredReasoningInvalidationCause::RequestPrefixChanged {
+                        recorded_transitions: vec!["skill activation".to_string()],
+                    },
+                    vec![5],
+                    1_200,
+                ),
+            ],
+            status_events: vec![StoredContextStatusEvent {
+                revision: 13,
+                timestamp: debug_timestamp(),
+                kind: StoredContextTransactionStatusKind::Applied,
+                reason: None,
+            }],
+            application: None,
+            economics: None,
+            curator_usage: Vec::new(),
             emergency_audit: None,
         },
     }

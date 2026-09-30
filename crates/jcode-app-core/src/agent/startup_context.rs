@@ -492,7 +492,7 @@ impl Agent {
                     .map_err(PrimaryInstructionActivationError::Persistence)?;
                 self.session = candidate;
                 self.rewind_undo_snapshot = None;
-                crate::cache_invalidation::record(
+                self.record_prefix_transition(
                     "agent system replacement",
                     format!("active agent replaced with {}", agent.id),
                 );
