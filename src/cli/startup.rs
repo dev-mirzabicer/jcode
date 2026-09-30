@@ -239,6 +239,10 @@ mod reasoning_live_tests;
 #[path = "delivery_live_tests.rs"]
 mod delivery_live_tests;
 
+#[cfg(test)]
+#[path = "invalidation_live_tests.rs"]
+mod invalidation_live_tests;
+
 fn parse_and_prepare_args() -> Result<Args> {
     let args = Args::parse();
     startup_profile::mark("args_parse");
