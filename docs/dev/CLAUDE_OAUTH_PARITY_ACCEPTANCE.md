@@ -452,10 +452,23 @@ streaming turn loop.
   `session_guppy_1790766772709_86910e63c240abe5`. Two earlier attempts are
   recorded: one ended on a 429 rate limit, and one passed every request but
   produced no thinking, so the script now asks for careful computation.
-- **OpenAI OAuth, `gpt-5.6-sol`, effort `low`**, 2026-09-30T11:13Z: blocked.
-  The account returned `usage_limit_reached` before the first response. The
-  OpenAI builder's append-only behavior is covered by the deterministic
-  harness above.
+- **OpenAI OAuth, `gpt-5.6-sol`, effort `low`**, 2026-09-30T11:54Z: passed.
+  Eight assistant turns, three deliveries at the same positions as on Claude
+  (after each prompt, and as the resume turn's whole content), three
+  encrypted reasoning items replayed, written values `29` and `81`. Session
+  `session_dromedary_1790769251846_0045b3301b08f740`. Two earlier attempts
+  (11:13Z and 11:41Z) were blocked by the account's `usage_limit_reached`
+  before any response; Mirza switched the OpenAI OAuth account.
+
+## WP-03 acceptance
+
+Accepted by Mirza on 2026-09-30 on candidate `3aae9687f`, after the Claude
+leg; the GPT leg above completed the live evidence afterwards. Published to
+local and downstream `main` at 2026-09-30T11:44:24Z. Activated runtime
+`debd94e90-dirty-e56fbd1ff5b5` (running, current and shared-server channels
+equal, canary passed); later commits are test-only or documentation. WP-04
+consumes the recorded transitions (skill activation, swarm effort directive)
+and the delivery owner as reasoning-invalidating context.
 
 ## WP-03 activation and live smoke
 
