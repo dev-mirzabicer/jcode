@@ -146,13 +146,11 @@ pub fn stored_reasoning_replay_kind(
 /// Whether top-level Claude sessions (dispatched through [`MultiProvider`])
 /// replay Anthropic thinking.
 ///
-/// INT-01 activates top-level replay only in WP-05, after append-only delivery
-/// (WP-03) and the context-control rule (WP-04) exist; until then they keep
-/// thinking as history-only traces, as before INT-01. Children created through
-/// the model roster talk to the concrete Anthropic runtime and replay already.
-/// This is an internal switch, not configuration, and it is removed at the
-/// INT-01 closeout (DESIGN §8).
-const TOP_LEVEL_ANTHROPIC_THINKING_REPLAY: bool = false;
+/// INT-01/WP-05 activates top-level replay, after append-only delivery (WP-03)
+/// and the context-control rule (WP-04). This internal switch is the rollback
+/// lever while live acceptance runs; it is not configuration and is removed
+/// once that acceptance passes (DESIGN §8).
+const TOP_LEVEL_ANTHROPIC_THINKING_REPLAY: bool = true;
 
 fn top_level_replay_kind(
     runtime_kind: Option<jcode_provider_core::ContextReasoningBlockKind>,

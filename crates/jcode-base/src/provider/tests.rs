@@ -1159,8 +1159,8 @@ fn reasoning_replay_kind_follows_the_runtime_a_request_dispatches_to() {
     let claude_cli: Arc<dyn Provider> = Arc::new(StubExternalRuntime::claude_cli());
     let openai: Arc<dyn Provider> = Arc::new(StubExternalRuntime::openai());
 
-    // Claude-direct: the concrete runtime replays thinking (children use it
-    // directly); top-level replay waits for INT-01/WP-05.
+    // Claude-direct: top-level sessions replay the dispatching runtime's
+    // thinking, as children do (INT-01/WP-05).
     let provider = multi_provider_with_runtimes(
         Some(claude_cli.clone()),
         Some(anthropic.clone()),
@@ -1168,8 +1168,8 @@ fn reasoning_replay_kind_follows_the_runtime_a_request_dispatches_to() {
         ActiveProvider::Claude,
     );
     assert_eq!(anthropic.reasoning_replay_kind(), Some(AnthropicThinking));
-    const { assert!(!TOP_LEVEL_ANTHROPIC_THINKING_REPLAY) };
-    assert_eq!(provider.reasoning_replay_kind(), None);
+    const { assert!(TOP_LEVEL_ANTHROPIC_THINKING_REPLAY) };
+    assert_eq!(provider.reasoning_replay_kind(), Some(AnthropicThinking));
     assert_eq!(
         top_level_replay_kind(anthropic.reasoning_replay_kind(), true),
         Some(AnthropicThinking),

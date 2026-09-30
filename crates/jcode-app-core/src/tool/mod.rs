@@ -199,7 +199,10 @@ impl Registry {
         self.child_policy = child_policy::bind(session)?.map(Arc::new);
         Ok(())
     }
-    pub(crate) async fn new_for_shared_session(
+    /// The registry of a session hosted by a shared runtime: the ordinary
+    /// tools plus the delegation host (`subagent`, `get_catalog`). The server
+    /// and primary runtimes build it; so does the INT-01 live acceptance.
+    pub async fn new_for_shared_session(
         provider: Arc<dyn Provider>,
         pool: Arc<crate::mcp::SharedMcpPool>,
         repositories: crate::instruction::InstructionRepositoryService,
