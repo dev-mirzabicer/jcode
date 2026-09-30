@@ -368,3 +368,131 @@ is logged as an INV-1 defect with a status notice.
   `agent::tests::both_agent_loops_store_reasoning_in_stream_order_through_the_assembler`
   (blocking and streaming loops, replay on and off, with a mid-stream
   rollback). `jcode-tui` `sdk_results` checks the local partial checkpoint.
+
+## Current behavior after WP-03
+
+- **One delivery path for dynamic context** (D2). Per-turn system reminders,
+  the batch nudge and reload-resume continuations reach the model only as
+  persisted transcript content: a user-role
+  `<system-reminder>\n…\n</system-reminder>` message with `display_role:
+  System` and a structural `ContextDelivery` origin (channel and a fingerprint
+  of the exact text). GPT and Claude receive the same bytes. The contract is
+  in [`NOTIFICATIONS.md`](../NOTIFICATIONS.md#delivery-of-model-visible-context).
+- **Once per occurrence** (Mirza's decision D-WP03-1, 2026-09-30). A turn's
+  reminder is committed with the input it accompanies, in the same save and
+  durable input receipt. A safe-boundary group delivers its shared reminder
+  once, after its last input. A reminder-only input (a reload resume) has the
+  delivery as its content, so no empty prompt is stored. The batch nudge is
+  persisted when it fires. Identical text on a later occurrence is delivered
+  again; the design's per-channel text dedup would have dropped the second
+  background-task reminder and emptied a second reload resume.
+- **Static system prompt** (R08, D8). Claude's `system` is the two OAuth
+  identity blocks plus the cached static prompt; GPT's `instructions` is the
+  static prompt. Active-skill text and the dormant swarm effort directive are
+  static sections composed by `jcode_base::prompt::compose_static_system_prompt`.
+  A skill activation and a switch into or out of a swarm effort are recorded
+  in the cache-invalidation journal. The per-request dynamic part, its
+  provider parameter (`Provider::complete_split*`), the Anthropic dynamic
+  system block and `messages_with_dynamic_system_context` are deleted.
+- **Formatter** (R10). Tool results lead every merged Anthropic user message
+  (stable partition, as upstream). The trailing-assistant `Continue.` repair
+  remains only as a guard logged as an INV-1 defect.
+- **Dormant channels** (D9). Memory keeps its trailing request-only message in
+  both the agent loops and the TUI local loop
+  (`PendingMemory::provider_message`); a reactivation must deliver through
+  the persisted path. The swarm directive renders its managed source each
+  request; a Swarm reactivation must freeze it or record source edits.
+- **History.** Deliveries render as system messages showing their body, in
+  server History and the TUI local view. Legacy messages recognized only by
+  their `<system-reminder>` prefix stay hidden.
+- **Migration.** Old sessions have no deliveries; their next reminder is
+  delivered once as new transcript content. GPT sessions now keep reminders
+  in history rather than receiving a fresh copy after the latest prompt on
+  every request.
+
+## WP-03 append-only evidence
+
+`agent::context_delivery_tests::scripted_session_is_append_only_on_both_production_builders`
+drives the real agent loops through 31 requests with a recording provider:
+turns with and without reminders, a batch nudge after repeated single-tool
+rounds, a safe-boundary background input with its own reminder, one skill
+activation (the only declared transition), a failed request after a persisted
+tool result, a reload into a fresh Agent, and two reminder-only resumes with
+identical text. Each request is formatted exactly as the Anthropic
+(`build_system_param`, `format_messages`, `format_tools`) and OpenAI
+(`build_tools`, `build_responses_input`) runtimes format it, with cache
+markers removed. Between consecutive requests `system` and `tools` must be
+byte-identical except across the declared transition, and the (role, block)
+sequence must only grow. Every occurrence must be persisted exactly once with
+its structural origin, and no empty prompt may be stored.
+
+At `9353d296d` the same harness failed on both builders: Claude's `system`
+changed on every reminder turn (requests 3, 11, 12, 16, 18, 20, 23, 24, 28),
+GPT's reminder message moved or disappeared (requests 3, 9, 12, 14, 16, 18,
+20, 23, 24, 28), the batch nudge vanished after one request (request 9, both),
+and no reminder was ever persisted. After WP-03 it passes, together with
+`one_boundary_group_delivers_its_shared_reminder_once_after_its_inputs`.
+
+## WP-03 live evidence (2026-09-30)
+
+`cli::startup::delivery_live_tests::append_only_delivery_live` (ignored; run
+with `cargo test -p jcode --lib append_only_delivery_live -- --ignored`)
+runs two reminder turns, a reload and a reminder-only resume through the
+streaming turn loop.
+
+- **Claude OAuth, `claude-sonnet-5-5`, effort `high`,
+  `JCODE_ANTHROPIC_PREFIX_MISMATCH=error`**, concrete Anthropic runtime (the
+  path children use, which replays signed thinking), 2026-09-30T11:12Z:
+  passed. Eight assistant turns, three deliveries, two signed thinking blocks,
+  written values `29` and `81`, no binding events. The first turn's thinking
+  was replayed on every later request, after the second turn's delivered
+  reminder, after the reload and on the reminder-only resume, so the earlier
+  prefix stayed byte-identical; Gate 0 T7 showed the former `system`
+  placement invalidating such blocks. Session
+  `session_guppy_1790766772709_86910e63c240abe5`. Two earlier attempts are
+  recorded: one ended on a 429 rate limit, and one passed every request but
+  produced no thinking, so the script now asks for careful computation.
+- **OpenAI OAuth, `gpt-5.6-sol`, effort `low`**, 2026-09-30T11:13Z: blocked.
+  The account returned `usage_limit_reached` before the first response. The
+  OpenAI builder's append-only behavior is covered by the deterministic
+  harness above.
+
+## WP-03 activation and live smoke
+
+Activated build `debd94e90-dirty-e56fbd1ff5b5` (v0.75.480-dev) through a
+coordinated `selfdev build-reload`, requested at 2026-09-30T09:33:40Z from a
+debug-created selfdev session. An earlier request was correctly refused as
+superseded because the worker changed the source tree during the build. The
+build request reports "published and smoke-tested". The running server,
+current and shared-server channels report `debd94e90`. As in WP-01 and WP-02,
+the new server did not load the requesting session, so the pending
+activation was completed with
+`jcode_build_support::complete_pending_activation_for_session` after a
+manifest backup; the canary is `passed`.
+
+On the activated server, an owned headless session on Claude OAuth
+`claude-sonnet-5-5` started a background `bash` task with `wake: true`. Its
+completion arrived as a BackgroundTask input followed by a persisted
+`ContextDelivery` reminder (`# System Reminder` with the managed
+background-task prose), and the woken request was accepted. A tester TUI
+client resuming that session rendered the delivery as a `system` message
+with its body, between the background-task notice and the reply, with no
+frame anomalies. The server logged no INV-1 defect, binding event or
+continuation repair.
+
+## WP-03 deterministic evidence
+
+- `jcode-session-types` `context_delivery::tests`: one text form, fingerprint
+  validation and serialization round trip.
+- `jcode-provider-anthropic` `tool_results_first_tests` (R10: parallel results
+  lead a message that also carries an injected input and a delivery) and the
+  updated trailing-assistant guard tests. `jcode-provider-anthropic-runtime`:
+  OAuth `system` is the identity blocks plus the cached static prompt, API-key
+  `system` is only the static prompt.
+- `jcode-base`: `context_delivery_is_persisted_and_rendered_as_a_system_message`,
+  the static-prompt swarm directive and composition tests.
+- `jcode-app-core`: the two harness tests above, the active-skill snapshot
+  tests (skill text is a static section, frozen across disk edits, resume and
+  split), and `managed_effort_is_a_static_section_and_fails_before_provider`.
+- `jcode-tui`: `test_system_reminder_is_delivered_as_transcript_content_not_system_prompt`
+  and the local skill and kv-cache telemetry tests.
