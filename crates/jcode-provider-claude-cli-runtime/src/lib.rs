@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 #[cfg(any(not(unix), test))]
 use std::time::Duration;
@@ -72,10 +73,15 @@ const NATIVE_TOOL_NAMES: &[&str] = &[
     "expand_tool_use",
 ];
 
+/// Shown once per provider instance, at its first request (INT-01 R15).
+pub const CLAUDE_CLI_PARITY_NOTICE: &str = "Claude CLI route: jcode's Claude parity (the registry tool surface, thinking replay, append-only context and cache placement) does not apply to this deprecated subprocess transport. Use the native Anthropic provider (`--provider claude`) for it.";
+
 #[derive(Clone)]
 pub struct ClaudeProvider {
     config: ClaudeCliConfig,
     model: Arc<RwLock<String>>,
+    /// Whether this instance already showed [`CLAUDE_CLI_PARITY_NOTICE`].
+    parity_noticed: Arc<AtomicBool>,
 }
 
 impl ClaudeProvider {
@@ -85,6 +91,7 @@ impl ClaudeProvider {
         Self {
             config,
             model: Arc::new(RwLock::new(model)),
+            parity_noticed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -764,6 +771,8 @@ impl ClaudeProvider {
         jcode_base::logging::warn(
             "Claude transport: deprecated CLI subprocess; prefer `--provider claude` native Anthropic OAuth/API transport.",
         );
+        let parity_notice = (!self.parity_noticed.swap(true, Ordering::Relaxed))
+            .then(|| CLAUDE_CLI_PARITY_NOTICE.to_string());
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
@@ -774,6 +783,14 @@ impl ClaudeProvider {
                 }))
                 .await
                 .is_err()
+            {
+                return;
+            }
+            if let Some(detail) = parity_notice
+                && tx
+                    .send(Ok(StreamEvent::StatusDetail { detail }))
+                    .await
+                    .is_err()
             {
                 return;
             }
@@ -1031,6 +1048,7 @@ impl Provider for ClaudeProvider {
         Arc::new(ClaudeProvider {
             config,
             model: Arc::new(RwLock::new(model)),
+            parity_noticed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1974,6 +1992,55 @@ wait
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn the_cli_route_states_once_that_claude_parity_does_not_apply() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = env_lock().await;
+        let temp = TestDir::new();
+        let executable = temp.path().join("fake-claude");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"session_id\":\"fake-session\"}'\n",
+        )
+        .expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake Claude CLI metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).expect("make fake CLI executable");
+        let _path = EnvRestore::set("JCODE_CLAUDE_CLI_PATH", &executable);
+
+        let provider = ClaudeProvider::new();
+        let mut notices = Vec::new();
+        for _ in 0..2 {
+            let mut stream = provider
+                .complete(&[Message::user("hi")], &[], "", None)
+                .await
+                .expect("start fake Claude CLI");
+            let mut request_notices = 0;
+            while let Some(event) = stream.next().await {
+                if let StreamEvent::StatusDetail { detail } = event.expect("event")
+                    && detail == CLAUDE_CLI_PARITY_NOTICE
+                {
+                    request_notices += 1;
+                }
+            }
+            notices.push(request_notices);
+        }
+        assert_eq!(notices, vec![1, 0], "shown at the first request only");
+        let forked = provider.fork();
+        let mut stream = forked
+            .complete(&[Message::user("hi")], &[], "", None)
+            .await
+            .expect("start fake Claude CLI");
+        let mut shown = false;
+        while let Some(event) = stream.next().await {
+            shown |= matches!(event.expect("event"), StreamEvent::StatusDetail { detail } if detail == CLAUDE_CLI_PARITY_NOTICE);
+        }
+        assert!(shown, "a fork is a new provider instance");
+    }
+
     #[tokio::test]
     async fn claude_cli_subprocess_receives_profile_control_before_real_user_prompt() {
         use std::os::unix::fs::PermissionsExt;
