@@ -14,10 +14,12 @@
 //!
 //! ```text
 //! JCODE_ANTHROPIC_PREFIX_MISMATCH=error JCODE_WP03_LIVE_ROUTE=claude-oauth:claude-sonnet-5-5 \
-//!     cargo test --bin jcode append_only_delivery_live -- --ignored --nocapture
+//!     cargo test -p jcode --lib append_only_delivery_live -- --ignored --nocapture
 //! JCODE_WP03_LIVE_ROUTE=openai-oauth:gpt-5.6-sol \
-//!     cargo test --bin jcode append_only_delivery_live -- --ignored --nocapture
+//!     cargo test -p jcode --lib append_only_delivery_live -- --ignored --nocapture
 //! ```
+//!
+//! `JCODE_WP03_LIVE_EFFORT` sets the roster effort (default `high`).
 
 use super::register_external_provider_runtimes;
 use jcode_base::model_roster::{ModelRoster, ModelRosterRequest, RosterCatalog};
@@ -102,13 +104,16 @@ async fn append_only_delivery_live() -> anyhow::Result<()> {
             "run with JCODE_ANTHROPIC_PREFIX_MISMATCH=error so any mismatch fails the turn"
         );
     }
+    // The binary installs this in `main`; the OpenAI transport needs it.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     register_external_provider_runtimes();
     let catalog = RosterCatalog::from_provider(&LiveRoute {
         api_method: api_method.clone(),
         model: model.clone(),
     })?;
+    let effort = std::env::var("JCODE_WP03_LIVE_EFFORT").unwrap_or_else(|_| "high".into());
     let roster = ModelRoster::parse(&format!(
-        "[aliases.wp03-live]\ndescription='INT-01/WP-03 live acceptance'\nmodels=['{route}']\ndefault_effort='low'"
+        "[aliases.wp03-live]\ndescription='INT-01/WP-03 live acceptance'\nmodels=['{route}']\ndefault_effort='{effort}'"
     ))?;
     let resolve = || {
         roster
@@ -126,13 +131,13 @@ async fn append_only_delivery_live() -> anyhow::Result<()> {
     agent.set_working_dir(dir.path().to_str().expect("utf-8 temp path"));
     run_turn(
         &mut agent,
-        "Use the read tool to read numbers.txt, then use the write tool to write the sum of the numbers into sum.txt. Reply with exactly: DONE",
+        "Think carefully before each tool call. Use the read tool to read numbers.txt, compute the product of the three numbers modulo 97, then use the write tool to write only that value into first.txt. Reply with exactly: DONE",
         Some("WP03 harness note: this is an automated acceptance run in a temporary directory."),
     )
     .await?;
     run_turn(
         &mut agent,
-        "Use the read tool to read sum.txt, then use the write tool to write that value times two into double.txt. Reply with exactly: DONE",
+        "Think carefully before each tool call. Use the read tool to read first.txt, compute (that value * 13 + 7) modulo 101, then use the write tool to write only that value into second.txt. Reply with exactly: DONE",
         Some("WP03 harness note: keep using only the read and write tools."),
     )
     .await?;
@@ -151,7 +156,7 @@ async fn append_only_delivery_live() -> anyhow::Result<()> {
     run_turn(
         &mut agent,
         "",
-        Some("WP03 resume: use the read tool to read double.txt, then reply with exactly: RESUMED"),
+        Some("WP03 resume: think carefully, use the read tool to read second.txt, then reply with exactly: RESUMED"),
     )
     .await?;
 
@@ -200,7 +205,7 @@ async fn append_only_delivery_live() -> anyhow::Result<()> {
         .filter(|block| matches!(block, ContentBlock::OpenAIReasoning { .. }))
         .count();
     let binding_events = jcode_provider_core::anthropic_binding_diagnostics::snapshot();
-    let written = ["sum.txt", "double.txt"].map(|name| {
+    let written = ["first.txt", "second.txt"].map(|name| {
         std::fs::read_to_string(dir.path().join(name))
             .unwrap_or_default()
             .trim()
@@ -210,6 +215,7 @@ async fn append_only_delivery_live() -> anyhow::Result<()> {
         "{}",
         serde_json::json!({
             "route": route,
+            "effort": effort,
             "replay_kind": format!("{replay_kind:?}"),
             "prefix_mismatch_behavior": std::env::var("JCODE_ANTHROPIC_PREFIX_MISMATCH").ok(),
             "started": started.to_rfc3339(),
@@ -222,7 +228,7 @@ async fn append_only_delivery_live() -> anyhow::Result<()> {
             "written": written,
         })
     );
-    assert_eq!(written, ["82".to_string(), "164".to_string()]);
+    assert_eq!(written, ["29".to_string(), "81".to_string()]);
     if claude {
         assert!(thinking_blocks >= 2, "thinking was produced and replayed");
         assert!(
