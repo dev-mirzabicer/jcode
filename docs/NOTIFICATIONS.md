@@ -20,6 +20,23 @@ Reload, reconnect, retry and accepted provider fallback retain typed queued inte
 
 Origin ranges survive ordinary session persistence, inheritance and exports. Export redaction remains authoritative. Ranges are rebased over the exact redacted result where possible. If a redaction crosses part boundaries, complete redacted text is displayed rather than trusting stale ranges that could hide user content.
 
+## Delivery of model-visible context
+
+Per-turn system reminders, the batch nudge and reload-resume continuations reach the model only as persisted transcript content. The same bytes go to every provider, GPT and Claude alike. Nothing per-request is added to the system prompt or inserted into history for one request only, so each provider request is the previous one with content appended at the end.
+
+- **Form.** A delivery is a user-role message, `<system-reminder>\n…\n</system-reminder>`, stored with `display_role: System` and a structural `ContextDelivery` origin (channel plus a fingerprint of the exact text). Turn reminders keep their `# System Reminder` heading. The origin never reaches the provider. A delivery whose text no longer matches its fingerprint (for example after export redaction) is treated as ordinary source.
+- **Once per occurrence.** A turn's reminder is committed with the input it accompanies: same save, same durable input receipt, directly after the input's content. Safe-boundary inputs injected together share one delivery, after the group's last input. An input with no content, such as a reload resume, has the delivery as its entire content, so no empty prompt is stored. The batch nudge is delivered when it fires. Identical text on a later occurrence is delivered again; reminders are events, not state.
+- **Append-only.** A delivery is never re-sent, rewritten, moved or removed. Later requests carry it as ordinary history, and context control can summarize it like any other message.
+- **Static prompt.** Active-skill text and the dormant Swarm effort directive are sections of the static system prompt. A skill activation, and a switch into or out of a Swarm effort, is a recorded prompt transition in the cache-invalidation journal; no other request-time system content exists. The directive renders its managed source on each request, so a future Swarm reactivation must also freeze that text or record its source edits as transitions.
+- **Failure.** If the delivery cannot be persisted with its input, the input commit fails and the turn is not dispatched; the existing turn-setup abort preserves the input.
+- **History.** Deliveries render as system messages showing their body. Clients render stored messages; there is no separate live event.
+
+Since INT-01/WP-03, GPT sessions keep reminders in history instead of receiving a fresh copy after the latest prompt on every request. Old sessions have no deliveries; an old stored message recognized only by its `<system-reminder>` prefix stays hidden in history.
+
+Agent memory is globally disabled ([Memory policy](MEMORY_POLICY.md)). Its dormant injection still adds a trailing request-only message. Any reactivation must deliver through this persisted path instead, because a message present in one request and absent from the next breaks append-only provider history and, on Claude, invalidates later thinking.
+
+The text form and origin validation live in `jcode_session_types::context_delivery`; `Session::append_context_delivery` is the only writer. When to deliver belongs to the owners of each occurrence: the agent input commit, safe-boundary injection and batch nudge in `jcode-app-core`, and the TUI local turn in `jcode-tui`.
+
 ## Failure handling
 
 A notification failure is distinct from the operation it describes:
