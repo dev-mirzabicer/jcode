@@ -33,7 +33,7 @@ Per-turn system reminders, the batch nudge and reload-resume continuations reach
 
 Since INT-01/WP-03, GPT sessions keep reminders in history instead of receiving a fresh copy after the latest prompt on every request. Old sessions have no deliveries; an old stored message recognized only by its `<system-reminder>` prefix stays hidden in history.
 
-Agent memory is globally disabled ([Memory policy](MEMORY_POLICY.md)). Its dormant injection still adds a trailing request-only message. Any reactivation must deliver through this persisted path instead, because a message present in one request and absent from the next breaks append-only provider history and, on Claude, invalidates later thinking.
+Agent memory is globally disabled ([Memory policy](MEMORY_POLICY.md)). Its dormant injection still adds a trailing request-only message. Any reactivation must deliver through this persisted path instead, because a message present in one request and absent from the next breaks append-only provider history and, on Claude, invalidates later thinking; it would also carry the request's newest prompt-cache breakpoint, writing an entry the next request cannot read ([cache placement](CLAUDE_PROVIDER_PARITY.md#prompt-cache)).
 
 The text form and origin validation live in `jcode_session_types::context_delivery`; `Session::append_context_delivery` is the only writer. When to deliver belongs to the owners of each occurrence: the agent input commit, safe-boundary injection and batch nudge in `jcode-app-core`, and the TUI local turn in `jcode-tui`.
 

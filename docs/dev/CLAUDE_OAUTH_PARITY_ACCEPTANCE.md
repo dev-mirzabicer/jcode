@@ -686,3 +686,147 @@ current and shared-server channels equal, canary passed); later commits are
 documentation only. Top-level Claude replay remains off until WP-05, which now
 has complete invalidation coverage: every context transition and every
 request reconciles bound thinking before it is sent.
+
+## Current behavior after WP-05
+
+The current-behavior reference is [`CLAUDE_PROVIDER_PARITY.md`](../CLAUDE_PROVIDER_PARITY.md).
+WP-05 changed:
+
+- **Cache placement** (R12, DESIGN §6). `place_cache_breakpoints` marks the
+  last system block (covering the tools), the newest content block, the
+  previous request's newest block, and an intermediate block when more than
+  15 lookback positions separate those two. The last-tool marker and the two
+  assistant-anchored markers are removed; `tool_result` and `image` blocks can
+  carry a marker. Binding digests exclude every marker, so placement never
+  changes what a thinking block is bound to.
+- **TTL** (deferred decision, resolved). The existing one-hour default stays
+  for every marker. Measured on the downstream owner's logs (7,152
+  consecutive request pairs within sessions): 81.7% start under a minute
+  apart, 15.4% 1–5 minutes, 2.5% 5–60 minutes, 0.4% over an hour. Writes bill
+  only the appended delta, so the one-hour premium is about 0.75x of what a
+  session appends, while each 5–60 minute gap under a five-minute TTL rewrites
+  the whole conversation at 1.25x. A one-hour system marker with a five-minute
+  tail is worse for the same reason: the tail is what gets rewritten.
+- **Thinking display** (deferred decision, resolved). `display: "summarized"`
+  stays. Current documentation (re-verified 2026-10-01) says it returns the
+  reasoning summaries and the between-tool progress notes; `"updates"`
+  returns only the notes.
+- **Per-model parameters** (R13, DESIGN §7). An explicit default-effort table
+  (`anthropic_default_reasoning_effort`): Opus 5.5 `medium`, Opus 5 `low`,
+  Opus 4.7/4.8 `xhigh`, earlier Opus `high`, Fable 5/5.1 `high`, everything
+  else the model default. Effort `none` follows `anthropic_thinking_off`:
+  omitted thinking where omission means none, `{type: "disabled"}` on Opus 5
+  and Sonnet 5 (where omission means adaptive thinking), and `low` where
+  thinking cannot be disabled (Opus 5.5, Sonnet 5.5, Fable, Mythos), which no
+  longer offer `none`. Sonnet 5.5's `between_tools` is not used because it
+  rejects `block_binding`. `temperature` is sent only where sampling
+  parameters are still accepted (`anthropic_accepts_sampling_parameters`).
+  Documentation and measurement disagree here: the documentation removes
+  sampling parameters on Opus 5.5, Opus 5 and Sonnet 5 and rejects
+  non-default values on Sonnet 5.5, while Gate 0 G0.5 measured `temperature:
+  1.0` accepted on all four; omitting it is hygiene.
+- **Models.** `claude-opus-5-5`, `claude-fable-5-1` and `claude-sonnet-5-5`
+  are in `ALL_CLAUDE_MODELS` (after the default, so fallback ranking prefers
+  them over older generations) and priced; jcode-base's `AVAILABLE_MODELS`
+  is that list.
+- **Claude CLI route** (R15). Each provider instance shows a one-time status
+  notice that INT-01 parity does not apply to the deprecated subprocess
+  transport.
+- **Tool-set lifetime** (carried from WP-04). `jcode_app_core::tool::ToolSetLock`
+  is the only owner of a session's locked tool set, for the agent loops and
+  the TUI local loop. Context-control transitions, historical tool repair,
+  legacy migration, rewind and its undo, and provider or model switches keep
+  the set; clear and session changes lock a new one. The set changes only at
+  a recorded transition (late MCP registration, MCP tool set reload, tool
+  unavailable), each journaled and named as the cause of the thinking it
+  invalidates. Before WP-05 every context transition rebuilt the set, so a
+  registry change since the lock turned an edit into a full cache break and
+  invalidated all Claude thinking, attributed to the edit.
+- **Top-level replay** (R14). Top-level Claude sessions replay signed
+  thinking; `MultiProvider::reasoning_replay_kind` passes the dispatching
+  runtime's kind through.
+
+## WP-05 live evidence (2026-09-30, UTC)
+
+**Top-level legs (R14).** The ignored test `claude_parity_live`
+(`src/cli/parity_live_tests.rs`) runs a top-level session on the production
+provider (`MultiProvider`, as `--provider claude` builds it, pinned to Claude
+OAuth) with a shared-session registry, under
+`JCODE_ANTHROPIC_PREFIX_MISMATCH=error`. Each leg is 20 requests: coding turns
+with thinking between tool calls, a system reminder, a `get_catalog` plus
+`subagent` delegation (the child ran on the `fast-worker` alias), and a real
+range summary of the first turn applied through the curator plan review, draft
+and apply, then reverted. Run with:
+
+```text
+JCODE_ANTHROPIC_PREFIX_MISMATCH=error JCODE_WP05_LIVE_MODEL=<model> \
+    cargo test -p jcode --lib claude_parity_live -- --ignored --nocapture
+```
+
+| Leg | Effort | Session | Requests | Rejections | Binding events | Cache reads, measured requests | Thinking stored / replayed at the end |
+|---|---|---|---|---|---|---|---|
+| Opus 5.5, 22:46Z | `medium` (default table) | `session_turkey_1790808363825_9e0f1aee8ffaf220` | 20 | 0 | none | 96.7–99.6% (16 of 16 ≥ 90%) | 8 / 6 |
+| Sonnet 5.5, 22:47Z | model default | `session_t-rex_1790808450848_61c35862507eb788` | 20 | 0 | none | 96.7–99.6% (16 of 16 ≥ 90%) | 6 / 5 |
+| Opus 5, 22:51Z | `low` (default table) | `session_ladybug_1790808677707_0b0d257d05f012a9` | 20 | 0 | none | 96.7–99.6% (16 of 16 ≥ 90%) | 5 / 5 |
+
+- Measured requests are those from the third on, excluding the first request
+  after each declared transition (summary apply, revert). Those were 85.0–85.9%
+  after the apply and 96.4–96.6% after the revert, which read the entry the
+  pre-summary requests had written.
+- On the binding models the apply staged 1 block (invalidated by the summary)
+  and the revert replayed it again and staged the blocks produced while the
+  summary was active (Opus 5.5: 2, Sonnet 5.5: 1). The difference between
+  stored and replayed thinking at the end is that managed set. Opus 5, which
+  does not bind, staged nothing (D11).
+- Every request replayed the stored signed blocks unchanged and the API
+  accepted them under `error`; no local invalid-replay or provider
+  `input_transformations` event was recorded.
+- The Sonnet 5.5 ledger printed its effort as `none`: with nothing configured
+  the runtime then reported the model default as `none`. That was a defect in
+  the reported value only (the request left effort to the model); it would
+  have made a restored session send an explicit `none`, and is fixed in
+  `d128652e3`.
+- Each leg's first request wrote about 20.1K tokens (tools, system and the
+  first prompt); every later request read the previous request's entry.
+
+**Effort `none` shapes (R13).** `effort_none_shapes_live` sent one request per
+model over Claude OAuth at 22:45Z: Opus 5 with `thinking: {type: "disabled"}`
+and no effort (`session_hare_1790808346516_2ec113c0073bc6a6`), and Opus 5.5,
+where `none` means `low` (`session_vole_1790808350221_5bf4bf9c1378cb90`). Both
+were accepted. Gate 0 G0.5 (`temperature: 1.0` tolerated) stays the recorded
+evidence for sampling parameters.
+
+Reports: program evidence `evidence/wp05-2026-10-01/`.
+
+## WP-05 deterministic evidence
+
+- **Cache placement.** `jcode-provider-anthropic` `cache_breakpoints::tests`
+  (10): static-prefix marker on the last system block or, without a system,
+  the last tool; first request; each request of a scripted session reads
+  exactly where the previous one wrote, with the cached span byte-identical;
+  no marker on thinking blocks; the intermediate lookback marker; parallel tool
+  runs counted as one position; idempotence; uniform TTL. The runtime's
+  `production_requests_read_where_the_previous_request_wrote` checks the same
+  through `build_api_request` with real bindings and asserts every replayed
+  block stays valid.
+- **Parameters.** `jcode-provider-core`: `default_effort_is_an_explicit_per_model_table`,
+  `thinking_off_follows_each_generation`,
+  `sampling_parameters_are_sent_only_where_documented`,
+  `current_claude_models_are_listed_and_classified`, and the pricing rates.
+  Runtime: `effort_none_follows_how_each_generation_turns_thinking_off`,
+  `effort_none_is_not_offered_where_thinking_cannot_be_turned_off`,
+  `unconfigured_efforts_follow_the_default_table`,
+  `an_unconfigured_effort_is_the_model_default_not_none`.
+- **Claude CLI route.** `the_cli_route_states_once_that_claude_parity_does_not_apply`
+  runs a fake CLI binary through the real subprocess path; the replay-kind
+  dispatch test covers a Claude slot served only by the CLI.
+- **Tool-set lifetime.** `tool::tool_set::tests` (6) for the owner;
+  `agent::reasoning_invalidation_tests::a_context_transition_keeps_the_tool_set_and_earlier_thinking`
+  (a context transition keeps the tool bytes and every earlier thinking block,
+  with an unchanged and with a changed registry, and an `mcp` release is a
+  recorded, attributed rebuild) and
+  `a_late_mcp_registration_is_one_recorded_attributed_transition`, both
+  through the real streaming loop with the production binding rule; the TUI
+  `local_requests_keep_the_locked_tool_set_until_a_recorded_transition`.
+- **Replay.** `reasoning_replay_kind_follows_the_runtime_a_request_dispatches_to`:
+  top-level Claude replays; the CLI route and other slots do not change.

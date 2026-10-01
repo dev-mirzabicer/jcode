@@ -383,7 +383,7 @@ Each suppressed block records its cause:
 | Cause | Meaning |
 |---|---|
 | Context transition | The apply, revert or reapply of the named transaction changed the history before the block. |
-| Request prefix changed | The system prompt, tool set or credential route differs from the request that produced the block. The recorded harness transitions since the previous request (skill activation, tool-set change, model switch, agent replacement) are listed when known. |
+| Request prefix changed | The system prompt, tool set or credential route differs from the request that produced the block. The recorded harness transitions since the previous request (skill activation, late MCP tool registration, MCP tool set reload, model switch, agent replacement) are listed when known. |
 
 What people see:
 
@@ -399,6 +399,11 @@ What people see:
 - **Requests.** A request-time change is persisted before the request is sent (a persistence
   failure blocks the request and preserves input), shown as a status notice and recorded in
   the cache-invalidation journal.
+
+A context transition changes history, not tools. The next request keeps the session's locked
+tool set, so a registry change since the lock (an MCP server that connected, for example) is
+not picked up by the edit and invalidates nothing; the tool set changes only at a recorded
+tool-set transition ([tool-set lifetime](CLAUDE_PROVIDER_PARITY.md#tool-set-lifetime)).
 
 A person's own `R` selection is recorded even for blocks jcode currently suppresses, so a
 later restore cannot undo it. Routes and models that do not bind reasoning (OpenAI, Opus 5,
@@ -633,7 +638,7 @@ closed.
 
 | Provider family/route | Current validation and operation boundary |
 |---|---|
-| Native Anthropic | Validates the Anthropic message formatter, which is identical for the API-key and OAuth routes. Signed thinking, including empty-text and `redacted_thinking` blocks, can be suppressed only as a complete block. Thinking stored before bindings were recorded (INT-01/WP-02) is never replayed and counts as history-only. On models that bind thinking to its prefix, every transition stages the thinking it invalidates (see [Replayed reasoning bound to its prefix](#replayed-reasoning-bound-to-its-prefix)). Tool/result and image normalization must still pass. |
+| Native Anthropic | Validates the Anthropic message formatter, which is identical for the API-key and OAuth routes. Top-level sessions and children replay signed thinking ([Claude provider parity](CLAUDE_PROVIDER_PARITY.md)). Signed thinking, including empty-text and `redacted_thinking` blocks, can be suppressed only as a complete block. Thinking stored before bindings were recorded (INT-01/WP-02) is never replayed and counts as history-only. On models that bind thinking to its prefix, every transition stages the thinking it invalidates (see [Replayed reasoning bound to its prefix](#replayed-reasoning-bound-to-its-prefix)). Tool/result and image normalization must still pass. |
 | OpenAI Responses | Validates through the Responses input builder. Complete `OpenAIReasoning` items can be suppressed. Every historical context revision clears persistent WebSocket/`previous_response_id` continuation before the next full request. |
 | ChatGPT web conversation route | Projected-history operations are disabled because this route does not use the Responses input builder and has no dedicated validation adapter. |
 | OpenRouter and named OpenAI-compatible routes | Validates with the exact model-dependent chat formatter options. Generic `Reasoning` is removable only when that route actually replays it. Locked model state fails closed rather than assuming a fallback shape. |
