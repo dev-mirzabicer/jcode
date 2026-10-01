@@ -830,3 +830,23 @@ Reports: program evidence `evidence/wp05-2026-10-01/`.
   `local_requests_keep_the_locked_tool_set_until_a_recorded_transition`.
 - **Replay.** `reasoning_replay_kind_follows_the_runtime_a_request_dispatches_to`:
   top-level Claude replays; the CLI route and other slots do not change.
+
+## WP-05 activation and live smoke
+
+The coordinated `selfdev build-reload` built `3204b4481` and the shared server
+reloaded into `3204b4481-dirty-d255ec210806` (v0.75.498-dev) at
+2026-10-01T02:55:33Z. The request came from a short-lived self-dev session
+that the new server did not load (`session_herb_1790823208829_35e6d983bfddc56a`;
+never resume it). After the smoke below, the pending activation bound to it
+was completed with `jcode_build_support::complete_pending_activation_for_session`
+(manifest backup in `~/.jcode/scratch/int01-wp05-activation-20261001/`).
+Running, current and shared-server channels are equal, the canary is
+`passed`, and the reload phase is `SocketReady`.
+
+**Activated-runtime smoke** (02:56Z, the shared server, production
+`drop_block`): an owned server session (`session_tigress_1790823376963_7e90084725a5b97b`)
+on Claude Opus 5.5 over OAuth ran two turns that think between `read` and
+`write` calls. Its stored thinking carries bindings, which a top-level
+session records only with replay on. The six requests read 21.9K–22.8K
+cached tokens after the first (97.9–99.4% of input), and the log shows no
+`INV-1` warning, binding event or dropped block.
