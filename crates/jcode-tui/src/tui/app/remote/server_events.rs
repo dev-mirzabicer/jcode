@@ -2926,6 +2926,7 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::ModelChanged {
             model,
             provider_name,
+            reasoning_effort,
             error,
             ..
         } => {
@@ -2954,6 +2955,11 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
+                }
+                // The new model's effective effort; a server that does not
+                // report it leaves the previous value.
+                if let Some(report) = reasoning_effort {
+                    app.remote_reasoning_effort = report.effort;
                 }
                 app.invalidate_model_picker_cache();
                 if !app.auth_catalog_refresh_pending {

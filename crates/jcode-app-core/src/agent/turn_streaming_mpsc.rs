@@ -1106,6 +1106,9 @@ impl Agent {
                     id: 0,
                     model: model_after_stream,
                     provider_name: Some(provider_name),
+                    reasoning_effort: Some(crate::protocol::ReportedReasoningEffort {
+                        effort: self.provider.reasoning_effort(),
+                    }),
                     error: None,
                 });
             }

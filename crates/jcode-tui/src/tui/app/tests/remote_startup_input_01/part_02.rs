@@ -294,6 +294,7 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
             id: 91,
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),
+            reasoning_effort: None,
             error: None,
         },
         &mut remote,

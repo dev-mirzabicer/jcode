@@ -208,7 +208,9 @@ mod wire;
 #[cfg(test)]
 mod workspace_tests;
 pub use wire::TaskGraphNodeSpec;
-pub use wire::{LegacyContextCommand, PrimaryClientInput, Request, ServerEvent};
+pub use wire::{
+    LegacyContextCommand, PrimaryClientInput, ReportedReasoningEffort, Request, ServerEvent,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {

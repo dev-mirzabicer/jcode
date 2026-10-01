@@ -1183,6 +1183,13 @@ pub struct PrimaryClientInput {
     pub auto_retry: bool,
 }
 
+/// A session's effective reasoning effort as the server reports it. `None`
+/// means the model's own default, not effort `none`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReportedReasoningEffort {
+    pub effort: Option<String>,
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -2146,6 +2153,11 @@ pub enum ServerEvent {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        /// The session's effective reasoning effort after the change. Absent
+        /// from servers that predate it; a report without an effort means the
+        /// model's own default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<ReportedReasoningEffort>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },

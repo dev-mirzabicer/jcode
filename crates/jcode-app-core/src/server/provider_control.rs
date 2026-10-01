@@ -468,12 +468,12 @@ fn model_switching_unavailable_current(agent: &Agent) -> Option<String> {
 
 fn send_model_changed_result(
     id: u64,
-    result: anyhow::Result<(String, String)>,
+    result: anyhow::Result<(String, String, Option<String>)>,
     fallback_model: String,
     client_event_tx: &crate::client_delivery::ClientEventSender,
 ) {
     match result {
-        Ok((updated, provider_name)) => {
+        Ok((updated, provider_name, effort)) => {
             crate::telemetry::record_model_switch();
             crate::logging::event_info(
                 "server_model_changed",
@@ -487,6 +487,9 @@ fn send_model_changed_result(
                 id,
                 model: updated,
                 provider_name: Some(provider_name),
+                // The new model's effort can differ (per-model defaults), and
+                // clients otherwise keep showing the previous model's.
+                reasoning_effort: Some(crate::protocol::ReportedReasoningEffort { effort }),
                 error: None,
             });
         }
@@ -503,6 +506,7 @@ fn send_model_changed_result(
                 id,
                 model: fallback_model,
                 provider_name: None,
+                reasoning_effort: None,
                 error: Some(error.to_string()),
             });
         }
@@ -522,6 +526,7 @@ fn apply_cycle_model(
             id,
             model: agent.provider_model(),
             provider_name: None,
+            reasoning_effort: None,
             error: Some("Model switching is not available for this provider.".to_string()),
         });
         return;
@@ -549,7 +554,11 @@ fn apply_cycle_model(
     let result = agent.set_model(&next_model).map(|_| {
         context_transactions
             .invalidate_session_drafts(agent.session_id(), "provider or model identity changed");
-        (agent.provider_model(), agent.provider_name())
+        (
+            agent.provider_model(),
+            agent.provider_name(),
+            agent.provider_handle().reasoning_effort(),
+        )
     });
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -690,6 +699,7 @@ fn apply_set_model(
             id,
             model: current,
             provider_name: None,
+            reasoning_effort: None,
             error: Some("Model switching is not available for this provider.".to_string()),
         });
         return;
@@ -699,7 +709,11 @@ fn apply_set_model(
     let result = agent.set_model(&model).map(|_| {
         context_transactions
             .invalidate_session_drafts(agent.session_id(), "provider or model identity changed");
-        (agent.provider_model(), agent.provider_name())
+        (
+            agent.provider_model(),
+            agent.provider_name(),
+            agent.provider_handle().reasoning_effort(),
+        )
     });
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -737,6 +751,7 @@ fn apply_set_route(
             id,
             model: current,
             provider_name: None,
+            reasoning_effort: None,
             error: Some("Model switching is not available for this provider.".to_string()),
         });
         return;
@@ -746,7 +761,11 @@ fn apply_set_route(
     let result = agent.set_route_selection(&selection).map(|_| {
         context_transactions
             .invalidate_session_drafts(agent.session_id(), "provider or model identity changed");
-        (agent.provider_model(), agent.provider_name())
+        (
+            agent.provider_model(),
+            agent.provider_name(),
+            agent.provider_handle().reasoning_effort(),
+        )
     });
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -1825,6 +1844,7 @@ mod tests {
                 id: 8,
                 model,
                 provider_name: Some(provider_name),
+                reasoning_effort: Some(_),
                 error: None,
             }) if model == "test-model-b" && provider_name == "test-effort"
         ));

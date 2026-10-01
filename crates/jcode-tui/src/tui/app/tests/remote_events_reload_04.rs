@@ -582,6 +582,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: Some("Anthropic".to_string()),
+            reasoning_effort: None,
             error: None,
         },
         &mut remote,
@@ -627,6 +628,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: None,
+            reasoning_effort: None,
             error: Some("switch failed".to_string()),
         },
         &mut remote,
@@ -2533,4 +2535,44 @@ fn test_credential_failure_breaker_resets_on_turn_success() {
         app.consecutive_credential_failures, 0,
         "a successful turn must reset the credential-failure streak"
     );
+}
+
+#[test]
+fn test_remote_model_change_adopts_the_reported_effort() {
+    // INT-01 WP-05: per-model defaults differ (Opus 5 `low`, Opus 5.5
+    // `medium`), so the header must not keep the previous model's effort.
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.is_remote = true;
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_reasoning_effort = Some("low".to_string());
+    let changed = |effort: Option<crate::protocol::ReportedReasoningEffort>| {
+        crate::protocol::ServerEvent::ModelChanged {
+            id: 0,
+            model: "claude-opus-5-5".to_string(),
+            provider_name: Some("Claude".to_string()),
+            reasoning_effort: effort,
+            error: None,
+        }
+    };
+
+    // A server that predates the report leaves the value unchanged.
+    app.handle_server_event(changed(None), &mut remote);
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("low"));
+
+    app.handle_server_event(
+        changed(Some(crate::protocol::ReportedReasoningEffort {
+            effort: Some("medium".to_string()),
+        })),
+        &mut remote,
+    );
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("medium"));
+
+    // A report without an effort is the model's default, shown as "default".
+    app.handle_server_event(
+        changed(Some(crate::protocol::ReportedReasoningEffort { effort: None })),
+        &mut remote,
+    );
+    assert_eq!(app.remote_reasoning_effort, None);
 }

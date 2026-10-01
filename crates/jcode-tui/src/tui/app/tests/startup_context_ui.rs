@@ -598,6 +598,7 @@ fn startup_context_editor_draft_survives_model_switch() {
             id: 77,
             model: "fixture/model-after-switch".to_string(),
             provider_name: Some("fixture-provider".to_string()),
+            reasoning_effort: None,
             error: None,
         },
         &mut remote,
