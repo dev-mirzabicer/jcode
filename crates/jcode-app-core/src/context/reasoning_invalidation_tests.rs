@@ -887,6 +887,86 @@ fn a_changed_prefix_is_suppressed_before_the_request_and_restored_when_it_return
 }
 
 #[test]
+fn a_summary_over_thinking_jcode_suppressed_does_not_shadow_the_managed_set() {
+    let mut chat = Conversation::new(true);
+    for signature in ["a", "b", "c"] {
+        chat.round(signature);
+    }
+    // A skill activation changes the prefix; the next request suppresses every
+    // earlier block in the managed set.
+    let mut skill = prefix();
+    skill.system.push_str("\n\n# Active Skill\nfixture");
+    skill.recorded_transitions = vec!["skill activation".to_string()];
+    let outcome = reconcile_before_request(
+        &chat.provider,
+        &chat.session.messages,
+        &chat.session.context_view,
+        &skill,
+    )
+    .unwrap()
+    .expect("every earlier block stops matching");
+    chat.session.context_view = outcome.state;
+    assert_eq!(chat.suppressed_signatures(), names(&["a", "b", "c"]));
+
+    let range_over = |chat: &Conversation, signature: &str| {
+        let id = |index: usize| chat.session.messages[index].id.clone();
+        chat.service.preview_context_ranges_for_session(
+            &chat.session,
+            chat.session.context_view.revision,
+            jcode_context_core::authoritative_transcript_digest(&chat.session.messages),
+            &[crate::protocol::ContextMessageRangeSelection {
+                start_message_id: id(chat.index(signature)),
+                end_message_id: id(chat.index(signature) + 1),
+            }],
+        )
+    };
+    let preview = range_over(&chat, "a").expect("a summary may cover managed suppressions");
+    assert!(
+        preview.shadowed_active_operations.is_empty(),
+        "the managed set is recomputed, not shadowed: {:?}",
+        preview.shadowed_active_operations
+    );
+
+    // A person's own suppression is still an operation a summary shadows.
+    let b = jcode_context_core::build_message_range(
+        &chat.session.messages,
+        chat.index("b"),
+        chat.index("b"),
+    )
+    .unwrap();
+    let suppression =
+        resolve_reasoning_suppression_for_ranges(&chat.session.messages, &[b]).unwrap();
+    let mut changed = skill.clone();
+    changed.recorded_transitions.clear();
+    let previous = chat.session.context_view.clone();
+    let proposed = state_with_transaction(
+        &previous,
+        "explicit-b",
+        previous.revision + 1,
+        StoredContextAuthorization::Manual { initiated_by: None },
+        vec![StoredContextOperation::ReasoningSuppression(suppression)],
+        None,
+        Vec::new(),
+    );
+    let index = proposed.transactions.len() - 1;
+    chat.session.context_view = prepare_context_transition_for_session(
+        &chat.provider,
+        &chat.session.messages,
+        &previous,
+        proposed,
+        index,
+        true,
+        "fixture-route",
+        None,
+        &changed,
+    )
+    .expect("prepared transition")
+    .state;
+    let preview = range_over(&chat, "b").expect("shadowing is reported, not refused, in review");
+    assert_eq!(preview.shadowed_active_operations, names(&["explicit-b:0"]));
+}
+
+#[test]
 fn a_transition_under_a_changed_prefix_attributes_only_its_own_blocks() {
     let mut chat = Conversation::new(true);
     for signature in ["a", "b", "c"] {

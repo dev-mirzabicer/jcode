@@ -2151,7 +2151,13 @@ fn active_block_operations_shadowed(
 ) -> Result<Vec<String>, ContextServiceError> {
     let target_index = ContextTargetIndex::new(messages);
     let mut shadowed = BTreeSet::new();
-    for transaction in state.active_transactions() {
+    // The jcode-managed reasoning invalidation is not a person's operation:
+    // it is recomputed whole at every transition, including the summary
+    // being drafted, so a summary never shadows it.
+    for transaction in state
+        .active_transactions()
+        .filter(|transaction| !transaction.is_reasoning_invalidation())
+    {
         for (operation_index, operation) in transaction.operations.iter().enumerate() {
             let targets = match operation {
                 StoredContextOperation::ReasoningSuppression(suppression) => {
