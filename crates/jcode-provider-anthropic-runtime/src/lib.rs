@@ -44,8 +44,8 @@ use jcode_provider_anthropic::{
 #[cfg(test)]
 use jcode_provider_anthropic::{ApiContentBlock, ToolResultContent, ToolResultContentBlock};
 use jcode_provider_core::{
-    ANTHROPIC_TOOL_NAME_POLICY, anthropic_decode_legacy_oauth_tool_name,
-    anthropic_is_1m_model as is_1m_model, anthropic_strip_1m_suffix as strip_1m_suffix,
+    ANTHROPIC_TOOL_NAME_POLICY, anthropic_is_1m_model as is_1m_model,
+    anthropic_strip_1m_suffix as strip_1m_suffix,
 };
 use reqwest::Client;
 use serde::Serialize;
@@ -2226,7 +2226,7 @@ async fn stream_response(
 
         // Process complete SSE events
         while let Some(event) = parse_sse_event(&mut buffer) {
-            let events = process_sse_event(&event, &mut sse_state, is_oauth);
+            let events = process_sse_event(&event, &mut sse_state);
             for stream_event in events {
                 if let StreamEvent::Error { ref message, .. } = stream_event
                     && is_retryable_error(&message.to_lowercase())
@@ -2682,11 +2682,7 @@ impl SseStreamState {
 }
 
 /// Process an SSE event and return StreamEvents if applicable
-fn process_sse_event(
-    event: &SseEvent,
-    state: &mut SseStreamState,
-    is_oauth: bool,
-) -> Vec<StreamEvent> {
+fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     match event.event_type.as_str() {
@@ -2769,12 +2765,8 @@ fn process_sse_event(
                         state.current_thinking = Some(ThinkingAccumulator::Redacted { data });
                     }
                     ApiContentBlockStart::ToolUse { id, name } => {
-                        let registry_name = ANTHROPIC_TOOL_NAME_POLICY.registry_name(&name);
-                        let mapped_name = is_oauth
-                            .then(|| anthropic_decode_legacy_oauth_tool_name(registry_name))
-                            .flatten()
-                            .unwrap_or(registry_name)
-                            .to_string();
+                        let mapped_name =
+                            ANTHROPIC_TOOL_NAME_POLICY.registry_name(&name).to_string();
                         // Start accumulating tool use
                         state.current_tool_use = Some(ToolUseAccumulator {
                             input_json: String::new(),

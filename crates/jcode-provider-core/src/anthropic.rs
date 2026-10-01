@@ -556,29 +556,6 @@ fn anthropic_effort_caps(model: &str) -> AnthropicReasoningCaps {
     }
 }
 
-/// Decode a Claude Code tool name that jcode advertised over Claude OAuth
-/// before INT-01/WP-01 (`Bash`, `Agent`, ...).
-///
-/// Claude now receives registry names unchanged (see
-/// [`crate::tool_name_policy`]). This decoder keeps a response streamed for a
-/// request built by the previous release resolving to the right tool. It is
-/// kept for one release after v0.75 and then removed together with the matching
-/// aliases in `jcode_tool_types::resolve_tool_name`.
-pub fn anthropic_decode_legacy_oauth_tool_name(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "Bash" => "bash",
-        "Read" => "read",
-        "Write" => "write",
-        "Edit" => "edit",
-        "Glob" => "glob",
-        "Grep" => "grep",
-        "Agent" => "subagent",
-        "ScheduleWakeup" => "schedule",
-        "Skill" => "skill_manage",
-        _ => return None,
-    })
-}
-
 /// Whether `name` satisfies the Messages API tool-name rule
 /// `^[a-zA-Z0-9_-]{1,128}$`.
 pub fn anthropic_tool_name_is_valid(name: &str) -> bool {
@@ -630,21 +607,6 @@ mod tests {
             anthropic_oauth_beta_headers("claude-opus-4-6[1m]"),
             ANTHROPIC_OAUTH_BETA_HEADERS_1M
         );
-    }
-
-    #[test]
-    fn legacy_oauth_names_decode_to_registry_tools() {
-        for (legacy, local) in [
-            ("Bash", "bash"),
-            ("Read", "read"),
-            ("Agent", "subagent"),
-            ("ScheduleWakeup", "schedule"),
-            ("Skill", "skill_manage"),
-        ] {
-            assert_eq!(anthropic_decode_legacy_oauth_tool_name(legacy), Some(local));
-        }
-        assert_eq!(anthropic_decode_legacy_oauth_tool_name("bash"), None);
-        assert_eq!(anthropic_decode_legacy_oauth_tool_name("custom"), None);
     }
 
     #[test]

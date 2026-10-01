@@ -268,11 +268,9 @@ pub fn resolve_tool_name(name: &str) -> &str {
         // models trained on or resuming from the old vocabulary still emit it.
         "discover_tools" => "integration_tools",
         "todoread" | "todowrite" | "todo_read" | "todo_write" | "todos" => "todo",
-        // Claude Code names the Anthropic OAuth surface advertised before
-        // INT-01/WP-01. Claude now sees registry names, but a nested `batch`
-        // subcall from a response built by the previous release bypasses the
-        // provider-side decoder and resolves here (issue #486). Kept for one
-        // release together with anthropic_decode_legacy_oauth_tool_name.
+        // Claude Code tool names (upstream issue #486). Claude sees registry
+        // names, but a model can still emit its trained vocabulary, including
+        // in `batch` subcalls; every tool call resolves through here.
         "Bash" => "bash",
         "Read" => "read",
         "Write" => "write",

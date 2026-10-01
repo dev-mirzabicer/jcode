@@ -722,7 +722,7 @@ fn message_start_warns_when_server_substitutes_a_different_model() {
         })
         .to_string(),
     };
-    let events = process_sse_event(&event, &mut state, true);
+    let events = process_sse_event(&event, &mut state);
     let warned = events.iter().any(|e| {
         matches!(e, StreamEvent::StatusDetail { detail }
             if detail.contains("claude-haiku-4-5") && detail.contains("claude-fable-5"))
@@ -743,7 +743,7 @@ fn message_start_warns_when_server_substitutes_a_different_model() {
         })
         .to_string(),
     };
-    let events = process_sse_event(&event, &mut state, true);
+    let events = process_sse_event(&event, &mut state);
     assert!(
         !events
             .iter()
@@ -769,7 +769,6 @@ fn test_anthropic_thinking_sse_events() {
             }),
         ),
         &mut state,
-        false,
     );
     assert!(matches!(events.as_slice(), [StreamEvent::ThinkingStart]));
     assert!(state.current_thinking.is_some());
@@ -785,7 +784,6 @@ fn test_anthropic_thinking_sse_events() {
                 }),
             ),
             &mut state,
-            false,
         );
         assert!(matches!(events.as_slice(), [StreamEvent::ThinkingDelta(t)] if t == text));
     }
@@ -800,7 +798,6 @@ fn test_anthropic_thinking_sse_events() {
             }),
         ),
         &mut state,
-        false,
     );
     assert!(
         events.is_empty(),
@@ -813,7 +810,6 @@ fn test_anthropic_thinking_sse_events() {
             serde_json::json!({"type": "content_block_stop", "index": 0}),
         ),
         &mut state,
-        false,
     );
     match events.as_slice() {
         [
@@ -840,7 +836,7 @@ fn every_thinking_block_is_captured_separately_and_chained_in_stream_order() {
     let mut state = test_sse_state();
     let mut blocks = Vec::new();
     let mut run = |event_type: &str, data: serde_json::Value, state: &mut SseStreamState| {
-        for event in process_sse_event(&sse(event_type, data), state, true) {
+        for event in process_sse_event(&sse(event_type, data), state) {
             if let StreamEvent::ReplayableReasoning(block) = event {
                 blocks.push(block);
             }
@@ -938,7 +934,6 @@ fn unsigned_thinking_is_display_only() {
             serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "x"}}),
         ),
         &mut state,
-        true,
     );
     let events = process_sse_event(
         &sse(
@@ -946,7 +941,6 @@ fn unsigned_thinking_is_display_only() {
             serde_json::json!({"type": "content_block_stop", "index": 0}),
         ),
         &mut state,
-        true,
     );
     assert!(
         matches!(events.as_slice(), [StreamEvent::ThinkingEnd]),
@@ -970,7 +964,6 @@ fn input_transformations_are_recorded_and_prefix_mismatches_are_surfaced() {
             }}),
         ),
         &mut state,
-        true,
     );
     let notices: Vec<&String> = events
         .iter()
@@ -1005,7 +998,6 @@ fn input_transformations_are_recorded_and_prefix_mismatches_are_surfaced() {
             serde_json::json!({"type": "message_start", "message": {"input_transformations": []}}),
         ),
         &mut state,
-        true,
     );
     assert!(
         empty.is_empty(),
@@ -1865,7 +1857,7 @@ fn ping_keepalive_emits_streaming_phase_event() {
         event_type: "ping".to_string(),
         data: r#"{"type": "ping"}"#.to_string(),
     };
-    let events = process_sse_event(&event, &mut state, true);
+    let events = process_sse_event(&event, &mut state);
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -1947,7 +1939,7 @@ fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
             })
             .to_string(),
         };
-        let events = process_sse_event(&event, &mut state, false);
+        let events = process_sse_event(&event, &mut state);
         assert!(
             events.is_empty(),
             "{block_type}: unknown block must not synthesize stream events"
@@ -2176,7 +2168,7 @@ fn replay_through_production_path(
     let mut tools: Vec<ToolCall> = Vec::new();
     let mut current: Option<(ToolCall, String)> = None;
     while let Some(event) = parse_sse_event(&mut buffer) {
-        for event in process_sse_event(&event, &mut state, true) {
+        for event in process_sse_event(&event, &mut state) {
             match event {
                 StreamEvent::ThinkingStart => turn.reasoning_started(),
                 StreamEvent::ThinkingDelta(text) => turn.reasoning_delta(&text),
