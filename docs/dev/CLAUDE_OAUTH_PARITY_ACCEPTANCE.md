@@ -850,3 +850,22 @@ on Claude Opus 5.5 over OAuth ran two turns that think between `read` and
 session records only with replay on. The six requests read 21.9K–22.8K
 cached tokens after the first (97.9–99.4% of input), and the log shows no
 `INV-1` warning, binding event or dropped block.
+
+**TUI evidence and the second activation.** An owned tester client on
+`3204b4481` showed, after real `/model claude-opus-5-5` and `/effort` input,
+"Available: None · Low ← current · …": the remote client built Claude's
+ladder from a second copy of the runtime's logic, and a model change carried
+no effort, so the header kept Opus 5's `low`. Both were repaired
+(`8d0d48bf3`, one ladder in `anthropic_selectable_efforts`; `3a6012c4c`,
+`ModelChanged` reports the effective effort) and activated in a second
+build-reload: runtime `3a6012c4c-dirty-ca803dbbbde2` (v0.75.501-dev),
+running, current and shared-server equal, canary `passed` (pending activation
+completed the same way, request session `session_mizaru_1790824234409_fee1f10ddd01f58a`;
+never resume it). On it a fresh tester showed Opus 5 offering
+`None · Low ← current · Medium · High · xHigh · Max`, then after the switch
+Opus 5.5 offering `Low · Medium ← current · High · xHigh · Max`, and
+`/effort none` answering "Reasoning effort → Low". No frame anomalies; frames
+in the program evidence directory. A final live smoke on that runtime
+(`session_palmtree_1790824428698_535241a865a1a6c5`, Opus 5.5, two thinking
+tool turns) read 97.4–99.9% of input from cache on every request and showed
+no `INV-1` warning or binding event.
