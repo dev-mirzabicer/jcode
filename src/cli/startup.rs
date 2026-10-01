@@ -247,6 +247,10 @@ mod invalidation_live_tests;
 #[path = "parity_live_tests.rs"]
 mod parity_live_tests;
 
+#[cfg(test)]
+#[path = "closeout_live_tests.rs"]
+mod closeout_live_tests;
+
 fn parse_and_prepare_args() -> Result<Args> {
     let args = Args::parse();
     startup_profile::mark("args_parse");

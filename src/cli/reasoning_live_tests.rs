@@ -12,7 +12,7 @@
 //! one owned session. Run explicitly:
 //!
 //! ```text
-//! JCODE_ANTHROPIC_PREFIX_MISMATCH=error cargo test --bin jcode \
+//! JCODE_ANTHROPIC_PREFIX_MISMATCH=error cargo test -p jcode --lib \
 //!     claude_child_route_replays -- --ignored --nocapture
 //! ```
 //!
