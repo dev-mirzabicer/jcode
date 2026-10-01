@@ -485,7 +485,9 @@ pub(crate) enum Command {
 
         /// Run a named live provider-contract probe instead of the tier
         /// checkpoints. `claude-oauth` checks what the Claude OAuth route
-        /// accepts for the --model under test. Spends subscription quota.
+        /// accepts for the --model under test; `claude-oauth-boundaries` runs
+        /// the operator-message, tool-change, modified-thinking, model-switch
+        /// and identity probes. Spends subscription quota.
         #[arg(long, value_name = "CONTRACT")]
         contract: Option<String>,
 

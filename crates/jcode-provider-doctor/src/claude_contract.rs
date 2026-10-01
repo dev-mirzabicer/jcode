@@ -150,7 +150,7 @@ impl Runner<'_> {
     }
 }
 
-fn classify(status: u16, response: &Value) -> Gate0Expectation {
+pub(crate) fn classify(status: u16, response: &Value) -> Gate0Expectation {
     if status != 200 {
         return if status == 400 {
             Gate0Expectation::Rejected
@@ -625,7 +625,7 @@ fn strict_candidate(surface: &Value, tools: &[ToolDefinition]) -> (Value, Vec<St
     (body, names)
 }
 
-fn redact(value: &Value) -> Value {
+pub(crate) fn redact(value: &Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.iter()
@@ -644,7 +644,7 @@ fn redact(value: &Value) -> Value {
     }
 }
 
-fn summarize(response: &Value) -> String {
+pub(crate) fn summarize(response: &Value) -> String {
     if let Some(error) = response.get("error") {
         return format!("error {error}");
     }

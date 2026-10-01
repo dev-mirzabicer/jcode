@@ -7,11 +7,14 @@
 //!   drivers).
 //! - [`claude_contract`]: the live Claude OAuth provider-contract probe
 //!   (`jcode provider-doctor claude --contract claude-oauth`).
+//! - [`claude_boundaries`]: the live INT-01/WP-06 boundary probes
+//!   (`jcode provider-doctor claude --contract claude-oauth-boundaries`).
 //! - [`live_provider_probes`]: the live HTTP/native-runtime probes the doctor
 //!   drives (models fetch, chat, streaming, tool-call smokes).
 //! - `lifecycle_driver` (test-only): the auth-lifecycle contract driver and
 //!   its provider matrices.
 
+pub mod claude_boundaries;
 pub mod claude_contract;
 pub mod live_provider_probes;
 pub mod provider_e2e;

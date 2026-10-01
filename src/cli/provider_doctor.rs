@@ -5,6 +5,9 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result, anyhow};
 
 use crate::live_tests::LiveVerificationStageStatus;
+use jcode_provider_doctor::claude_boundaries::{
+    CLAUDE_OAUTH_BOUNDARY_CONTRACT, run_claude_oauth_boundaries,
+};
 use jcode_provider_doctor::claude_contract::{
     CLAUDE_OAUTH_CONTRACT, capture_claude_sse_fixtures, run_claude_oauth_contract,
 };
@@ -100,12 +103,12 @@ pub async fn run_provider_contract_command(
     use jcode_provider_anthropic_runtime::AnthropicProvider;
 
     anyhow::ensure!(
-        contract == CLAUDE_OAUTH_CONTRACT,
-        "unknown provider contract `{contract}`; supported: {CLAUDE_OAUTH_CONTRACT}"
+        contract == CLAUDE_OAUTH_CONTRACT || contract == CLAUDE_OAUTH_BOUNDARY_CONTRACT,
+        "unknown provider contract `{contract}`; supported: {CLAUDE_OAUTH_CONTRACT}, {CLAUDE_OAUTH_BOUNDARY_CONTRACT}"
     );
     anyhow::ensure!(
         crate::auth::lifecycle::normalized_auth_provider_id(Some(provider)) == Some("claude"),
-        "the `{CLAUDE_OAUTH_CONTRACT}` contract runs against the `claude` provider"
+        "the `{contract}` contract runs against the `claude` provider"
     );
     let model = model.context("--model is required for a provider contract")?;
     let runtime = AnthropicProvider::new();
@@ -124,7 +127,11 @@ pub async fn run_provider_contract_command(
         }
         return Ok(());
     }
-    let report = run_claude_oauth_contract(&runtime, &tools).await?;
+    let report = if contract == CLAUDE_OAUTH_BOUNDARY_CONTRACT {
+        run_claude_oauth_boundaries(&runtime, &tools).await?
+    } else {
+        run_claude_oauth_contract(&runtime, &tools).await?
+    };
 
     let path = match out {
         Some(path) => path,
