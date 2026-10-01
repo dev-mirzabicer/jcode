@@ -27,8 +27,9 @@ pub use draft::*;
 pub use history::*;
 pub use preflight::*;
 pub use reasoning_invalidation::{
-    ContextRequestPrefix, ReasoningInvalidationOutcome, RequestPrefixSource,
-    describe_reasoning_invalidation, reasoning_reconciliation_needed, reconcile_before_request,
+    ContextRequestPrefix, ProviderReportedReasoning, ReasoningInvalidationOutcome,
+    RequestPrefixSource, describe_reasoning_invalidation, reasoning_reconciliation_needed,
+    reconcile_before_request,
 };
 pub use snapshot::*;
 

@@ -31,6 +31,16 @@ use sha2::{Digest, Sha256};
 /// closed instead of comparing incompatible values.
 pub const PREFIX_DIGEST_SCHEME: &str = "anthropic-prefix-v1";
 
+/// What a digest hashes in place of the OAuth client billing header. The API
+/// excludes that block from the thinking binding and from the prompt cache
+/// (probe G6.6, 2026-10-01: a changed `cc_version` under
+/// `prefix_mismatch_behavior: "error"` was accepted and read the same cache
+/// entry), so its text must not move the digest. The value is the header text
+/// every `anthropic-prefix-v1` digest recorded so far was taken over, which
+/// keeps those digests comparable.
+const BILLING_BLOCK_DIGEST_TEXT: &str =
+    "x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;";
+
 const SECTION_SYSTEM: u8 = b'S';
 const SECTION_TOOL: u8 = b'T';
 const SECTION_MESSAGE: u8 = b'M';
@@ -102,7 +112,13 @@ impl PrefixDigester {
             .map(|system| match system {
                 ApiSystem::Blocks(blocks) => blocks
                     .iter()
-                    .map(|block| without_cache_control(to_value(block)))
+                    .map(|block| {
+                        let mut value = without_cache_control(to_value(block));
+                        if block.client_billing {
+                            value["text"] = Value::String(BILLING_BLOCK_DIGEST_TEXT.to_string());
+                        }
+                        value
+                    })
                     .collect::<Vec<_>>(),
             })
             .unwrap_or_default();
@@ -241,6 +257,8 @@ pub struct ReplayedThinking {
     /// Wire path of the block, in the form Anthropic uses in
     /// `input_transformations` (`messages.<i>.content.<j>`).
     pub path: String,
+    /// [`thinking_fingerprint`] of the block.
+    pub fingerprint: String,
     /// The model that produced the block.
     pub model: String,
     pub validity: ReplayValidity,
@@ -295,12 +313,14 @@ pub fn analyze_request(request: &ApiRequest) -> RequestBindingReport {
                 Some(_) => ReplayValidity::Valid,
             };
             invalid_seen |= validity != ReplayValidity::Valid;
+            let fingerprint = thinking_block_fingerprint(block);
             replayed.push(ReplayedThinking {
                 path: format!("messages.{message_index}.content.{block_index}"),
+                fingerprint: fingerprint.clone().unwrap_or_default(),
                 model: binding.map(|b| b.model.clone()).unwrap_or_default(),
                 validity,
             });
-            previous = thinking_block_fingerprint(block);
+            previous = fingerprint;
         }
         digester.push_message(message);
     }
@@ -343,15 +363,17 @@ pub struct SuppressedReplay {
     pub validity: ReplayValidity,
 }
 
-/// The replayed thinking blocks jcode must suppress so that every block it
-/// still sends is valid.
+/// The replayed thinking blocks of one formatted request that do not verify,
+/// judged as if each invalid block before them were already removed.
 ///
-/// This is [`analyze_request`]'s rule applied as if each invalid block were
-/// already removed. A block is kept when the prefix before it matches its
-/// recorded digest and it chains to the last kept block (or no block was kept
-/// before it: removing a leading run is allowed). Removing a block never
-/// changes a later block's prefix digest, because thinking is not part of the
-/// prefix, so one pass decides every block.
+/// This is [`analyze_request`]'s rule with a kept-block chain: a block is kept
+/// when the prefix before it matches its recorded digest and it chains to the
+/// last kept block (or no block was kept before it: removing a leading run is
+/// allowed). The verdicts are exact only while removing a block leaves the
+/// message structure alone. Removing the only content of an assistant message
+/// makes the formatter drop that message and merge its neighbours, which
+/// changes the prefix of every later block, so callers that act on the result
+/// use [`plan_suppressions`], which rebuilds the request at each such removal.
 pub fn blocks_to_suppress(request: &ApiRequest) -> Vec<SuppressedReplay> {
     let mut digester = PrefixDigester::new(request.system.as_ref(), request.tools.as_deref());
     let mut last_kept: Option<String> = None;
@@ -389,6 +411,94 @@ pub fn blocks_to_suppress(request: &ApiRequest) -> Vec<SuppressedReplay> {
     suppressed
 }
 
+/// One stored block a suppression plan removes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedSuppression {
+    /// Index of the message in the planned `messages`.
+    pub message_index: usize,
+    /// Index of the block in that message's content.
+    pub block_index: usize,
+    /// `PrefixChanged` or `ChainBroken`.
+    pub validity: ReplayValidity,
+}
+
+/// The replayed thinking blocks jcode must suppress so that the request it
+/// then sends carries only blocks its own analysis finds valid, and no valid
+/// block is removed (INT-01/WP-06 R18).
+///
+/// `build` formats candidate messages into the exact request the runtime
+/// would send. Validity is decided on that formatted candidate after earlier
+/// removals: when a removal leaves a message with nothing the formatter
+/// emits, the request is rebuilt before any later block is judged, because
+/// the formatter drops the message and merges its neighbours. Blocks are
+/// decided in transcript order and an earlier block is never given up for a
+/// later one. The returned positions index the given `messages`.
+pub fn plan_suppressions(
+    messages: &[jcode_message_types::Message],
+    build: impl Fn(&[jcode_message_types::Message]) -> ApiRequest,
+) -> Vec<PlannedSuppression> {
+    let mut candidate = messages.to_vec();
+    // For each candidate block, its index in the original message.
+    let mut origin: Vec<Vec<usize>> = messages
+        .iter()
+        .map(|message| (0..message.content.len()).collect())
+        .collect();
+    let mut plan = Vec::new();
+    loop {
+        let suppressed = blocks_to_suppress(&build(&candidate));
+        if suppressed.is_empty() {
+            return plan;
+        }
+        // Wire blocks keep stored order, so the verdicts line up with the
+        // candidate's replayable blocks by one forward scan.
+        let mut stored = candidate.iter().enumerate().flat_map(|(message, entry)| {
+            entry
+                .content
+                .iter()
+                .enumerate()
+                .filter_map(move |(block, content)| {
+                    stored_thinking_fingerprint(content).map(|print| (print, message, block))
+                })
+        });
+        let mut batch: Vec<(usize, usize, ReplayValidity)> = Vec::new();
+        for verdict in &suppressed {
+            let Some((_, message, block)) =
+                stored.find(|(print, _, _)| *print == verdict.fingerprint)
+            else {
+                break;
+            };
+            batch.push((message, block, verdict.validity));
+            let remaining: Vec<_> = candidate[message]
+                .content
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !batch.iter().any(|(m, b, _)| *m == message && b == index))
+                .map(|(_, content)| content.clone())
+                .collect();
+            if crate::format_content_blocks(&remaining).is_empty() {
+                // The formatter drops this message: later verdicts were
+                // computed against a structure that no longer exists.
+                break;
+            }
+        }
+        drop(stored);
+        if batch.is_empty() {
+            // A verdict names no stored block: nothing more can be planned.
+            return plan;
+        }
+        // Remove from the back so earlier indices stay valid.
+        for (message, block, validity) in batch.iter().rev() {
+            candidate[*message].content.remove(*block);
+            plan.push(PlannedSuppression {
+                message_index: *message,
+                block_index: origin[*message].remove(*block),
+                validity: *validity,
+            });
+        }
+        plan.sort_by_key(|entry| (entry.message_index, entry.block_index));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +522,7 @@ mod tests {
             block_type: "text",
             text: text.to_string(),
             cache_control: None,
+            client_billing: false,
         }])
     }
 
@@ -914,5 +1025,259 @@ mod tests {
             *content = ToolResultContent::Text("different".to_string());
         }
         assert_ne!(before, analyze_request(&request).binding.prefix_digest);
+    }
+    #[test]
+    fn the_client_billing_header_text_does_not_move_the_digest() {
+        let messages = conversation();
+        let digest = |billing: &str, identity: &str| {
+            let mut request = request("sys", planner_tools(), &messages);
+            request.system = Some(ApiSystem::Blocks(vec![
+                ApiSystemBlock {
+                    block_type: "text",
+                    text: billing.to_string(),
+                    cache_control: None,
+                    client_billing: true,
+                },
+                ApiSystemBlock {
+                    block_type: "text",
+                    text: identity.to_string(),
+                    cache_control: None,
+                    client_billing: false,
+                },
+            ]));
+            analyze_request(&request).binding.prefix_digest
+        };
+        let current = digest(BILLING_BLOCK_DIGEST_TEXT, "identity");
+        assert_eq!(
+            current,
+            digest(
+                "x-anthropic-billing-header: cc_version=9.9.999; cc_entrypoint=sdk-cli; cch=0;",
+                "identity"
+            ),
+            "a client-version sync keeps every recorded digest"
+        );
+        assert_ne!(
+            current,
+            digest(BILLING_BLOCK_DIGEST_TEXT, "identity (changed)")
+        );
+        // Production marks exactly the billing header.
+        let Some(ApiSystem::Blocks(blocks)) = crate::build_system_param("sys", true) else {
+            panic!("OAuth system");
+        };
+        assert!(blocks[0].client_billing && !blocks[1].client_billing && !blocks[2].client_billing);
+    }
+
+    // --- plan_suppressions (INT-01/WP-06 R18) ---
+
+    fn planner_tools() -> Vec<ApiTool> {
+        vec![tool("bash"), tool("read")]
+    }
+
+    fn build(messages: &[Message]) -> ApiRequest {
+        request("sys", planner_tools(), messages)
+    }
+
+    fn bound(request: &ApiRequest) -> AnthropicThinkingBinding {
+        let binding = analyze_request(request).binding;
+        AnthropicThinkingBinding {
+            model: "claude-opus-5-5".to_string(),
+            prefix_digest: binding.prefix_digest,
+            predecessor: binding.last_thinking,
+        }
+    }
+
+    /// An assistant turn holding one signed thinking block and nothing else:
+    /// what a truncated, cancelled or reasoning-only response stores.
+    fn thinking_only_turn(request: &ApiRequest, signature: &str) -> Message {
+        message(
+            Role::Assistant,
+            vec![ContentBlock::AnthropicThinking {
+                thinking: String::new(),
+                signature: signature.to_string(),
+                binding: Some(bound(request)),
+            }],
+        )
+    }
+
+    fn redacted_only_turn(request: &ApiRequest, data: &str) -> Message {
+        message(
+            Role::Assistant,
+            vec![ContentBlock::AnthropicRedactedThinking {
+                data: data.to_string(),
+                binding: bound(request),
+            }],
+        )
+    }
+
+    fn thinking_then_text_turn(request: &ApiRequest, signature: &str) -> Message {
+        message(
+            Role::Assistant,
+            vec![
+                ContentBlock::AnthropicThinking {
+                    thinking: "t".to_string(),
+                    signature: signature.to_string(),
+                    binding: Some(bound(request)),
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                    cache_control: None,
+                },
+            ],
+        )
+    }
+
+    fn invalidate(block: &mut ContentBlock) {
+        match block {
+            ContentBlock::AnthropicThinking {
+                binding: Some(binding),
+                ..
+            }
+            | ContentBlock::AnthropicRedactedThinking { binding, .. } => {
+                binding.prefix_digest = format!("{PREFIX_DIGEST_SCHEME}:other");
+            }
+            _ => panic!("not a bound thinking block"),
+        }
+    }
+
+    fn apply(messages: &[Message], plan: &[PlannedSuppression]) -> Vec<Message> {
+        let mut kept = messages.to_vec();
+        for entry in plan.iter().rev() {
+            kept[entry.message_index].content.remove(entry.block_index);
+        }
+        kept
+    }
+
+    /// Both halves of R18: the planned request replays nothing invalid, and
+    /// the plan is exactly `expected` (so no valid block is given up).
+    fn assert_exact_plan(messages: &[Message], expected: &[(usize, usize)]) {
+        let plan = plan_suppressions(messages, build);
+        assert_eq!(
+            plan.iter()
+                .map(|entry| (entry.message_index, entry.block_index))
+                .collect::<Vec<_>>(),
+            expected,
+            "{plan:?}"
+        );
+        let kept = apply(messages, &plan);
+        let report = analyze_request(&build(&kept));
+        assert!(
+            report.invalid().next().is_none(),
+            "plan {plan:?} left {:?}",
+            report.replayed
+        );
+        assert!(
+            plan_suppressions(&kept, build).is_empty(),
+            "planning the planned transcript again changes nothing"
+        );
+    }
+
+    /// user, thinking-only assistant turn, user, assistant (thinking, text),
+    /// user. Each turn is bound to the request that produced it.
+    fn thinking_only_conversation(first: fn(&ApiRequest, &str) -> Message) -> Vec<Message> {
+        let mut messages = vec![Message::user("start")];
+        let turn = first(&build(&messages), "sig-a");
+        messages.push(turn);
+        messages.push(Message::user("go on"));
+        let turn = thinking_then_text_turn(&build(&messages), "sig-b");
+        messages.push(turn);
+        messages.push(Message::user("next"));
+        messages
+    }
+
+    #[test]
+    fn valid_thinking_only_turns_are_replayed_and_keep_later_thinking() {
+        for first in [thinking_only_turn, redacted_only_turn] {
+            let messages = thinking_only_conversation(first);
+            assert_exact_plan(&messages, &[]);
+            assert_eq!(analyze_request(&build(&messages)).replayed.len(), 2);
+        }
+    }
+
+    /// Reviewer counterexample 1: suppressing the only block of an assistant
+    /// turn removes that turn and merges the user messages around it, so the
+    /// thinking produced after it no longer matches. A plan computed against
+    /// the old structure kept it and left an invalid replay.
+    #[test]
+    fn suppressing_a_thinking_only_turn_invalidates_the_thinking_after_it() {
+        for first in [thinking_only_turn, redacted_only_turn] {
+            let mut messages = thinking_only_conversation(first);
+            invalidate(&mut messages[1].content[0]);
+            assert_eq!(
+                blocks_to_suppress(&build(&messages)).len(),
+                1,
+                "one pass over the unplanned request sees only the first block"
+            );
+            assert_exact_plan(&messages, &[(1, 0), (3, 0)]);
+        }
+    }
+
+    /// Reviewer counterexample 2: thinking produced while an invalid
+    /// thinking-only turn was already suppressed is bound to the merged
+    /// history. Planning from the raw history must keep it.
+    #[test]
+    fn thinking_produced_after_a_suppressed_thinking_only_turn_stays_valid() {
+        for first in [thinking_only_turn, redacted_only_turn] {
+            let mut messages = vec![Message::user("start")];
+            let turn = first(&build(&messages), "sig-a");
+            messages.push(turn);
+            invalidate(&mut messages[1].content[0]);
+            messages.push(Message::user("go on"));
+            // The next turn is produced by the planned request, without the
+            // first turn's block.
+            let planned = apply(&messages, &plan_suppressions(&messages, build));
+            let turn = thinking_then_text_turn(&build(&planned), "sig-b");
+            messages.push(turn);
+            messages.push(Message::user("next"));
+            assert_eq!(
+                blocks_to_suppress(&build(&messages)).len(),
+                2,
+                "one pass over the unplanned request would give up the valid block"
+            );
+            assert_exact_plan(&messages, &[(1, 0)]);
+        }
+    }
+
+    #[test]
+    fn restoring_a_thinking_only_turn_invalidates_what_was_produced_without_it() {
+        // The same history, but the first block verifies again (its boundary
+        // is restored): it is kept, and the block produced while it was gone
+        // is bound to the merged history and goes.
+        let mut messages = vec![Message::user("start")];
+        let turn = thinking_only_turn(&build(&messages), "sig-a");
+        messages.push(turn);
+        messages.push(Message::user("go on"));
+        let without_first = apply(
+            &messages,
+            &[PlannedSuppression {
+                message_index: 1,
+                block_index: 0,
+                validity: ReplayValidity::PrefixChanged,
+            }],
+        );
+        let turn = thinking_then_text_turn(&build(&without_first), "sig-b");
+        messages.push(turn);
+        messages.push(Message::user("next"));
+        assert_exact_plan(&messages, &[(3, 0)]);
+    }
+
+    #[test]
+    fn a_turn_cut_off_after_a_closed_thinking_block_replays_it() {
+        let mut messages = conversation();
+        let turn = thinking_only_turn(&build(&messages), "sig-cut");
+        messages.push(turn);
+        messages.push(Message::user("continue"));
+        assert_exact_plan(&messages, &[]);
+        // An edit before it suppresses it together with what it follows.
+        messages[2] = Message::tool_result("t1", "ok (edited)", false);
+        assert_exact_plan(&messages, &[(3, 0), (3, 1), (5, 0)]);
+    }
+
+    #[test]
+    fn a_plan_over_ordinary_turns_equals_the_single_pass() {
+        let mut messages = conversation();
+        messages[2] = Message::tool_result("t1", "ok (summarized)", false);
+        assert_exact_plan(&messages, &[(3, 0), (3, 1)]);
+        let unchanged = conversation();
+        assert_exact_plan(&unchanged, &[]);
     }
 }

@@ -268,7 +268,7 @@ impl Agent {
                     &tools,
                     &split_prompt.static_part,
                     resume_session_id.as_deref(),
-                    provider_ingress.context(),
+                    provider_ingress.replanning_context(),
                 ));
                 loop {
                     tokio::select! {
@@ -288,6 +288,9 @@ impl Agent {
                                 Err(e) => {
                                     memory_pending.restore_now();
                                     if provider_ingress.has_received_data(){self.mark_provider_output_started();return Err(e.context("SDK data was received before stream publication; automatic request replay was stopped"));}
+                                    if self.accept_provider_replan(&e)? {
+                                        continue 'provider_turn;
+                                    }
                                     let provider_error = e.to_string();
                                     match self
                                         .try_unattended_emergency_provider_recovery(
@@ -462,6 +465,11 @@ impl Agent {
                         if provider_ingress.has_received_data() {
                             self.mark_provider_output_started();
                             return Err((e).context("Provider failed after acquired SDK data; automatic replay was stopped"));
+                        }
+                        // The runtime handed the request back before any
+                        // output: reconcile and send a newly planned one.
+                        if self.accept_provider_replan(&e)? {
+                            continue 'provider_turn;
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&err_str, Some(&event_tx))
@@ -837,9 +845,13 @@ impl Agent {
                                 .to_string(),
                         });
                     }
+                    StreamEvent::ProviderDroppedReasoning { block_ids, reason } => {
+                        self.note_provider_dropped_reasoning(block_ids, reason);
+                    }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
+                        self.provider_request_completed();
                         saw_message_end = true;
                         if inline_output_tap {
                             // Fold the finished text into the rolling tail so

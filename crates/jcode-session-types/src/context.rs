@@ -427,6 +427,11 @@ pub enum StoredReasoningInvalidationCause {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         recorded_transitions: Vec<String>,
     },
+    /// The provider said it would not use these blocks: it dropped them from
+    /// a request and reported it, or rejected a request that carried them.
+    /// `reason` is the provider's own word (for example
+    /// `prefix_binding_mismatch`), kept as received.
+    ProviderReported { reason: String },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

@@ -141,49 +141,38 @@ impl Provider for BindingProvider {
             .then(|| fixture_invalidations(messages, tools, system))
     }
 
+    fn replayed_reasoning_block_id(&self, block: &ContentBlock) -> Option<String> {
+        stored_thinking_fingerprint(block)
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
     }
 }
 
-/// The production binding rule applied to the fixture request: the blocks a
+/// The production planner applied to the fixture request: the blocks a
 /// prefix-bound runtime reports, as indices into `messages`.
 pub(crate) fn fixture_invalidations(
     messages: &[Message],
     tools: &[ToolDefinition],
     system: &str,
 ) -> Vec<InvalidReplayedReasoning> {
-    let position: HashMap<String, (usize, usize)> = messages
-        .iter()
-        .enumerate()
-        .flat_map(|(message_index, message)| {
-            message
-                .content
-                .iter()
-                .enumerate()
-                .filter_map(move |(block_index, block)| {
-                    stored_thinking_fingerprint(block)
-                        .map(|fingerprint| (fingerprint, (message_index, block_index)))
-                })
-        })
-        .collect();
-    blocks_to_suppress(&fixture_request(messages, tools, system))
-        .into_iter()
-        .map(|block| {
-            let (message_index, block_index) = position[&block.fingerprint];
-            InvalidReplayedReasoning {
-                message_index,
-                block_index,
-                invalidity: if block.validity
-                    == jcode_provider_anthropic::binding::ReplayValidity::ChainBroken
-                {
-                    ReplayedReasoningInvalidity::ChainBroken
-                } else {
-                    ReplayedReasoningInvalidity::PrefixChanged
-                },
-            }
-        })
-        .collect()
+    jcode_provider_anthropic::binding::plan_suppressions(messages, |candidate| {
+        fixture_request(candidate, tools, system)
+    })
+    .into_iter()
+    .map(|block| InvalidReplayedReasoning {
+        message_index: block.message_index,
+        block_index: block.block_index,
+        invalidity: if block.validity
+            == jcode_provider_anthropic::binding::ReplayValidity::ChainBroken
+        {
+            ReplayedReasoningInvalidity::ChainBroken
+        } else {
+            ReplayedReasoningInvalidity::PrefixChanged
+        },
+    })
+    .collect()
 }
 
 struct EnvVarGuard {
@@ -764,8 +753,13 @@ fn an_unbound_model_stages_and_reports_nothing() {
     assert!(chat.revert("summary").is_none());
 }
 
+/// A route or model that does not bind reasoning changes nothing in the
+/// managed set (D16, INT-01/WP-06 R21): no lift, which would send the
+/// suppressed blocks again and lose the reasoning chained after them on the
+/// way back, and no additions. Back on the binding model the exact
+/// recompute finds the same set.
 #[test]
-fn switching_to_an_unbound_model_lifts_the_managed_set_before_the_next_request() {
+fn switching_to_an_unbound_model_and_back_restores_and_strips_nothing() {
     let mut chat = Conversation::new(true);
     for signature in ["a", "b"] {
         chat.round(signature);
@@ -773,24 +767,36 @@ fn switching_to_an_unbound_model_lifts_the_managed_set_before_the_next_request()
     let summary = chat.summary_of("a", "a");
     chat.apply("summary", vec![summary]);
     assert_eq!(chat.suppressed_signatures(), names(&["b"]));
+    let held = chat.session.context_view.clone();
 
     let unbound = BindingProvider { binds: false };
-    let outcome = reconcile_before_request(
-        &unbound,
-        &chat.session.messages,
-        &chat.session.context_view,
-        &prefix(),
-    )
-    .unwrap()
-    .expect("the set changes");
-    chat.session.context_view = outcome.state;
+    let reconcile = |chat: &Conversation, provider: &BindingProvider| {
+        reconcile_before_request(
+            provider,
+            &chat.session.messages,
+            &chat.session.context_view,
+            &prefix(),
+            &[],
+        )
+        .unwrap()
+    };
     assert!(
-        chat.session
-            .context_view
-            .active_reasoning_invalidation()
-            .is_none()
+        reconcile(&chat, &unbound).is_none(),
+        "the unbound route changes nothing"
     );
-    assert_eq!(outcome.summary.unwrap().restored, 1);
+    // Two turns on the unbound model, produced with the set in force.
+    chat.round("x");
+    assert!(reconcile(&chat, &unbound).is_none());
+    chat.round("y");
+    assert_eq!(chat.session.context_view.transactions, held.transactions);
+
+    // Back on the binding model: nothing restored, nothing stripped, and
+    // every block the request sends is valid.
+    assert!(reconcile(&chat, &chat.provider).is_none());
+    assert_eq!(chat.suppressed_signatures(), names(&["b"]));
+    // `a` is inside the summarized range.
+    assert_eq!(chat.replayed_signatures(), names(&["x", "y"]));
+    chat.assert_every_replayed_block_is_valid();
 }
 
 #[test]
@@ -804,7 +810,8 @@ fn a_changed_prefix_is_suppressed_before_the_request_and_restored_when_it_return
             &chat.provider,
             &chat.session.messages,
             &chat.session.context_view,
-            &prefix()
+            &prefix(),
+            &[]
         )
         .unwrap()
         .is_none(),
@@ -819,6 +826,7 @@ fn a_changed_prefix_is_suppressed_before_the_request_and_restored_when_it_return
         &chat.session.messages,
         &chat.session.context_view,
         &skill,
+        &[],
     )
     .unwrap()
     .expect("every earlier block stops matching");
@@ -860,7 +868,8 @@ fn a_changed_prefix_is_suppressed_before_the_request_and_restored_when_it_return
             &chat.provider,
             &chat.session.messages,
             &chat.session.context_view,
-            &tools_changed
+            &tools_changed,
+            &[]
         )
         .unwrap()
         .is_none(),
@@ -872,6 +881,7 @@ fn a_changed_prefix_is_suppressed_before_the_request_and_restored_when_it_return
         &chat.session.messages,
         &chat.session.context_view,
         &prefix(),
+        &[],
     )
     .unwrap()
     .expect("the original prefix makes them valid again");
@@ -884,6 +894,91 @@ fn a_changed_prefix_is_suppressed_before_the_request_and_restored_when_it_return
     );
     assert_eq!(outcome.summary.unwrap().restored, 2);
     chat.assert_every_replayed_block_is_valid();
+}
+
+/// What the provider reports as dropped or rejected joins the managed set
+/// with the provider's reason as its cause (INT-01/WP-06 R19).
+#[test]
+fn provider_reported_blocks_join_the_managed_set_with_their_cause() {
+    let mut chat = Conversation::new(true);
+    for signature in ["a", "b", "c"] {
+        chat.round(signature);
+    }
+    let id = |signature: &str| {
+        jcode_provider_anthropic::binding::thinking_fingerprint(
+            jcode_provider_anthropic::binding::ThinkingPayload::Signature,
+            signature,
+        )
+    };
+    // jcode's own check finds every block valid; the provider dropped `b`
+    // and, as it always does, the run after it.
+    let reported = [super::ProviderReportedReasoning {
+        block_ids: vec![
+            id("b"),
+            id("c"),
+            "an-identity-no-stored-block-has".to_string(),
+        ],
+        reason: "prefix_binding_mismatch".to_string(),
+    }];
+    let outcome = reconcile_before_request(
+        &chat.provider,
+        &chat.session.messages,
+        &chat.session.context_view,
+        &prefix(),
+        &reported,
+    )
+    .unwrap()
+    .expect("the reported blocks are suppressed");
+    chat.session.context_view = outcome.state;
+    let cause = StoredReasoningInvalidationCause::ProviderReported {
+        reason: "prefix_binding_mismatch".to_string(),
+    };
+    assert_eq!(
+        chat.suppressed(),
+        vec![
+            ("b".to_string(), cause.clone()),
+            ("c".to_string(), cause.clone())
+        ]
+    );
+    assert_eq!(outcome.summary.unwrap().invalidated_other, 2);
+    assert_eq!(chat.replayed_signatures(), names(&["a"]));
+    chat.assert_every_replayed_block_is_valid();
+
+    // Reported again, or not at all: nothing changes, and the next request
+    // no longer sends them.
+    for again in [&reported[..], &[]] {
+        assert!(
+            reconcile_before_request(
+                &chat.provider,
+                &chat.session.messages,
+                &chat.session.context_view,
+                &prefix(),
+                again,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    // A report is persisted on a route that does not bind reasoning too.
+    let mut other = Conversation::new(false);
+    for signature in ["a", "b"] {
+        other.round(signature);
+    }
+    let outcome = reconcile_before_request(
+        &other.provider,
+        &other.session.messages,
+        &other.session.context_view,
+        &prefix(),
+        &[super::ProviderReportedReasoning {
+            block_ids: vec![id("b")],
+            reason: "some_future_reason".to_string(),
+        }],
+    )
+    .unwrap()
+    .expect("the reported block is suppressed");
+    other.session.context_view = outcome.state;
+    assert_eq!(other.suppressed_signatures(), names(&["b"]));
 }
 
 #[test]
@@ -902,6 +997,7 @@ fn a_summary_over_thinking_jcode_suppressed_does_not_shadow_the_managed_set() {
         &chat.session.messages,
         &chat.session.context_view,
         &skill,
+        &[],
     )
     .unwrap()
     .expect("every earlier block stops matching");
@@ -1128,6 +1224,7 @@ fn a_rewind_that_removes_managed_targets_is_restaged_with_the_original_cause() {
         &chat.session.messages,
         &chat.session.context_view,
         &prefix(),
+        &[],
     )
     .unwrap()
     .expect("b is still invalid and must be suppressed again");

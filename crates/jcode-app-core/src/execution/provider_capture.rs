@@ -21,6 +21,16 @@ impl ProviderCaptureScope {
     pub fn context(&self) -> ProviderRequestContext {
         ProviderRequestContext {
             result_capture: Some(Arc::new(self.clone())),
+            caller_replans: false,
+        }
+    }
+    /// The context for a request loop that reconciles replayed reasoning
+    /// and plans a new request when the runtime hands one back
+    /// (`ProviderRequestReplan`).
+    pub fn replanning_context(&self) -> ProviderRequestContext {
+        ProviderRequestContext {
+            caller_replans: true,
+            ..self.context()
         }
     }
     pub fn has_received_data(&self) -> bool {

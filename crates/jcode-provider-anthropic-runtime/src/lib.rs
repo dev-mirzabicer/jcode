@@ -36,13 +36,15 @@ use jcode_message_types::{
 };
 #[cfg(test)]
 use jcode_message_types::{ContentBlock, Role};
+use jcode_provider_anthropic::ApiContentBlock;
 use jcode_provider_anthropic::binding::{RequestBinding, ThinkingPayload, thinking_fingerprint};
 use jcode_provider_anthropic::{
     ApiBlockBinding, ApiMessage, ApiMetadata, ApiOutputConfig, ApiRequest, ApiSystem, ApiThinking,
-    ApiTool, ApiToolChoice, PrefixMismatchBehavior, THINKING_BINDING_CONTROLS_BETA,
+    ApiTool, ApiToolChangeTarget, ApiToolChoice, INLINE_TOOLS_BETA,
+    MID_CONVERSATION_TOOL_CHANGES_BETA, PrefixMismatchBehavior, THINKING_BINDING_CONTROLS_BETA,
 };
 #[cfg(test)]
-use jcode_provider_anthropic::{ApiContentBlock, ToolResultContent, ToolResultContentBlock};
+use jcode_provider_anthropic::{ToolResultContent, ToolResultContentBlock};
 use jcode_provider_core::{
     ANTHROPIC_TOOL_NAME_POLICY, anthropic_is_1m_model as is_1m_model,
     anthropic_strip_1m_suffix as strip_1m_suffix,
@@ -56,11 +58,9 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-/// Anthropic Messages API endpoint
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
-
-/// OAuth endpoint (with beta=true query param)
-const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
+/// Anthropic API origin. The Messages endpoint is `/v1/messages`, with
+/// `?beta=true` on the OAuth route.
+const API_BASE: &str = "https://api.anthropic.com";
 
 #[cfg(test)]
 pub(crate) const OAUTH_BETA_HEADERS_1M: &str = jcode_provider_core::ANTHROPIC_OAUTH_BETA_HEADERS_1M;
@@ -387,6 +387,8 @@ pub struct AnthropicProvider {
     /// OAuth route adds identity blocks that are part of the prefix Claude
     /// thinking is bound to.
     last_request_route: Arc<AtomicU8>,
+    /// Origin requests go to. Tests point it at a local HTTP fixture.
+    api_base: Arc<str>,
 }
 
 const ROUTE_UNKNOWN: u8 = 0;
@@ -422,30 +424,35 @@ impl AnthropicProvider {
         .flatten()
     }
 
-    async fn model_after_oauth_quota_check(
+    /// The model to move to when the selected model's own OAuth quota is
+    /// exhausted. The switch is stored in this provider's model state; the
+    /// caller plans the request for it.
+    async fn oauth_quota_fallback(
         &self,
         token: &str,
         is_oauth: bool,
-        selected_model: String,
-    ) -> String {
+        selected_model: &str,
+    ) -> Option<String> {
         if !is_oauth || !selected_model.to_ascii_lowercase().contains("fable") {
-            return selected_model;
+            return None;
         }
-        let Ok(usage) = jcode_base::usage::fetch_usage_for_access_token(token).await else {
-            return selected_model;
-        };
-        let Some(fallback) = Self::fallback_for_model_scoped_usage(&selected_model, &usage) else {
-            return selected_model;
-        };
+        let usage = jcode_base::usage::fetch_usage_for_access_token(token)
+            .await
+            .ok()?;
+        let fallback = Self::fallback_for_model_scoped_usage(selected_model, &usage)?;
         jcode_base::logging::warn(&format!(
             "Anthropic OAuth model-scoped weekly quota for '{}' is exhausted; routing to '{}'",
             selected_model, fallback
         ));
+        self.store_model(&fallback);
+        Some(fallback)
+    }
+
+    fn store_model(&self, model: &str) {
         *self
             .model
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
-        fallback
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = model.to_string();
     }
 
     /// Resolve a usable access token (OAuth or API key) and whether it is OAuth.
@@ -520,11 +527,10 @@ impl AnthropicProvider {
             .context("contract request has no model")?;
         let response = messages_request(
             &self.client,
+            &self.route(is_oauth),
             &token,
-            is_oauth,
             model,
-            ThinkingBetas::of_body(body),
-            &self.oauth_session_id,
+            RequestBetas::of_body(body),
         )
         .header("accept", "application/json")
         .json(body)
@@ -560,11 +566,10 @@ impl AnthropicProvider {
         body["stream"] = json!(true);
         let response = messages_request(
             &self.client,
+            &self.route(is_oauth),
             &token,
-            is_oauth,
             model,
-            ThinkingBetas::of_body(&body),
-            &self.oauth_session_id,
+            RequestBetas::of_body(&body),
         )
         // The same accept header the production stream sends.
         .header(
@@ -652,6 +657,26 @@ impl AnthropicProvider {
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
             unbound_thinking_noticed: Arc::new(AtomicBool::new(false)),
             last_request_route: Arc::new(AtomicU8::new(ROUTE_UNKNOWN)),
+            api_base: Arc::from(API_BASE),
+        }
+    }
+
+    /// A handle to this provider's state for the request task: the same
+    /// model, effort and credential state, not a copy.
+    fn share(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            model: Arc::clone(&self.model),
+            reasoning_effort: Arc::clone(&self.reasoning_effort),
+            service_tier: Arc::clone(&self.service_tier),
+            credentials: Arc::clone(&self.credentials),
+            credential_mode: Arc::clone(&self.credential_mode),
+            max_tokens_override: self.max_tokens_override,
+            oauth_session_id: self.oauth_session_id.clone(),
+            oauth_preflight_done: Arc::clone(&self.oauth_preflight_done),
+            unbound_thinking_noticed: Arc::clone(&self.unbound_thinking_noticed),
+            last_request_route: Arc::clone(&self.last_request_route),
+            api_base: Arc::clone(&self.api_base),
         }
     }
 
@@ -880,7 +905,7 @@ impl AnthropicProvider {
             Some(ApiThinking::Disabled)
         } else if caps.adaptive_thinking {
             (effort.is_some() || show_thinking).then_some(ApiThinking::Adaptive {
-                display: Some("summarized"),
+                display: Some(THINKING_DISPLAY),
                 block_binding: None,
             })
         } else if caps.manual_thinking {
@@ -1063,6 +1088,10 @@ impl AnthropicProvider {
         if let Ok(mut cached) = self.credentials.try_write() {
             *cached = None;
         }
+        // The route the previous request used says nothing about the next one
+        // any more: the expected route follows the new mode (R20).
+        self.last_request_route
+            .store(ROUTE_UNKNOWN, Ordering::Relaxed);
         // Keep the runtime provider identity in sync with the explicit credential
         // choice so UI surfaces (model picker, header widget) report the auth
         // method that requests will actually use, instead of inferring it from
@@ -1132,25 +1161,56 @@ impl AnthropicProvider {
         is_oauth: bool,
     ) -> ApiRequest {
         let api_tools = self.format_tools(tools);
-        let (thinking, output_config, temperature) =
-            self.build_reasoning_request_parts(model, is_oauth);
         let mut request = ApiRequest {
-            model: strip_1m_suffix(model).to_string(),
-            max_tokens: self.max_tokens_for(model),
+            model: String::new(),
+            max_tokens: 0,
             system,
             messages: self.format_messages(messages),
             tool_choice: ApiToolChoice::for_tools(&api_tools),
             tools: (!api_tools.is_empty()).then_some(api_tools),
             metadata: is_oauth.then(|| oauth_request_metadata(&self.oauth_session_id)),
-            thinking,
-            output_config,
-            temperature,
-            service_tier: self.current_service_tier_for_model(model),
+            thinking: None,
+            output_config: None,
+            temperature: None,
+            service_tier: None,
             stream: true,
         };
+        self.apply_model_plan(&mut request, model, is_oauth);
         jcode_provider_anthropic::place_cache_breakpoints(&mut request, is_cache_ttl_1h());
         request
     }
+
+    /// Set every model-dependent parameter of `request` for `model`: the
+    /// model id, the output budget, the thinking configuration with its
+    /// binding control, effort, sampling and service tier. A request moved to
+    /// another model gets all of them from here, never only a new model id
+    /// (INT-01/WP-06 R20).
+    fn apply_model_plan(&self, request: &mut ApiRequest, model: &str, is_oauth: bool) {
+        let (thinking, output_config, temperature) =
+            self.build_reasoning_request_parts(model, is_oauth);
+        request.model = strip_1m_suffix(model).to_string();
+        request.max_tokens = self.max_tokens_for(model);
+        request.thinking = thinking;
+        request.output_config = output_config;
+        request.temperature = temperature;
+        request.service_tier = self.current_service_tier_for_model(model);
+    }
+
+    fn route(&self, is_oauth: bool) -> RequestRoute {
+        RequestRoute {
+            api_base: Arc::clone(&self.api_base),
+            oauth_session_id: self.oauth_session_id.clone(),
+            is_oauth,
+        }
+    }
+}
+
+/// Where one request goes and how it is attributed.
+#[derive(Clone)]
+struct RequestRoute {
+    api_base: Arc<str>,
+    oauth_session_id: String,
+    is_oauth: bool,
 }
 
 impl Default for AnthropicProvider {
@@ -1204,7 +1264,19 @@ impl Provider for AnthropicProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        self.start_stream(messages, tools, system).await
+        self.start_stream(messages, tools, system, false).await
+    }
+
+    async fn complete_split_with_context(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        _resume_session_id: Option<&str>,
+        context: jcode_provider_core::ProviderRequestContext,
+    ) -> Result<EventStream> {
+        self.start_stream(messages, tools, system_static, context.caller_replans)
+            .await
     }
 
     fn model(&self) -> String {
@@ -1434,51 +1506,42 @@ impl Provider for AnthropicProvider {
         {
             return None;
         }
-        let position: std::collections::HashMap<String, (usize, usize)> = messages
-            .iter()
-            .enumerate()
-            .flat_map(|(message_index, message)| {
-                message
-                    .content
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(block_index, block)| {
-                        jcode_provider_anthropic::binding::stored_thinking_fingerprint(block)
-                            .map(|fingerprint| (fingerprint, (message_index, block_index)))
-                    })
+        if !messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                jcode_provider_anthropic::binding::stored_thinking_fingerprint(block).is_some()
             })
-            .collect();
-        if position.is_empty() {
+        }) {
             return Some(Vec::new());
         }
-        // The exact request the next send builds, on the route it is expected
-        // to use (see `expected_oauth_route`).
+        // Decided on the exact request the next send builds, on the route it
+        // is expected to use (see `expected_oauth_route`), rebuilt after each
+        // removal that changes the message structure (R18).
         let is_oauth = self.expected_oauth_route();
-        let request = self.build_api_request(
-            &model,
-            messages,
-            tools,
-            build_system_param(system, is_oauth),
-            is_oauth,
-        );
+        let system = build_system_param(system, is_oauth);
         Some(
-            jcode_provider_anthropic::binding::blocks_to_suppress(&request)
-                .into_iter()
-                .filter_map(|block| {
-                    let (message_index, block_index) = *position.get(&block.fingerprint)?;
-                    Some(jcode_provider_core::InvalidReplayedReasoning {
-                        message_index,
-                        block_index,
-                        invalidity: match block.validity {
-                            jcode_provider_anthropic::binding::ReplayValidity::ChainBroken => {
-                                jcode_provider_core::ReplayedReasoningInvalidity::ChainBroken
-                            }
-                            _ => jcode_provider_core::ReplayedReasoningInvalidity::PrefixChanged,
-                        },
-                    })
-                })
-                .collect(),
+            jcode_provider_anthropic::binding::plan_suppressions(messages, |candidate| {
+                self.build_api_request(&model, candidate, tools, system.clone(), is_oauth)
+            })
+            .into_iter()
+            .map(|block| jcode_provider_core::InvalidReplayedReasoning {
+                message_index: block.message_index,
+                block_index: block.block_index,
+                invalidity: match block.validity {
+                    jcode_provider_anthropic::binding::ReplayValidity::ChainBroken => {
+                        jcode_provider_core::ReplayedReasoningInvalidity::ChainBroken
+                    }
+                    _ => jcode_provider_core::ReplayedReasoningInvalidity::PrefixChanged,
+                },
+            })
+            .collect(),
         )
+    }
+
+    fn replayed_reasoning_block_id(
+        &self,
+        block: &jcode_message_types::ContentBlock,
+    ) -> Option<String> {
+        jcode_provider_anthropic::binding::stored_thinking_fingerprint(block)
     }
 
     fn context_window(&self) -> usize {
@@ -1549,6 +1612,7 @@ impl Provider for AnthropicProvider {
             )),
             unbound_thinking_noticed: Arc::new(AtomicBool::new(false)),
             last_request_route: Arc::new(AtomicU8::new(ROUTE_UNKNOWN)),
+            api_base: Arc::clone(&self.api_base),
         })
     }
 
@@ -1563,13 +1627,25 @@ impl Provider for AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    /// Build the request, bind it, and start the streaming task.
+    /// Plan one request, check it, and start the streaming task.
+    ///
+    /// The plan is resolved here, once: the credential route, the model the
+    /// account can use, and every model-dependent parameter. Replayed
+    /// thinking was reconciled by the caller against the plan it expected. If
+    /// the plan that resolved differs (a credential route that fell back, a
+    /// quota-forced model), the request is not sent with thinking its own
+    /// check finds invalid: a caller that re-plans gets a
+    /// [`jcode_provider_core::ProviderRequestReplan`] and goes back through
+    /// reconciliation (INT-01/WP-06 R18, R20).
     async fn start_stream(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
+        caller_replans: bool,
     ) -> Result<EventStream> {
+        use jcode_provider_core::ProviderRequestReplan;
+
         let (token, is_oauth) = self.get_access_token().await?;
         self.last_request_route.store(
             if is_oauth { ROUTE_OAUTH } else { ROUTE_API_KEY },
@@ -1584,17 +1660,29 @@ impl AnthropicProvider {
             )
             .await?;
         }
-        let selected_model = self
-            .model
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let model = self
-            .model_after_oauth_quota_check(&token, is_oauth, selected_model)
-            .await;
+        let selected_model = self.model();
+        let model = match self
+            .oauth_quota_fallback(&token, is_oauth, &selected_model)
+            .await
+        {
+            Some(fallback) if caller_replans => {
+                return Err(ProviderRequestReplan::ModelFallback {
+                    from: selected_model,
+                    to: fallback,
+                    cause: "out of weekly quota".to_string(),
+                }
+                .into());
+            }
+            Some(fallback) => fallback,
+            None => selected_model,
+        };
         let system_param = build_system_param(system, is_oauth);
         let request = self.build_api_request(&model, messages, tools, system_param, is_oauth);
-        let request_binding = bind_request(&model, &request);
+        let report = jcode_provider_anthropic::binding::analyze_request(&request);
+        let invalid = invalid_replays(&model, &report);
+        if invalid > 0 && caller_replans {
+            return Err(ProviderRequestReplan::ReplayedReasoningInvalid { blocks: invalid }.into());
+        }
 
         log_anthropic_canonical_input(&model, "anthropic_messages", &request, is_oauth);
 
@@ -1605,12 +1693,16 @@ impl AnthropicProvider {
         // Create channel for streaming events
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let unbound_notice = self.unbound_thinking_notice(messages);
-
-        // Clone what we need for the async task
-        let client = self.client.clone();
-        let credentials = Arc::clone(&self.credentials);
-        let oauth_session_id = self.oauth_session_id.clone();
-        let model_state = Arc::clone(&self.model);
+        let planned = PlannedRequest {
+            route: self.route(is_oauth),
+            token,
+            model,
+            request,
+            replay: Arc::new(ReplayIndex::of(&report)),
+            binding: report.binding,
+            caller_replans,
+        };
+        let provider = self.share();
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
@@ -1632,19 +1724,7 @@ impl AnthropicProvider {
             {
                 return;
             }
-            run_stream_with_retries(
-                client,
-                token,
-                is_oauth,
-                request,
-                request_binding,
-                tx,
-                credentials,
-                model,
-                oauth_session_id,
-                model_state,
-            )
-            .await;
+            run_stream_with_retries(provider, planned, tx).await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -1666,6 +1746,11 @@ impl AnthropicProvider {
         ))
     }
 }
+
+/// The `thinking.display` every request with a thinking configuration asks
+/// for: reasoning summaries plus the progress notes the model writes between
+/// tool calls (the INT-01/WP-05 decision). The API default is `"omitted"`.
+const THINKING_DISPLAY: &str = "summarized";
 
 /// Environment override for the binding control's mismatch behavior, used by
 /// verification runs that want a mismatch to fail loudly (Mirza's decision,
@@ -1704,9 +1789,9 @@ fn prefix_mismatch_behavior() -> PrefixMismatchBehavior {
 /// unchanged.
 ///
 /// Such a model always thinks, and omitting `thinking` means adaptive
-/// thinking with its default display, so a request without `thinking` gains
-/// `{type: adaptive}` carrying only the control. Because `thinking` is then
-/// present, no sampling temperature is sent.
+/// thinking, so a request without `thinking` gains `{type: adaptive}` with
+/// jcode's display and the control. Because `thinking` is then present, no
+/// sampling temperature is sent.
 fn with_binding_control(
     thinking: Option<ApiThinking>,
     model: &str,
@@ -1729,8 +1814,10 @@ fn with_binding_control(
             budget_tokens,
             block_binding,
         },
+        // The same display every thinking request asks for, so adding the
+        // control never switches a session's thinking text off (R27).
         None => ApiThinking::Adaptive {
-            display: None,
+            display: Some(THINKING_DISPLAY),
             block_binding,
         },
         // `disabled` takes no other field. The binding tables never pair it
@@ -1739,55 +1826,179 @@ fn with_binding_control(
     })
 }
 
-/// Bind a request before it is sent: the digest the blocks of its response
-/// will record, and a check of every thinking block it replays. An invalid
-/// replay on a prefix-bound model is an INV-1 defect; the API safety net
-/// (`thinking.block_binding`) decides what the provider does with it.
-fn bind_request(model: &str, request: &ApiRequest) -> RequestBinding {
-    let report = jcode_provider_anthropic::binding::analyze_request(request);
+/// How many thinking blocks a request replays that the model's binding check
+/// would not accept. Each is logged and counted as an INV-1 defect. Models
+/// that do not bind thinking to its prefix replay anything.
+fn invalid_replays(
+    model: &str,
+    report: &jcode_provider_anthropic::binding::RequestBindingReport,
+) -> usize {
     if jcode_provider_core::anthropic_reasoning_binding(model)
-        == jcode_provider_core::ReasoningBinding::PrefixBound
+        != jcode_provider_core::ReasoningBinding::PrefixBound
     {
-        for block in report.invalid() {
-            jcode_provider_core::anthropic_binding_diagnostics::record_local_invalid_replay(
-                block.validity.label(),
-            );
-            jcode_base::logging::warn(&format!(
-                "INV-1: replayed Claude thinking at {} is {} (produced by {})",
-                block.path,
-                block.validity.label(),
-                block.model
-            ));
-        }
+        return 0;
     }
-    report.binding
+    let mut invalid = 0;
+    for block in report.invalid() {
+        invalid += 1;
+        jcode_provider_core::anthropic_binding_diagnostics::record_local_invalid_replay(
+            block.validity.label(),
+        );
+        jcode_base::logging::warn(&format!(
+            "INV-1: replayed Claude thinking at {} is {} (produced by {})",
+            block.path,
+            block.validity.label(),
+            block.model
+        ));
+    }
+    invalid
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "stream retry helper needs auth/session/runtime knobs together and is kept local for clarity"
-)]
+/// The thinking blocks one request replays, in wire order, so a provider
+/// report that names a wire path (`messages.<i>.content.<j>`) maps back to
+/// block identities (INT-01/WP-06 R19).
+#[derive(Debug, Default)]
+struct ReplayIndex {
+    blocks: Vec<ReplayedBlock>,
+}
+
+#[derive(Debug)]
+struct ReplayedBlock {
+    path: String,
+    id: String,
+}
+
+impl ReplayIndex {
+    fn of(report: &jcode_provider_anthropic::binding::RequestBindingReport) -> Self {
+        Self {
+            blocks: report
+                .replayed
+                .iter()
+                .map(|block| ReplayedBlock {
+                    path: block.path.clone(),
+                    id: block.fingerprint.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn position(&self, path: &str) -> Option<usize> {
+        self.blocks.iter().position(|block| block.path == path)
+    }
+
+    /// The block at `position` and every later one: what the API drops when
+    /// that block fails its conversation check.
+    fn from(&self, position: usize) -> Vec<String> {
+        self.blocks[position..]
+            .iter()
+            .map(|block| block.id.clone())
+            .collect()
+    }
+
+    /// Where the latest assistant message's thinking starts.
+    fn latest_message(&self) -> Option<usize> {
+        let message = |block: &ReplayedBlock| {
+            block
+                .path
+                .split('.')
+                .nth(1)
+                .and_then(|index| index.parse::<usize>().ok())
+        };
+        let latest = self.blocks.last().and_then(message)?;
+        self.blocks
+            .iter()
+            .position(|block| message(block) == Some(latest))
+    }
+}
+
+/// The first `messages.<i>.content.<j>` path in provider text.
+fn wire_path_in(text: &str) -> Option<String> {
+    let start = text.find("messages.")?;
+    let rest = &text[start..];
+    let mut parts = rest.splitn(4, '.');
+    let (_, message, content, block) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let block: String = block.chars().take_while(char::is_ascii_digit).collect();
+    (content == "content"
+        && !block.is_empty()
+        && !message.is_empty()
+        && message.chars().all(|c| c.is_ascii_digit()))
+    .then(|| format!("messages.{message}.content.{block}"))
+}
+
+/// The replayed thinking a provider 400 refuses, as block identities, with a
+/// short reason. Two documented rejections name replayed thinking: a block
+/// "bound to a different conversation" (`prefix_mismatch_behavior: "error"`),
+/// and thinking that "cannot be modified". The named block and every later
+/// one must go, a trailing run; when the text names none, the latest
+/// assistant message's thinking (modified thinking) or every block (binding).
+/// `error` is lowercased.
+fn rejected_replayed_thinking(
+    error: &str,
+    replay: &ReplayIndex,
+) -> Option<(Vec<String>, &'static str)> {
+    let binding = error.contains("bound to a different conversation");
+    let modified = error.contains("cannot be modified") && error.contains("thinking");
+    if !binding && !modified {
+        return None;
+    }
+    let start = wire_path_in(error)
+        .and_then(|path| replay.position(&path))
+        .or_else(|| modified.then(|| replay.latest_message()).flatten())
+        .unwrap_or(0);
+    let ids = (start < replay.blocks.len()).then(|| replay.from(start))?;
+    Some((
+        ids,
+        if binding {
+            "prefix_binding_mismatch"
+        } else {
+            "thinking_modified"
+        },
+    ))
+}
+
+/// One planned request and what its task needs to send it.
+struct PlannedRequest {
+    route: RequestRoute,
+    token: String,
+    /// The model the plan was built for (may carry a `[1m]` suffix).
+    model: String,
+    request: ApiRequest,
+    binding: RequestBinding,
+    replay: Arc<ReplayIndex>,
+    /// The caller reconciles and builds a new request on a replan error.
+    caller_replans: bool,
+}
+
+/// Send a planned request, retrying transport faults.
+///
+/// A planned request is never patched into a different plan here. When the
+/// model must change, a caller that re-plans gets a
+/// [`jcode_provider_core::ProviderRequestReplan`]; for other callers every
+/// model-dependent parameter is rebuilt for the new model before the retry.
 async fn run_stream_with_retries(
-    client: Client,
-    initial_token: String,
-    is_oauth: bool,
-    mut request: ApiRequest,
-    request_binding: RequestBinding,
+    provider: AnthropicProvider,
+    planned: PlannedRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
-    credentials: Arc<RwLock<Option<CachedCredentials>>>,
-    model_name: String,
-    oauth_session_id: String,
-    model_state: Arc<std::sync::RwLock<String>>,
 ) {
-    let mut token = initial_token;
+    use jcode_provider_core::ProviderRequestReplan;
+
+    let PlannedRequest {
+        route,
+        mut token,
+        model: mut model_name,
+        mut request,
+        binding: request_binding,
+        replay,
+        caller_replans,
+    } = planned;
+    let is_oauth = route.is_oauth;
     let mut last_error = None;
     let mut next_retry_delay = None;
     let mut attempted_forced_refresh = false;
-    let original_model = model_name.clone();
-    let mut model_name = model_name;
+    let mut reasoning_self_healed = false;
     // Track every model id we have already attempted so a retired/renamed
     // model only falls back to genuinely new candidates.
-    let mut tried_models: Vec<String> = vec![original_model.clone()];
+    let mut tried_models: Vec<String> = vec![model_name.clone()];
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
@@ -1825,20 +2036,20 @@ async fn run_stream_with_retries(
         // so reusing the shared pool can fail identically. A fresh client
         // guarantees a brand-new TCP+TLS connection.
         let attempt_client = if attempt == 0 {
-            client.clone()
+            provider.client.clone()
         } else {
             jcode_provider_core::fresh_transport_client()
         };
 
-        match stream_response(
+        let e = match stream_response(
             attempt_client,
+            &route,
             token.clone(),
-            is_oauth,
             request.clone(),
-            &request_binding,
+            SseStreamState::new(&request.model, request_binding.clone())
+                .with_replay(Arc::clone(&replay)),
             attempt_tx,
             &model_name,
-            &oauth_session_id,
         )
         .await
         {
@@ -1846,183 +2057,207 @@ async fn run_stream_with_retries(
                 let _ = attempt_guard.finish().await;
                 return; // Success
             }
-            Err(e) => {
-                let saw_output = attempt_guard.finish().await;
-                // Use the full anyhow source chain ({:#}) rather than just the top
-                // context. The underlying cause (e.g. the HTTP/2 "stream error" or
-                // a connection reset) lives deeper than "Failed to send request to
-                // Anthropic API", and the retry classifier needs to see it.
-                let error_str = format!("{e:#}").to_lowercase();
+            Err(e) => e,
+        };
+        let saw_output = attempt_guard.finish().await;
+        // Use the full anyhow source chain ({:#}) rather than just the top
+        // context. The underlying cause (e.g. the HTTP/2 "stream error" or
+        // a connection reset) lives deeper than "Failed to send request to
+        // Anthropic API", and the retry classifier needs to see it.
+        let error_str = format!("{e:#}").to_lowercase();
 
-                // OAuth auth failures: force refresh and retry once immediately.
-                if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {
-                    attempted_forced_refresh = true;
+        // OAuth auth failures: force refresh and retry once immediately.
+        if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {
+            attempted_forced_refresh = true;
+            jcode_base::logging::info(
+                "Anthropic OAuth authentication failed, forcing token refresh...",
+            );
+            let _ = tx
+                .send(Ok(StreamEvent::ConnectionPhase {
+                    phase: jcode_message_types::ConnectionPhase::Authenticating,
+                }))
+                .await;
+            match force_refresh_oauth_token(Arc::clone(&provider.credentials)).await {
+                Ok(refreshed_token) => {
                     jcode_base::logging::info(
-                        "Anthropic OAuth authentication failed, forcing token refresh...",
+                        "Forced OAuth token refresh succeeded, retrying request.",
                     );
-                    let _ = tx
-                        .send(Ok(StreamEvent::ConnectionPhase {
-                            phase: jcode_message_types::ConnectionPhase::Authenticating,
-                        }))
-                        .await;
-                    match force_refresh_oauth_token(Arc::clone(&credentials)).await {
-                        Ok(refreshed_token) => {
-                            jcode_base::logging::info(
-                                "Forced OAuth token refresh succeeded, retrying request.",
-                            );
-                            token = refreshed_token;
-                            last_error = Some(e);
-                            continue;
-                        }
-                        Err(refresh_err) => {
-                            let _ = tx
-                                .send(Err(anyhow::anyhow!(
-                                    "{}\n\nAutomatic Claude OAuth refresh failed: {}\nRun `jcode login --provider claude` (preferred) or `claude`, then retry.",
-                                    e,
-                                    refresh_err
-                                )))
-                                .await;
-                            return;
-                        }
-                    }
-                }
-
-                // Model not found (e.g. a retired or renamed model id): the
-                // server rejects the request up front with a 404 before any
-                // output streams. Transparently fall back to the *best* available
-                // model so the in-flight request still completes instead of
-                // hard-failing, and persist the switch so later turns reuse the
-                // working model. The fallback honors any server "Please use X"
-                // recommendation, then the curated flagship-first quality order,
-                // and never downgrades to a cheaper tier when a stronger model is
-                // available (see `anthropic_fallback_model`).
-                if is_model_not_found_error(&error_str)
-                    && !saw_output
-                    && let Some(fallback) = anthropic_fallback_model(&tried_models, &error_str)
-                {
-                    jcode_base::logging::warn(&format!(
-                        "Anthropic model '{}' is not available ({}); retrying with fallback '{}'",
-                        model_name, e, fallback
-                    ));
-                    // Surface the substitution so the user is not silently moved
-                    // to a different model than they selected.
-                    let _ = tx
-                        .send(Ok(StreamEvent::StatusDetail {
-                            detail: format!(
-                                "⚠ '{}' is unavailable; falling back to '{}'",
-                                strip_1m_suffix(&model_name),
-                                strip_1m_suffix(&fallback)
-                            ),
-                        }))
-                        .await;
-                    request.model = strip_1m_suffix(&fallback).to_string();
-                    *model_state
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
-                    tried_models.push(fallback.clone());
-                    model_name = fallback;
+                    token = refreshed_token;
                     last_error = Some(e);
                     continue;
                 }
-
-                // Anthropic OAuth can reject Fable with a model-scoped weekly
-                // quota error before the usage cache observes the exhausted
-                // window. This is terminal for Fable, not a transient 429.
-                if is_oauth
-                    && !saw_output
-                    && is_fable_scoped_limit_error(&model_name, &error_str)
-                    && let Some(fallback) =
-                        AnthropicProvider::best_available_opus_model(&model_name)
-                {
-                    jcode_base::logging::warn(&format!(
-                        "Anthropic Fable weekly quota is exhausted ({}); retrying with '{}'",
-                        e, fallback
-                    ));
-                    let _ = tx
-                        .send(Ok(StreamEvent::StatusDetail {
-                            detail: format!(
-                                "⚠ '{}' weekly limit reached; switching to '{}'",
-                                strip_1m_suffix(&model_name),
-                                strip_1m_suffix(&fallback)
-                            ),
-                        }))
-                        .await;
-                    request.model = strip_1m_suffix(&fallback).to_string();
-                    *model_state
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
-                    tried_models.push(fallback.clone());
-                    model_name = fallback;
-                    last_error = Some(e);
-                    continue;
-                }
-
-                // Reasoning request rejected (e.g. a model listed with effort or
-                // thinking capabilities that the live API does not actually
-                // accept: "adaptive thinking is not supported on this model" or
-                // "This model does not support the effort parameter."). Self-heal
-                // once by stripping the reasoning fields (and restoring an OAuth
-                // temperature, which we omit only because thinking was active)
-                // and retrying, so a stale capability table degrades gracefully
-                // instead of hard-failing.
-                if (request.thinking.is_some() || request.output_config.is_some())
-                    && !saw_output
-                    && is_reasoning_unsupported_error(&error_str)
-                {
-                    jcode_base::logging::warn(&format!(
-                        "Anthropic model '{}' rejected the reasoning request ({}); retrying without thinking/effort",
-                        model_name, e
-                    ));
-                    request.thinking = None;
-                    request.output_config = None;
-                    if is_oauth
-                        && jcode_provider_core::anthropic_accepts_sampling_parameters(&model_name)
-                    {
-                        request.temperature = Some(1.0);
-                    }
-                    last_error = Some(e);
-                    continue;
-                }
-
-                // Check if this is a transient/retryable error
-                if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                    if saw_output {
-                        // The fault hit mid-stream after partial output reached
-                        // the consumer. Tell it to discard the partial attempt
-                        // so the retried response replays cleanly instead of
-                        // duplicating.
-                        jcode_base::logging::warn(&format!(
-                            "Transient error after partial output; rolling back partial attempt and retrying: {}",
-                            e
-                        ));
-                        let _ = tx
-                            .send(Ok(StreamEvent::RetryRollback {
-                                attempt: attempt + 2,
-                                max: MAX_RETRIES,
-                            }))
-                            .await;
-                    } else {
-                        jcode_base::logging::info(&format!("Transient error, will retry: {}", e));
-                    }
-                    next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
-                    last_error = Some(e);
-                    continue;
-                }
-
-                // Non-retryable or final attempt
-                if is_oauth && is_oauth_auth_error(&error_str) {
+                Err(refresh_err) => {
                     let _ = tx
                         .send(Err(anyhow::anyhow!(
-                            "{}\n\nClaude OAuth authentication failed. Run `jcode login --provider claude` (preferred) or `claude`, then retry.",
-                            e
+                            "{}\n\nAutomatic Claude OAuth refresh failed: {}\nRun `jcode login --provider claude` (preferred) or `claude`, then retry.",
+                            e,
+                            refresh_err
                         )))
                         .await;
-                } else {
-                    let _ = tx.send(Err(e)).await;
+                    return;
                 }
-                return;
             }
         }
+
+        // The provider refused replayed thinking: a block bound to a
+        // different conversation under `prefix_mismatch_behavior: "error"`, or
+        // thinking that differs from what it returned. Sending the same
+        // request again fails the same way. The caller suppresses the named
+        // run, persisted, and sends a new request (R17, R19).
+        if !saw_output
+            && caller_replans
+            && let Some((block_ids, reason)) = rejected_replayed_thinking(&error_str, &replay)
+        {
+            jcode_base::logging::warn(&format!(
+                "INV-1: Anthropic rejected {} replayed thinking block(s) ({reason}): {e:#}",
+                block_ids.len()
+            ));
+            jcode_provider_core::anthropic_binding_diagnostics::record_input_transformation(
+                "thinking_rejected",
+                reason,
+            );
+            let _ = tx
+                .send(Err(anyhow::Error::new(
+                    ProviderRequestReplan::ReasoningRejected {
+                        block_ids,
+                        reason: reason.to_string(),
+                    },
+                )
+                .context(format!("{e:#}"))))
+                .await;
+            return;
+        }
+
+        // Model not found (e.g. a retired or renamed model id): the server
+        // rejects the request up front with a 404 before any output streams.
+        // Fall back to the *best* available model and store the switch so
+        // later turns reuse the working model. The fallback honors any server
+        // "Please use X" recommendation, then the curated flagship-first
+        // quality order, and never downgrades to a cheaper tier when a
+        // stronger model is available (see `anthropic_fallback_model`).
+        //
+        // Anthropic OAuth can also reject Fable with a model-scoped weekly
+        // quota error before the usage cache observes the exhausted window.
+        // This is terminal for Fable, not a transient 429.
+        let fallback = if saw_output {
+            None
+        } else if is_model_not_found_error(&error_str) {
+            anthropic_fallback_model(&tried_models, &error_str)
+                .map(|fallback| (fallback, "unavailable"))
+        } else if is_oauth && is_fable_scoped_limit_error(&model_name, &error_str) {
+            AnthropicProvider::best_available_opus_model(&model_name)
+                .map(|fallback| (fallback, "out of weekly quota"))
+        } else {
+            None
+        };
+        if let Some((fallback, cause)) = fallback {
+            jcode_base::logging::warn(&format!(
+                "Anthropic model '{}' is {} ({}); falling back to '{}'",
+                model_name, cause, e, fallback
+            ));
+            // Surface the substitution so the user is not silently moved
+            // to a different model than they selected.
+            let _ = tx
+                .send(Ok(StreamEvent::StatusDetail {
+                    detail: format!(
+                        "⚠ '{}' is {}; falling back to '{}'",
+                        strip_1m_suffix(&model_name),
+                        cause,
+                        strip_1m_suffix(&fallback)
+                    ),
+                }))
+                .await;
+            provider.store_model(&fallback);
+            if caller_replans {
+                // Another model has another thinking configuration, binding
+                // policy and readable thinking: the caller reconciles and
+                // sends a request planned for it.
+                let _ = tx
+                    .send(Err(ProviderRequestReplan::ModelFallback {
+                        from: model_name,
+                        to: fallback,
+                        cause: cause.to_string(),
+                    }
+                    .into()))
+                    .await;
+                return;
+            }
+            provider.apply_model_plan(&mut request, &fallback, is_oauth);
+            tried_models.push(fallback.clone());
+            model_name = fallback;
+            last_error = Some(e);
+            continue;
+        }
+
+        // Reasoning request rejected (e.g. a model listed with effort or
+        // thinking capabilities that the live API does not actually
+        // accept: "adaptive thinking is not supported on this model" or
+        // "This model does not support the effort parameter."). Self-heal
+        // once by removing the reasoning fields and retrying, so a stale
+        // capability table degrades gracefully instead of hard-failing.
+        if !reasoning_self_healed
+            && (request.thinking.is_some() || request.output_config.is_some())
+            && !saw_output
+            && is_reasoning_unsupported_error(&error_str)
+        {
+            reasoning_self_healed = true;
+            jcode_base::logging::warn(&format!(
+                "Anthropic model '{}' rejected the reasoning request ({}); retrying without thinking/effort",
+                model_name, e
+            ));
+            request.output_config = None;
+            // A model that binds thinking to its prefix always thinks and
+            // keeps the binding control: without it the API would again
+            // accept invalid replayed thinking silently.
+            request.thinking = with_binding_control(None, &model_name, prefix_mismatch_behavior());
+            if request.thinking.is_none()
+                && is_oauth
+                && jcode_provider_core::anthropic_accepts_sampling_parameters(&model_name)
+            {
+                // The OAuth temperature is omitted only while thinking is on.
+                request.temperature = Some(1.0);
+            }
+            last_error = Some(e);
+            continue;
+        }
+
+        // Check if this is a transient/retryable error
+        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+            if saw_output {
+                // The fault hit mid-stream after partial output reached
+                // the consumer. Tell it to discard the partial attempt
+                // so the retried response replays cleanly instead of
+                // duplicating.
+                jcode_base::logging::warn(&format!(
+                    "Transient error after partial output; rolling back partial attempt and retrying: {}",
+                    e
+                ));
+                let _ = tx
+                    .send(Ok(StreamEvent::RetryRollback {
+                        attempt: attempt + 2,
+                        max: MAX_RETRIES,
+                    }))
+                    .await;
+            } else {
+                jcode_base::logging::info(&format!("Transient error, will retry: {}", e));
+            }
+            next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+            last_error = Some(e);
+            continue;
+        }
+
+        // Non-retryable or final attempt
+        if is_oauth && is_oauth_auth_error(&error_str) {
+            let _ = tx
+                .send(Err(anyhow::anyhow!(
+                    "{}\n\nClaude OAuth authentication failed. Run `jcode login --provider claude` (preferred) or `claude`, then retry.",
+                    e
+                )))
+                .await;
+        } else {
+            let _ = tx.send(Err(e)).await;
+        }
+        return;
     }
 
     // All retries exhausted
@@ -2082,37 +2317,40 @@ async fn force_refresh_oauth_token(
 }
 
 /// A Messages API request with the production endpoint, version, auth and
-/// beta headers for the credential route and the request's `thinking`
-/// parameter. The caller sets `accept`.
+/// beta headers for the credential route and the request's content. The
+/// caller sets `accept`.
 fn messages_request(
     client: &Client,
+    route: &RequestRoute,
     token: &str,
-    is_oauth: bool,
     model_name: &str,
-    thinking_betas: ThinkingBetas,
-    oauth_session_id: &str,
+    request_betas: RequestBetas,
 ) -> reqwest::RequestBuilder {
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    let url = format!(
+        "{}/v1/messages{}",
+        route.api_base,
+        if route.is_oauth { "?beta=true" } else { "" }
+    );
     let req = client
         .post(url)
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json");
-    let base_beta = if is_oauth {
+    let base_beta = if route.is_oauth {
         oauth_beta_headers(model_name)
     } else if is_1m_model(model_name) {
         "prompt-caching-2024-07-31,context-1m-2025-08-07"
     } else {
         "prompt-caching-2024-07-31"
     };
-    let beta_header = anthropic_beta_header(base_beta, thinking_betas);
-    if is_oauth {
+    let beta_header = anthropic_beta_header(base_beta, request_betas);
+    if route.is_oauth {
         // OAuth tokens require Bearer auth (not x-api-key), the Claude CLI
         // User-Agent, the beta set and the ?beta=true query param (in the URL).
         apply_oauth_attribution_headers(
             req.header("Authorization", format!("Bearer {token}"))
                 .header("User-Agent", CLAUDE_CLI_USER_AGENT)
                 .header("anthropic-beta", beta_header),
-            oauth_session_id,
+            &route.oauth_session_id,
         )
     } else {
         req.header("x-api-key", token)
@@ -2120,19 +2358,16 @@ fn messages_request(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one streaming attempt needs the request, its binding and the transport identity together"
-)]
+/// One streaming attempt: send `request` and forward its events until the
+/// provider completes the response.
 async fn stream_response(
     client: Client,
+    route: &RequestRoute,
     token: String,
-    is_oauth: bool,
     request: ApiRequest,
-    request_binding: &RequestBinding,
+    mut sse_state: SseStreamState,
     tx: mpsc::Sender<Result<StreamEvent>>,
     model_name: &str,
-    oauth_session_id: &str,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     if std::env::var("JCODE_ANTHROPIC_DEBUG")
@@ -2153,15 +2388,14 @@ async fn stream_response(
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
     let req = messages_request(
         &client,
+        route,
         &token,
-        is_oauth,
         model_name,
-        ThinkingBetas::of_request(&request),
-        oauth_session_id,
+        RequestBetas::of_request(&request),
     )
     .header(
         "accept",
-        if is_oauth {
+        if route.is_oauth {
             "application/json"
         } else {
             "text/event-stream"
@@ -2198,10 +2432,11 @@ async fn stream_response(
         }))
         .await;
 
-    // Parse SSE stream
+    // Parse SSE stream. The decoder keeps raw bytes until a line is
+    // complete, so a chunk boundary inside a multi-byte character or a CRLF
+    // never alters the text (INT-01/WP-06 R17).
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut sse_state = SseStreamState::new(&request.model, request_binding.clone());
+    let mut decoder = SseDecoder::default();
 
     // Idle timeout between streamed chunks. Configurable via
     // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
@@ -2209,7 +2444,7 @@ async fn stream_response(
     loop {
         let chunk = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
             Ok(Some(chunk_result)) => chunk_result.context("Error reading stream chunk")?,
-            Ok(None) => break, // stream ended normally
+            Ok(None) => break,
             Err(_) => {
                 jcode_base::logging::warn(&format!(
                     "Anthropic SSE stream timed out (no data for {}s)",
@@ -2221,12 +2456,9 @@ async fn stream_response(
                 );
             }
         };
-        let chunk_str = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&chunk_str);
 
-        // Process complete SSE events
-        while let Some(event) = parse_sse_event(&mut buffer) {
-            let events = process_sse_event(&event, &mut sse_state);
+        for event in decoder.push(&chunk)? {
+            let events = process_sse_event(&event, &mut sse_state)?;
             for stream_event in events {
                 if let StreamEvent::Error { ref message, .. } = stream_event
                     && is_retryable_error(&message.to_lowercase())
@@ -2234,11 +2466,16 @@ async fn stream_response(
                     anyhow::bail!("Retryable stream error: {}", message);
                 }
                 if tx.send(Ok(stream_event)).await.is_err() {
-                    return Ok(()); // Receiver dropped
+                    return Ok(()); // Receiver dropped: the consumer cancelled
                 }
             }
         }
     }
+    // A body that ends before `message_stop`, inside a content block or inside
+    // an event is a transport fault, retried like one; it never becomes a
+    // completed turn.
+    decoder.finish()?;
+    sse_state.ensure_complete()?;
 
     // Send final token usage if we have it
     if sse_state.input_tokens.is_some() || sse_state.output_tokens.is_some() {
@@ -2267,6 +2504,8 @@ async fn stream_response(
 /// Check if an error is transient and should be retried
 fn is_retryable_error(error_str: &str) -> bool {
     jcode_provider_core::is_transient_transport_error(error_str)
+        // A body that ended before the response completed (R17).
+        || error_str.contains(&STREAM_INCOMPLETE.to_ascii_lowercase())
         // Server errors (5xx)
         || error_str.contains("500 internal server error")
         || error_str.contains("502 bad gateway")
@@ -2497,16 +2736,29 @@ fn is_oauth_catalog_auth_error(error_str: &str) -> bool {
         || is_oauth_auth_error(&lower)
 }
 
-/// Betas a request's `thinking` parameter needs.
+/// Betas a request's content needs: its `thinking` parameter and any
+/// mid-conversation tool change it carries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ThinkingBetas {
+struct RequestBetas {
     /// `thinking` is present.
     thinking: bool,
     /// `thinking.block_binding` is present.
     binding_controls: bool,
+    /// A `role: "system"` message carries a `tool_addition` or `tool_removal`.
+    tool_changes: Option<ToolChangeBeta>,
 }
 
-impl ThinkingBetas {
+/// Which beta a request's mid-conversation tool changes need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolChangeBeta {
+    /// Changes by reference only (`mid-conversation-tool-changes-2026-07-01`).
+    ByReference,
+    /// At least one `tool_addition` carries a definition by value
+    /// (`inline-tools-2026-09-15`, which also covers changes by reference).
+    Inline,
+}
+
+impl RequestBetas {
     fn of_request(request: &ApiRequest) -> Self {
         Self {
             thinking: request.thinking.as_ref().is_some_and(ApiThinking::thinks),
@@ -2515,6 +2767,15 @@ impl ThinkingBetas {
                 .as_ref()
                 .and_then(ApiThinking::block_binding)
                 .is_some(),
+            tool_changes: tool_change_beta(request.messages.iter().flat_map(|message| {
+                message.content.iter().filter_map(|block| match block {
+                    ApiContentBlock::ToolAddition { tool, .. } => {
+                        Some(matches!(tool, ApiToolChangeTarget::ToolDefinition { .. }))
+                    }
+                    ApiContentBlock::ToolRemoval { .. } => Some(false),
+                    _ => None,
+                })
+            })),
         }
     }
 
@@ -2522,15 +2783,41 @@ impl ThinkingBetas {
     /// provider-contract probe edits bodies after building them).
     fn of_body(body: &Value) -> Self {
         let thinking = body.get("thinking");
+        let blocks = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|message| message.get("content").and_then(Value::as_array))
+            .flatten();
         Self {
             thinking: thinking
                 .is_some_and(|t| t.get("type").and_then(Value::as_str) != Some("disabled")),
             binding_controls: thinking.and_then(|t| t.get("block_binding")).is_some(),
+            tool_changes: tool_change_beta(blocks.filter_map(|block| {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_addition") => Some(
+                        block["tool"].get("type").and_then(Value::as_str)
+                            == Some("tool_definition"),
+                    ),
+                    Some("tool_removal") => Some(false),
+                    _ => None,
+                }
+            })),
         }
     }
 }
 
-fn anthropic_beta_header(base: &str, betas: ThinkingBetas) -> String {
+/// The beta for a request's tool changes, given one entry per change that
+/// says whether it carries a definition by value.
+fn tool_change_beta(changes: impl Iterator<Item = bool>) -> Option<ToolChangeBeta> {
+    changes.fold(None, |beta, by_value| match (beta, by_value) {
+        (Some(ToolChangeBeta::Inline), _) | (_, true) => Some(ToolChangeBeta::Inline),
+        _ => Some(ToolChangeBeta::ByReference),
+    })
+}
+
+fn anthropic_beta_header(base: &str, betas: RequestBetas) -> String {
     let mut header = base.to_string();
     let mut add = |beta: &str| {
         if !header.split(',').any(|existing| existing == beta) {
@@ -2544,43 +2831,17 @@ fn anthropic_beta_header(base: &str, betas: ThinkingBetas) -> String {
     if betas.binding_controls {
         add(THINKING_BINDING_CONTROLS_BETA);
     }
+    match betas.tool_changes {
+        Some(ToolChangeBeta::Inline) => add(INLINE_TOOLS_BETA),
+        Some(ToolChangeBeta::ByReference) => add(MID_CONVERSATION_TOOL_CHANGES_BETA),
+        None => {}
+    }
     header
 }
 
 /// Accumulator for tool_use blocks (input comes in chunks)
 struct ToolUseAccumulator {
     input_json: String,
-}
-
-/// Parse a single SSE event from the buffer
-fn parse_sse_event(buffer: &mut String) -> Option<SseEvent> {
-    // Look for complete event (ends with double newline)
-    let event_end = buffer.find("\n\n")?;
-    let event_str = buffer[..event_end].to_string();
-    buffer.drain(..event_end + 2);
-
-    let mut event_type = String::new();
-    let mut data = String::new();
-
-    for line in event_str.lines() {
-        if let Some(rest) = line.strip_prefix("event: ") {
-            event_type = rest.to_string();
-        } else if let Some(rest) = jcode_base::util::sse_data_line(line) {
-            data = rest.to_string();
-        }
-    }
-
-    if event_type.is_empty() && data.is_empty() {
-        return None;
-    }
-
-    Some(SseEvent { event_type, data })
-}
-
-/// SSE event from the stream
-struct SseEvent {
-    event_type: String,
-    data: String,
 }
 
 /// Mutable accumulator state threaded through [`process_sse_event`] across a
@@ -2608,6 +2869,12 @@ struct SseStreamState {
     /// Fingerprint of the thinking block before the next one: the request's
     /// last, then each block this response produced.
     previous_thinking: Option<String>,
+    /// The request's replayed thinking, for mapping provider reports back.
+    replay: Arc<ReplayIndex>,
+    /// Content blocks started and not yet stopped.
+    open_blocks: usize,
+    /// `message_stop` arrived: the provider finished the response.
+    stopped: bool,
 }
 
 /// A thinking block in progress.
@@ -2630,7 +2897,30 @@ impl SseStreamState {
             block_model: strip_1m_suffix(requested_model).to_string(),
             previous_thinking: request_binding.last_thinking.clone(),
             request_binding,
+            replay: Arc::default(),
+            open_blocks: 0,
+            stopped: false,
         }
+    }
+
+    fn with_replay(mut self, replay: Arc<ReplayIndex>) -> Self {
+        self.replay = replay;
+        self
+    }
+
+    /// Whether the provider said the response is complete. Only a response
+    /// that reached `message_stop` with every content block closed is one.
+    fn ensure_complete(&self) -> Result<()> {
+        if !self.stopped {
+            anyhow::bail!("{STREAM_INCOMPLETE} the body ended before `message_stop`");
+        }
+        if self.open_blocks > 0 {
+            anyhow::bail!(
+                "{STREAM_INCOMPLETE} the body ended with {} content block(s) still open",
+                self.open_blocks
+            );
+        }
+        Ok(())
     }
 
     /// Close the thinking block in progress. A signed block becomes a
@@ -2681,19 +2971,31 @@ impl SseStreamState {
     }
 }
 
+/// Decode a known event's payload. A known event that does not decode is a
+/// corrupted or cut-off response, not something to skip.
+fn parse_known_event<T: serde::de::DeserializeOwned>(event: &SseEvent) -> Result<T> {
+    serde_json::from_str(&event.data).map_err(|error| {
+        anyhow::anyhow!(
+            "{STREAM_INCOMPLETE} malformed `{}` event ({error})",
+            event.event_type
+        )
+    })
+}
+
 /// Process an SSE event and return StreamEvents if applicable
-fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Vec<StreamEvent> {
+fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Result<Vec<StreamEvent>> {
     let mut events = Vec::new();
 
     match event.event_type.as_str() {
         "message_start" => {
             // Extract usage from message_start (includes cache info)
-            if let Ok(parsed) = serde_json::from_str::<MessageStartEvent>(&event.data) {
+            {
+                let parsed: MessageStartEvent = parse_known_event(event)?;
                 // The server echoes the model that actually served the request.
                 // Log it so we can confirm there was no silent server-side
                 // substitution (and surface it under JCODE_LOG_SERVED_MODEL).
                 if let Some(transformations) = parsed.message.input_transformations.as_deref() {
-                    record_input_transformations(transformations, &mut events);
+                    record_input_transformations(transformations, state, &mut events);
                 }
                 if let Some(served) = parsed.message.model.as_deref() {
                     state.block_model = strip_1m_suffix(served).to_string();
@@ -2742,7 +3044,9 @@ fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Vec<Stream
             }
         }
         "content_block_start" => {
-            if let Ok(parsed) = serde_json::from_str::<ContentBlockStartEvent>(&event.data) {
+            {
+                let parsed: ContentBlockStartEvent = parse_known_event(event)?;
+                state.open_blocks += 1;
                 match parsed.content_block {
                     ApiContentBlockStart::Text { .. } => {
                         // Text block starting - nothing to emit yet
@@ -2788,38 +3092,43 @@ fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Vec<Stream
             }
         }
         "content_block_delta" => {
-            if let Ok(parsed) = serde_json::from_str::<ContentBlockDeltaEvent>(&event.data) {
-                match parsed.delta {
-                    ApiDelta::Text { text } => {
-                        events.push(StreamEvent::TextDelta(text));
+            let parsed: ContentBlockDeltaEvent = parse_known_event(event)?;
+            match parsed.delta {
+                ApiDelta::Text { text } => {
+                    events.push(StreamEvent::TextDelta(text));
+                }
+                ApiDelta::InputJson { partial_json } => {
+                    if let Some(tool) = state.current_tool_use.as_mut() {
+                        tool.input_json.push_str(&partial_json);
                     }
-                    ApiDelta::InputJson { partial_json } => {
-                        if let Some(tool) = state.current_tool_use.as_mut() {
-                            tool.input_json.push_str(&partial_json);
-                        }
-                        events.push(StreamEvent::ToolInputDelta(partial_json));
+                    events.push(StreamEvent::ToolInputDelta(partial_json));
+                }
+                ApiDelta::Thinking { thinking } => {
+                    if let Some(ThinkingAccumulator::Thinking { thinking: text, .. }) =
+                        state.current_thinking.as_mut()
+                    {
+                        text.push_str(&thinking);
                     }
-                    ApiDelta::Thinking { thinking } => {
-                        if let Some(ThinkingAccumulator::Thinking { thinking: text, .. }) =
-                            state.current_thinking.as_mut()
-                        {
-                            text.push_str(&thinking);
-                        }
-                        events.push(StreamEvent::ThinkingDelta(thinking));
+                    events.push(StreamEvent::ThinkingDelta(thinking));
+                }
+                ApiDelta::Signature { signature } => {
+                    if let Some(ThinkingAccumulator::Thinking {
+                        signature: accumulated,
+                        ..
+                    }) = state.current_thinking.as_mut()
+                    {
+                        accumulated.push_str(&signature);
                     }
-                    ApiDelta::Signature { signature } => {
-                        if let Some(ThinkingAccumulator::Thinking {
-                            signature: accumulated,
-                            ..
-                        }) = state.current_thinking.as_mut()
-                        {
-                            accumulated.push_str(&signature);
-                        }
-                    }
+                }
+                ApiDelta::Unknown => {
+                    jcode_base::logging::info(
+                        "Anthropic stream sent an unrecognized content_block_delta type; ignoring it",
+                    );
                 }
             }
         }
         "content_block_stop" => {
+            state.open_blocks = state.open_blocks.saturating_sub(1);
             // If we were accumulating a tool_use, it's complete now
             if state.current_tool_use.take().is_some() {
                 events.push(StreamEvent::ToolUseEnd);
@@ -2831,11 +3140,12 @@ fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Vec<Stream
             }
         }
         "message_delta" => {
-            if let Ok(parsed) = serde_json::from_str::<MessageDeltaEvent>(&event.data) {
+            {
+                let parsed: MessageDeltaEvent = parse_known_event(event)?;
                 // After a mid-stream server-side fallback the final
                 // `message_delta` repeats the transformations.
                 if let Some(transformations) = parsed.input_transformations.as_deref() {
-                    record_input_transformations(transformations, &mut events);
+                    record_input_transformations(transformations, state, &mut events);
                 }
                 if let Some(usage) = parsed.usage {
                     state.output_tokens = usage.output_tokens.map(|t| t as u64);
@@ -2848,7 +3158,9 @@ fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Vec<Stream
             }
         }
         "message_stop" => {
-            // Final message stop - we may have already sent MessageEnd via message_delta
+            // The provider finished the response. `MessageEnd` was sent with
+            // the stop reason in `message_delta`.
+            state.stopped = true;
         }
         "ping" => {
             // Keepalive. Surface it as a phase event instead of swallowing it:
@@ -2872,19 +3184,32 @@ fn process_sse_event(event: &SseEvent, state: &mut SseStreamState) -> Vec<Stream
         }
     }
 
-    events
+    Ok(events)
 }
 
-/// Surface the response's `input_transformations` (beta
+/// Reasons for a dropped thinking block that say nothing against the block
+/// itself: the model or account serving this request cannot read it. The
+/// block stays valid for the model that produced it, so it is kept and sent
+/// again (INT-01 D16; measured round trip, WP-06 probe G6.5).
+const ROUTING_DROP_REASONS: [&str; 2] = ["model_binding_mismatch", "organization_binding_mismatch"];
+
+/// Handle the response's `input_transformations` (beta
 /// `thinking-binding-controls-2026-08-01`). Every entry is logged and counted.
-/// A prefix-binding mismatch means jcode edited history it should only have
-/// appended to: an INV-1 defect, shown as a status notice. Types and reasons
-/// this build does not know are recorded generically, as the API asks.
+///
+/// A dropped block is fed back: the API drops the first block that fails its
+/// conversation check and every thinking block after it, on every later
+/// request too, so that run is reported as [`StreamEvent::ProviderDroppedReasoning`]
+/// for the caller to suppress, persisted (INV-4, R19). Types and reasons this
+/// build does not know are treated the same way, as the API asks for them to
+/// be handled generically; a block that must not be sent again is the safe
+/// reading. Routing drops ([`ROUTING_DROP_REASONS`]) are shown and kept.
 fn record_input_transformations(
     transformations: &[InputTransformation],
+    state: &mut SseStreamState,
     events: &mut Vec<StreamEvent>,
 ) {
-    let mut prefix_mismatches = 0usize;
+    let mut first_dropped: Option<(usize, String)> = None;
+    let mut routing_drops = 0usize;
     for entry in transformations {
         let kind = entry.kind.as_deref().unwrap_or("unknown");
         let reason = entry.reason.as_deref().unwrap_or("unknown");
@@ -2892,24 +3217,60 @@ fn record_input_transformations(
         jcode_provider_core::anthropic_binding_diagnostics::record_input_transformation(
             kind, reason,
         );
-        if reason == "prefix_binding_mismatch" {
-            prefix_mismatches += 1;
-            jcode_base::logging::warn(&format!(
-                "INV-1: Anthropic reported {kind} ({reason}) at {path}"
-            ));
-        } else {
+        if ROUTING_DROP_REASONS.contains(&reason) {
+            routing_drops += 1;
             jcode_base::logging::info(&format!(
                 "Anthropic input transformation {kind} ({reason}) at {path}"
             ));
+            continue;
+        }
+        // The block was kept and only reported (an account without the
+        // binding control); nothing was dropped.
+        if kind == "thinking_mismatch_allowed" {
+            jcode_base::logging::warn(&format!(
+                "INV-1: Anthropic reported {kind} ({reason}) at {path}"
+            ));
+            continue;
+        }
+        jcode_base::logging::warn(&format!(
+            "INV-1: Anthropic reported {kind} ({reason}) at {path}"
+        ));
+        // A path this request does not replay cannot be mapped: every block
+        // is then at risk, so the whole replay is reported.
+        let position = state.replay.position(path).unwrap_or(0);
+        if first_dropped
+            .as_ref()
+            .is_none_or(|(earliest, _)| position < *earliest)
+        {
+            first_dropped = Some((position, reason.to_string()));
         }
     }
-    if prefix_mismatches > 0 {
+    if routing_drops > 0 {
         events.push(StreamEvent::StatusDetail {
             detail: format!(
-                "⚠ Claude could not use {prefix_mismatches} earlier thinking block(s): the conversation before them changed"
+                "{routing_drops} earlier thinking block(s) cannot be read by {}; they are kept for the model that produced them",
+                state.block_model
             ),
         });
     }
+    let Some((position, reason)) = first_dropped else {
+        return;
+    };
+    if position >= state.replay.blocks.len() {
+        return;
+    }
+    let block_ids = state.replay.from(position);
+    // Thinking this response produces follows the last block the API kept.
+    state.previous_thinking = position
+        .checked_sub(1)
+        .map(|kept| state.replay.blocks[kept].id.clone());
+    events.push(StreamEvent::StatusDetail {
+        detail: format!(
+            "⚠ Claude could not use {} earlier thinking block(s) ({reason}); they are suppressed from now on",
+            block_ids.len()
+        ),
+    });
+    events.push(StreamEvent::ProviderDroppedReasoning { block_ids, reason });
 }
 
 // ============================================================================
@@ -2919,6 +3280,15 @@ fn record_input_transformations(
 fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
     jcode_provider_anthropic::build_system_param(system, is_oauth)
 }
+
+/// Prefix of every error for an Anthropic response body that ended or broke
+/// before the response completed. It is a transport fault: retried before any
+/// output, rolled back and retried after output began, and never stored as a
+/// completed turn (INT-01/WP-06 R17).
+const STREAM_INCOMPLETE: &str = "Anthropic stream incomplete:";
+
+mod sse_decoder;
+use sse_decoder::{SseDecoder, SseEvent};
 
 mod sse_types;
 use sse_types::{
@@ -2932,3 +3302,7 @@ mod context_window;
 #[allow(clippy::await_holding_lock)]
 #[path = "anthropic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::await_holding_lock)]
+mod boundary_tests;

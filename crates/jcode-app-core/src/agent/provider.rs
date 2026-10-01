@@ -192,6 +192,31 @@ impl Agent {
         Ok(())
     }
 
+    /// The runtime moved to another model because the selected one is
+    /// unavailable or out of quota. Adopt it for the session and record a
+    /// provider-model transition, as a switch a person makes is recorded.
+    pub(crate) fn adopt_provider_model_fallback(
+        &mut self,
+        from: &str,
+        to: &str,
+        cause: &str,
+    ) -> Result<()> {
+        let model = self.provider.model();
+        self.session.model = Some(model.clone());
+        self.session.provider_session_id = None;
+        self.session.save()?;
+        self.provider_runtime_state
+            .apply(crate::provider::ProviderStateEvent::RuntimeModelObserved { model });
+        self.update_context_runtime_budget();
+        self.after_provider_context_changed(
+            "provider model fallback",
+            format!("model '{from}' is {cause}; requests continue on '{to}'"),
+            true,
+        )?;
+        self.log_env_snapshot("provider_model_fallback");
+        Ok(())
+    }
+
     fn validate_provider_switch_projection(&mut self, candidate: &dyn Provider) -> Result<()> {
         let operations =
             crate::context::projection_validation_operations(&self.session.context_view);

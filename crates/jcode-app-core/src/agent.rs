@@ -386,6 +386,14 @@ pub struct Agent {
     /// provider request. They name why replayed reasoning stopped matching
     /// its prefix, and are cleared once a request reconciles it.
     pending_prefix_transitions: Vec<String>,
+    /// Replayed reasoning the provider reported it would not use, held until
+    /// the next request's reconciliation persists it as suppressed. It is
+    /// not persisted itself: if it is lost, the next request repeats the
+    /// report.
+    provider_reported_reasoning: Vec<crate::context::ProviderReportedReasoning>,
+    /// How many times in a row a runtime handed a request back to be planned
+    /// again without a completed response in between.
+    provider_replans: u32,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
     /// Whether memory features are enabled for this session
@@ -454,6 +462,8 @@ impl Agent {
             last_usage: TokenUsage::default(),
             tool_set: crate::tool::ToolSetLock::default(),
             pending_prefix_transitions: Vec::new(),
+            provider_reported_reasoning: Vec::new(),
+            provider_replans: 0,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
@@ -1196,6 +1206,7 @@ impl Agent {
             &self.session.messages,
             &self.session.context_view,
             &prefix,
+            &self.provider_reported_reasoning,
         )
         .map_err(|error| {
             anyhow::anyhow!(
@@ -1204,6 +1215,7 @@ impl Agent {
         })?;
         self.pending_prefix_transitions.clear();
         let Some(outcome) = outcome else {
+            self.provider_reported_reasoning.clear();
             return Ok(None);
         };
         let previous = self.session.context_view.clone();
@@ -1227,7 +1239,73 @@ impl Agent {
         self.cache_tracker.reset();
         self.provider
             .invalidate_context_continuation("replayed reasoning invalidation changed");
+        // Held reports are now part of the persisted set.
+        self.provider_reported_reasoning.clear();
         Ok(Some(notice))
+    }
+
+    /// Keep replayed reasoning the provider reported as dropped, for the next
+    /// request's reconciliation (INT-01/WP-06 R19).
+    pub(crate) fn note_provider_dropped_reasoning(
+        &mut self,
+        block_ids: Vec<String>,
+        reason: String,
+    ) {
+        logging::warn(&format!(
+            "Provider dropped {} replayed reasoning block(s) for session {} ({reason}); they are suppressed before the next request",
+            block_ids.len(),
+            self.session.id
+        ));
+        self.provider_reported_reasoning
+            .push(crate::context::ProviderReportedReasoning { block_ids, reason });
+    }
+
+    /// A provider request completed: later replans start a new count.
+    pub(crate) fn provider_request_completed(&mut self) {
+        self.provider_replans = 0;
+    }
+
+    /// Whether `error` is a runtime handing the request back to be planned
+    /// again, and the request loop should reconcile and send a new request
+    /// (INT-01/WP-06 R20). The cause is applied first: a model fallback is
+    /// adopted and recorded as a provider-model transition, rejected
+    /// reasoning is held for suppression. `false` leaves the error to the
+    /// caller, including when replans repeat without a completed response.
+    pub(crate) fn accept_provider_replan(&mut self, error: &anyhow::Error) -> Result<bool> {
+        use jcode_provider_core::ProviderRequestReplan;
+        /// A new plan can itself be handed back (a fallback model that is
+        /// also unavailable). More than this many in a row is a fault.
+        const MAX_CONSECUTIVE_REPLANS: u32 = 4;
+
+        let Some(replan) = ProviderRequestReplan::of(error) else {
+            return Ok(false);
+        };
+        if self.provider_replans >= MAX_CONSECUTIVE_REPLANS {
+            logging::error(&format!(
+                "Provider request for session {} was handed back {} times in a row; giving up: {error:#}",
+                self.session.id, self.provider_replans
+            ));
+            return Ok(false);
+        }
+        self.provider_replans += 1;
+        logging::info(&format!(
+            "Provider request for session {} is planned again: {replan}",
+            self.session.id
+        ));
+        match replan {
+            ProviderRequestReplan::ModelFallback { from, to, cause } => {
+                self.adopt_provider_model_fallback(from, to, cause)?;
+            }
+            ProviderRequestReplan::ReplayedReasoningInvalid { .. } => {
+                // The request resolved to another plan than the transcript
+                // was reconciled against; the runtime now reports that plan.
+                self.note_prefix_transition("request plan change");
+            }
+            ProviderRequestReplan::ReasoningRejected { block_ids, reason } => {
+                self.note_provider_dropped_reasoning(block_ids.clone(), reason.clone());
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn replace_context_view_state(
@@ -1429,6 +1507,9 @@ mod tests;
 mod context_delivery_tests;
 #[cfg(test)]
 mod reasoning_invalidation_tests;
+#[cfg(test)]
+#[path = "agent/request_replan_tests.rs"]
+mod request_replan_tests;
 
 impl crate::context::RequestPrefixSource for Agent {
     fn request_prefix(

@@ -751,6 +751,12 @@ impl MultiProvider {
                     if mode.has_received_data() {
                         return Err(err.context("Provider returned SDK data before request failure; automatic account/provider replay was stopped"));
                     }
+                    // The runtime handed the request back to be planned
+                    // again: not a provider failure, never an account or
+                    // provider failover.
+                    if jcode_provider_core::ProviderRequestReplan::of(&err).is_some() {
+                        return Err(err);
+                    }
                     let summary =
                         maybe_annotate_limit_summary(candidate, Self::summarize_error(&err));
                     let decision = Self::classify_failover_error(&err);
@@ -2313,6 +2319,11 @@ impl Provider for MultiProvider {
     ) -> Option<Vec<jcode_provider_core::InvalidReplayedReasoning>> {
         self.runtime_for(self.active_provider())?
             .replayed_reasoning_invalidations(messages, tools, system)
+    }
+
+    fn replayed_reasoning_block_id(&self, block: &crate::message::ContentBlock) -> Option<String> {
+        self.runtime_for(self.active_provider())?
+            .replayed_reasoning_block_id(block)
     }
 
     fn validate_projected_context(

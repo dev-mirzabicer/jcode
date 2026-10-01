@@ -4776,10 +4776,14 @@ pub(crate) fn reasoning_invalidation_cause_label(
             "invalidated because the system prompt or tool set changed ({})",
             recorded_transitions.join(", ")
         ),
+        jcode_session_types::StoredReasoningInvalidationCause::ProviderReported { reason } => {
+            format!("the provider reported it could not use this thinking ({reason})")
+        }
     }
 }
 
-const MANAGED_TRANSACTION_NOTICE: &str = "jcode manages this Claude thinking invalidation. Revert or reapply the transaction that caused it.";
+const MANAGED_TRANSACTION_NOTICE: &str =
+    "jcode manages this Claude thinking invalidation. Thinking it suppresses is not sent again.";
 
 /// Whether a person reverts and reapplies this transaction. jcode-managed
 /// reasoning invalidations follow the transactions that cause them.

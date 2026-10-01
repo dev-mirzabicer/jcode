@@ -776,6 +776,15 @@ pub enum StreamEvent {
     /// duplicating. Safe for jcode HTTP providers because tools only execute
     /// after the stream completes, so a partial attempt has no side effects.
     RetryRollback { attempt: u32, max: u32 },
+    /// The provider reported that it did not use replayed reasoning blocks
+    /// this request carried, for a reason that makes them unusable from now
+    /// on (their conversation prefix no longer matches). `block_ids` are in
+    /// the runtime's `Provider::replayed_reasoning_block_id` scheme and name
+    /// every block that must not be sent again. The request itself succeeded.
+    ProviderDroppedReasoning {
+        block_ids: Vec<String>,
+        reason: String,
+    },
     /// Token usage update
     TokenUsage {
         input_tokens: Option<u64>,

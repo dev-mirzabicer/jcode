@@ -929,6 +929,11 @@ pub struct App {
     // Labels of recorded prompt or tool-set transitions since the previous
     // local request: the cause of replayed reasoning they invalidate.
     pending_prefix_transitions: Vec<String>,
+    /// Replayed reasoning the provider reported it would not use, held until
+    /// the next local request's reconciliation persists it as suppressed.
+    provider_reported_reasoning: Vec<crate::context::ProviderReportedReasoning>,
+    /// Consecutive local requests the runtime handed back to be planned again.
+    provider_replans: u32,
     // The tool set local requests carry, with the agent's lifetime rule
     // (`crate::tool::tool_set`).
     tool_set: crate::tool::ToolSetLock,

@@ -47,6 +47,8 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::ThinkingEnd
         | StreamEvent::ThinkingDone { .. }
         | StreamEvent::RetryRollback { .. }
+        // A set of block identities: receiving it again adds nothing.
+        | StreamEvent::ProviderDroppedReasoning { .. }
         | StreamEvent::TokenUsage { .. }
         | StreamEvent::ConnectionType { .. }
         | StreamEvent::ConnectionPhase { .. }

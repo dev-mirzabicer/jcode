@@ -14,12 +14,14 @@ pub mod pricing;
 pub mod qualified_model;
 pub mod reasoning;
 pub mod request_lifetime;
+pub mod request_replan;
 pub mod retry_after;
 pub mod selection;
 pub mod tool_name_policy;
 pub mod transport;
 pub mod usage_accounting;
 
+pub use request_replan::ProviderRequestReplan;
 pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
@@ -185,6 +187,12 @@ pub trait ProviderResultCapture: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ProviderRequestContext {
     pub result_capture: Option<std::sync::Arc<dyn ProviderResultCapture>>,
+    /// The caller reconciles replayed reasoning and builds a new request when
+    /// the stream ends with a [`ProviderRequestReplan`]. A runtime then
+    /// returns that error instead of changing a planned request in flight.
+    /// Callers that leave this unset get a complete replacement plan built by
+    /// the runtime where one is possible without reconciliation.
+    pub caller_replans: bool,
 }
 
 impl ProviderRequestContext {
@@ -463,6 +471,15 @@ pub trait Provider: Send + Sync {
         _tools: &[ToolDefinition],
         _system: &str,
     ) -> Option<Vec<InvalidReplayedReasoning>> {
+        None
+    }
+
+    /// This runtime's identity for a stored replayable reasoning block, in the
+    /// scheme its `ProviderDroppedReasoning` events and
+    /// [`ProviderRequestReplan::ReasoningRejected`] errors use. `None` for
+    /// blocks it does not replay. Orchestrators delegate to the runtime they
+    /// would dispatch to.
+    fn replayed_reasoning_block_id(&self, _block: &ContentBlock) -> Option<String> {
         None
     }
 

@@ -666,6 +666,16 @@ impl ApiThinking {
 /// to responses.
 pub const THINKING_BINDING_CONTROLS_BETA: &str = "thinking-binding-controls-2026-08-01";
 
+/// Beta for mid-conversation tool changes by reference: a `role: "system"`
+/// message carrying `tool_addition` (of a tool declared with
+/// `defer_loading: true`) or `tool_removal` blocks.
+pub const MID_CONVERSATION_TOOL_CHANGES_BETA: &str = "mid-conversation-tool-changes-2026-07-01";
+
+/// Beta for tool changes by value: a `tool_addition` carrying a complete
+/// definition, which adds a tool or replaces a same-name one from that message
+/// on. It also covers changes by reference.
+pub const INLINE_TOOLS_BETA: &str = "inline-tools-2026-09-15";
+
 /// `thinking.block_binding`: what the API does with a replayed thinking block
 /// whose conversation prefix changed. Requires
 /// [`THINKING_BINDING_CONTROLS_BETA`].
@@ -736,6 +746,12 @@ pub struct ApiSystemBlock {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControlParam>,
+    /// The OAuth client billing header. The API neither binds thinking to it
+    /// nor caches it (measured, INT-01/WP-06 probe G6.6), so
+    /// [`binding`] digests represent it by a fixed text and a client-version
+    /// sync invalidates nothing. Never sent.
+    #[serde(skip)]
+    pub client_billing: bool,
 }
 
 /// Build the top-level `system`: the OAuth identity blocks (when on OAuth) and
@@ -749,11 +765,13 @@ pub fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
             block_type: "text",
             text: format!("x-anthropic-billing-header: {}", OAUTH_BILLING_HEADER),
             cache_control: None,
+            client_billing: true,
         });
         blocks.push(ApiSystemBlock {
             block_type: "text",
             text: CLAUDE_CODE_IDENTITY.to_string(),
             cache_control: None,
+            client_billing: false,
         });
     }
     if !system.is_empty() {
@@ -761,6 +779,7 @@ pub fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
             block_type: "text",
             text: system.to_string(),
             cache_control: None,
+            client_billing: false,
         });
     }
     (!blocks.is_empty()).then_some(ApiSystem::Blocks(blocks))
@@ -819,6 +838,27 @@ pub enum ApiContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControlParam>,
     },
+    /// A tool offered from this `role: "system"` message on.
+    #[serde(rename = "tool_addition")]
+    ToolAddition {
+        tool: ApiToolChangeTarget,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControlParam>,
+    },
+    /// A tool withdrawn from this `role: "system"` message on. Its definition
+    /// stays in `tools`.
+    #[serde(rename = "tool_removal")]
+    ToolRemoval { tool: ApiToolChangeTarget },
+}
+
+/// The tool a mid-conversation tool change names.
+#[derive(Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApiToolChangeTarget {
+    /// A tool by name.
+    ToolReference { name: String },
+    /// A complete tool definition (`inline-tools-2026-09-15`).
+    ToolDefinition { definition: ApiTool },
 }
 
 impl ApiContentBlock {
@@ -833,8 +873,11 @@ impl ApiContentBlock {
             Self::Text { cache_control, .. }
             | Self::ToolUse { cache_control, .. }
             | Self::ToolResult { cache_control, .. }
-            | Self::Image { cache_control, .. } => Some(cache_control),
-            Self::Thinking { .. } | Self::RedactedThinking { .. } => None,
+            | Self::Image { cache_control, .. }
+            | Self::ToolAddition { cache_control, .. } => Some(cache_control),
+            Self::Thinking { .. } | Self::RedactedThinking { .. } | Self::ToolRemoval { .. } => {
+                None
+            }
         }
     }
 
@@ -844,8 +887,11 @@ impl ApiContentBlock {
             Self::Text { cache_control, .. }
             | Self::ToolUse { cache_control, .. }
             | Self::ToolResult { cache_control, .. }
-            | Self::Image { cache_control, .. } => Some(cache_control),
-            Self::Thinking { .. } | Self::RedactedThinking { .. } => None,
+            | Self::Image { cache_control, .. }
+            | Self::ToolAddition { cache_control, .. } => Some(cache_control),
+            Self::Thinking { .. } | Self::RedactedThinking { .. } | Self::ToolRemoval { .. } => {
+                None
+            }
         }
     }
 

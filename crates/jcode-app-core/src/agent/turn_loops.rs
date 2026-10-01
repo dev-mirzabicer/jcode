@@ -188,7 +188,7 @@ impl Agent {
                     &tools,
                     &split_prompt.static_part,
                     self.provider_session_id.as_deref(),
-                    provider_ingress.context(),
+                    provider_ingress.replanning_context(),
                 )
                 .await
             {
@@ -198,6 +198,9 @@ impl Agent {
                     if provider_ingress.has_received_data() {
                         self.mark_provider_output_started();
                         return Err(e.context("SDK data was received before stream publication; automatic request replay was stopped"));
+                    }
+                    if self.accept_provider_replan(&e)? {
+                        continue 'provider_turn;
                     }
                     let provider_error = e.to_string();
                     match self
@@ -287,6 +290,11 @@ impl Agent {
                         if provider_ingress.has_received_data() {
                             self.mark_provider_output_started();
                             return Err((e).context("Provider failed after acquired SDK data; automatic replay was stopped"));
+                        }
+                        // The runtime handed the request back before any
+                        // output: reconcile and send a newly planned one.
+                        if self.accept_provider_replan(&e)? {
+                            continue 'provider_turn;
                         }
                         match self
                             .try_unattended_emergency_provider_recovery(&err_str, None)
@@ -619,9 +627,13 @@ impl Agent {
                         saw_message_end = false;
                         stop_reason = None;
                     }
+                    StreamEvent::ProviderDroppedReasoning { block_ids, reason } => {
+                        self.note_provider_dropped_reasoning(block_ids, reason);
+                    }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
+                        self.provider_request_completed();
                         saw_message_end = true;
                         if reason.is_some() {
                             stop_reason = reason;

@@ -1,5 +1,5 @@
-//! Replayed reasoning that no longer matches its request prefix (INT-01
-//! DESIGN §4.3 and §5, Mirza's decision D-WP04-1).
+//! Replayed reasoning the provider can no longer use (INT-01 DESIGN §4.3 and
+//! §5; Mirza's decisions D-WP04-1 and D16).
 //!
 //! Some models bind each replayed reasoning block to the request prefix that
 //! produced it: the system prompt, the tool set and every earlier message
@@ -9,18 +9,26 @@
 //! drop it.
 //!
 //! jcode never lets that happen silently. One jcode-managed
-//! reasoning-invalidation transaction holds every block that no longer
-//! matches, grouped by cause. This module is its only writer. It recomputes the
-//! complete set from the recorded bindings at every context transition and
-//! before every request, and when the set changes it supersedes the previous
-//! managed transaction and applies the new one at the same revision. Computing
-//! the whole set each time keeps it exact under any sequence of transitions: a
-//! revert restores blocks that match again and suppresses blocks produced
-//! while the reverted change was active.
+//! reasoning-invalidation transaction holds every block that must not be
+//! sent, grouped by cause. This module is its only writer. When the set
+//! changes it supersedes the previous managed transaction and applies the new
+//! one at the same revision. The set has two parts:
 //!
-//! The provider runtime decides validity (`Provider::replayed_reasoning_invalidations`),
-//! from the exact request it would build. Routes whose model does not bind
-//! reasoning report `None`, and the managed set is then empty.
+//! - **Derived.** On a route whose model binds reasoning, the set is
+//!   recomputed whole from the recorded bindings at every context transition
+//!   and before every request (`Provider::replayed_reasoning_invalidations`,
+//!   decided on the exact request the runtime would build). Recomputing keeps
+//!   revert and reapply exact: a block comes back only when its binding
+//!   proves it valid again, and the same recompute suppresses every block
+//!   produced while it was absent.
+//! - **Provider-reported.** Blocks the provider dropped or rejected cannot be
+//!   derived from bindings, so they stay suppressed for the rest of the
+//!   conversation (until a clear or a new session) and stack with the derived
+//!   part.
+//!
+//! A route or model that does not bind reasoning changes nothing in the set:
+//! it neither lifts nor adds, so returning to a binding model finds the set as
+//! it was (D16, INT-01/WP-06 R21). Only a provider report adds to it there.
 
 use crate::message::{Message, ToolDefinition};
 use crate::protocol::{ContextReasoningInvalidationSummary, ContextServiceError};
@@ -98,21 +106,29 @@ impl RequestPrefixSource for Option<ContextRequestPrefix> {
     }
 }
 
+/// Replayed reasoning blocks the provider reported it would not use: dropped
+/// from a request, or named by a rejection. `block_ids` are in the runtime's
+/// `Provider::replayed_reasoning_block_id` scheme.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderReportedReasoning {
+    pub block_ids: Vec<String>,
+    pub reason: String,
+}
+
 /// Whether replayed reasoning must be checked for this provider, transcript
 /// and state: the route binds reasoning and the transcript holds bound
-/// reasoning, or a managed set is in force and may need to be lifted.
+/// reasoning.
 pub fn reasoning_reconciliation_needed(
     provider: &dyn Provider,
     messages: &[StoredMessage],
-    state: &StoredContextViewState,
+    _state: &StoredContextViewState,
 ) -> bool {
-    state.active_reasoning_invalidation().is_some()
-        || (messages
-            .iter()
-            .any(|message| message.content.iter().any(is_bound_reasoning))
-            && provider
-                .replayed_reasoning_invalidations(&[], &[], "")
-                .is_some())
+    messages
+        .iter()
+        .any(|message| message.content.iter().any(is_bound_reasoning))
+        && provider
+            .replayed_reasoning_invalidations(&[], &[], "")
+            .is_some()
 }
 
 /// A recomputed state and what changed for replayed reasoning.
@@ -120,7 +136,7 @@ pub struct ReasoningInvalidationOutcome {
     pub state: StoredContextViewState,
     /// `None` when the route does not bind reasoning and nothing was held.
     pub summary: Option<ContextReasoningInvalidationSummary>,
-    /// Whether the managed transaction was replaced or ended.
+    /// Whether the managed transaction was replaced.
     pub changed: bool,
 }
 
@@ -128,7 +144,7 @@ pub struct ReasoningInvalidationOutcome {
 /// reapply). `proposed` carries the transition's status event at
 /// `proposed.revision`; any managed change is recorded at that revision.
 /// Blocks the transition itself invalidates carry its cause; blocks that were
-/// already invalid before it keep or receive a request-prefix cause.
+/// already invalid before it receive a request-prefix cause.
 pub(crate) fn stage_for_transition(
     provider: &dyn Provider,
     messages: &[StoredMessage],
@@ -138,9 +154,7 @@ pub(crate) fn stage_for_transition(
     transaction_id: &str,
     transition: StoredContextTransitionKind,
 ) -> Result<ReasoningInvalidationOutcome, ContextServiceError> {
-    if !reasoning_reconciliation_needed(provider, messages, previous)
-        && !reasoning_reconciliation_needed(provider, messages, &proposed)
-    {
+    if !reasoning_reconciliation_needed(provider, messages, previous) {
         return Ok(ReasoningInvalidationOutcome {
             state: proposed,
             summary: None,
@@ -166,15 +180,18 @@ pub(crate) fn stage_for_transition(
     )
 }
 
-/// Recompute the managed set before a provider request. Returns `None` when
-/// nothing changes; otherwise the state at the next revision.
+/// Recompute the managed set before a provider request, adding what the
+/// provider reported since the previous one. Returns `None` when nothing
+/// changes; otherwise the state at the next revision.
 pub fn reconcile_before_request(
     provider: &dyn Provider,
     messages: &[StoredMessage],
     state: &StoredContextViewState,
     prefix: &ContextRequestPrefix,
+    reported: &[ProviderReportedReasoning],
 ) -> Result<Option<ReasoningInvalidationOutcome>, ContextServiceError> {
-    if !reasoning_reconciliation_needed(provider, messages, state) {
+    let reported = reported_keys(provider, messages, reported);
+    if reported.is_empty() && !reasoning_reconciliation_needed(provider, messages, state) {
         return Ok(None);
     }
     let revision = state
@@ -186,10 +203,38 @@ pub fn reconcile_before_request(
         messages,
         state.clone(),
         prefix,
-        Trigger::Request,
+        Trigger::Request { reported },
         revision,
     )?;
     Ok(outcome.changed.then_some(outcome))
+}
+
+/// The stored blocks the provider's reports name, each with its reason. An
+/// identity no stored block carries any more (a rewind removed it) is dropped.
+fn reported_keys(
+    provider: &dyn Provider,
+    messages: &[StoredMessage],
+    reported: &[ProviderReportedReasoning],
+) -> BTreeMap<BlockKey, String> {
+    if reported.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut keys = BTreeMap::new();
+    for (message_index, message) in messages.iter().enumerate() {
+        for (block_index, block) in message.content.iter().enumerate() {
+            let Some(id) = provider.replayed_reasoning_block_id(block) else {
+                continue;
+            };
+            if let Some(report) = reported
+                .iter()
+                .find(|report| report.block_ids.contains(&id))
+            {
+                keys.entry((message_index, block_index))
+                    .or_insert_with(|| report.reason.clone());
+            }
+        }
+    }
+    keys
 }
 
 /// One-line account of a change for notices, logs and the cache-invalidation
@@ -204,7 +249,7 @@ pub fn describe_reasoning_invalidation(
     let suppressed = summary.invalidated_by_change + summary.invalidated_other;
     if suppressed > 0 {
         parts.push(format!(
-            "{suppressed} Claude thinking block(s) no longer match the conversation and are suppressed"
+            "{suppressed} Claude thinking block(s) can no longer be used and are suppressed"
         ));
     }
     if summary.restored > 0 {
@@ -221,7 +266,10 @@ enum Trigger {
         cause: StoredReasoningInvalidationCause,
         invalid_before: BTreeSet<BlockKey>,
     },
-    Request,
+    Request {
+        /// Blocks the provider reported, with its reason.
+        reported: BTreeMap<BlockKey, String>,
+    },
 }
 
 /// Stored message index and block ordinal of one replayed block.
@@ -230,8 +278,6 @@ type BlockKey = (usize, usize);
 struct InvalidBlocks {
     /// `None` when the route does not bind replayed reasoning.
     invalid: Option<BTreeSet<BlockKey>>,
-    /// Replayable blocks the projection still sends.
-    replayed: BTreeSet<BlockKey>,
 }
 
 fn recompute(
@@ -243,10 +289,6 @@ fn recompute(
     revision: u64,
 ) -> Result<ReasoningInvalidationOutcome, ContextServiceError> {
     let target_index = ContextTargetIndex::new(messages);
-    let current = invalid_blocks(provider, messages, &without_managed(&state), prefix)?;
-    let binds = current.invalid.is_some();
-    let invalid = current.invalid.unwrap_or_default();
-
     let active_index = state
         .transactions
         .iter()
@@ -255,72 +297,110 @@ fn recompute(
         Some(index) => resolve_keys(&target_index, &state.transactions[index])?,
         None => BTreeSet::new(),
     };
-    // Causes survive a transcript edit that ended the previous set: the
-    // blocks it still lists keep the cause they were first suppressed for.
-    let carried_causes = latest_causes(&target_index, &state);
+    // Causes survive supersession and a transcript edit that ended the
+    // previous set: a block keeps the cause it was first suppressed for.
+    let mut causes = latest_causes(&target_index, &state);
+    // A block a person's own active suppression holds belongs to that
+    // transaction: two operations cannot transform one block.
+    let user_held = user_suppressed_keys(&target_index, &state);
 
-    if !binds && active_keys.is_empty() {
-        return Ok(ReasoningInvalidationOutcome {
-            state,
-            summary: None,
-            changed: false,
-        });
+    // Provider-reported blocks stay suppressed: earlier reports, and the new
+    // ones.
+    let mut sticky: BTreeSet<BlockKey> = causes
+        .iter()
+        .filter(|(_, cause)| {
+            matches!(
+                cause,
+                StoredReasoningInvalidationCause::ProviderReported { .. }
+            )
+        })
+        .map(|(key, _)| *key)
+        .collect();
+    if let Trigger::Request { reported } = &trigger {
+        for (key, reason) in reported {
+            if is_bound_reasoning(&messages[key.0].content[key.1]) && sticky.insert(*key) {
+                causes.insert(
+                    *key,
+                    StoredReasoningInvalidationCause::ProviderReported {
+                        reason: reason.clone(),
+                    },
+                );
+            }
+        }
     }
+    sticky.retain(|key| !user_held.contains(key));
+
+    // The derived part, recomputed whole on a binding route with the sticky
+    // part in force. A route that does not bind keeps the derived part as it
+    // was: no lift, no additions.
+    let view = with_managed_set(
+        messages,
+        &without_managed(&state),
+        &sticky,
+        &causes,
+        revision,
+    )?;
+    let derived = invalid_blocks(provider, messages, &view, prefix)?.invalid;
+    let binds = derived.is_some();
+    let derived = derived.unwrap_or_else(|| {
+        active_keys
+            .iter()
+            .copied()
+            .filter(|key| !sticky.contains(key) && !user_held.contains(key))
+            .collect()
+    });
 
     let recorded = StoredReasoningInvalidationCause::RequestPrefixChanged {
         recorded_transitions: prefix.recorded_transitions.clone(),
     };
-    let mut by_cause: BTreeMap<StoredReasoningInvalidationCause, Vec<BlockKey>> = BTreeMap::new();
+    let set: BTreeSet<BlockKey> = sticky.union(&derived).copied().collect();
     let mut summary = ContextReasoningInvalidationSummary {
-        active: invalid.len(),
+        active: set.len(),
         ..ContextReasoningInvalidationSummary::default()
     };
-    for key in &invalid {
-        let tokens = block_tokens(messages, *key);
-        let cause = match (carried_causes.get(key), &trigger) {
-            (Some(cause), _) => cause.clone(),
-            (
-                None,
-                Trigger::Transition {
-                    cause,
-                    invalid_before,
-                },
-            ) if !invalid_before.contains(key) => cause.clone(),
-            (None, _) => recorded.clone(),
+    for key in &set {
+        let fresh_cause = match &trigger {
+            Trigger::Transition {
+                cause,
+                invalid_before,
+            } if !invalid_before.contains(key) => cause.clone(),
+            _ => recorded.clone(),
         };
-        if !active_keys.contains(key) {
-            match &trigger {
-                Trigger::Transition { cause: own, .. } if *own == cause => {
-                    summary.invalidated_by_change += 1;
-                    summary.invalidated_by_change_tokens += tokens;
-                }
-                _ => {
-                    summary.invalidated_other += 1;
-                    summary.invalidated_other_tokens += tokens;
-                }
+        let cause = causes.entry(*key).or_insert(fresh_cause).clone();
+        if active_keys.contains(key) {
+            continue;
+        }
+        let tokens = block_tokens(messages, *key);
+        match &trigger {
+            Trigger::Transition { cause: own, .. } if *own == cause => {
+                summary.invalidated_by_change += 1;
+                summary.invalidated_by_change_tokens += tokens;
+            }
+            _ => {
+                summary.invalidated_other += 1;
+                summary.invalidated_other_tokens += tokens;
             }
         }
-        by_cause.entry(cause).or_default().push(*key);
     }
-    for key in active_keys.difference(&invalid) {
-        if current.replayed.contains(key) {
+    for key in active_keys.difference(&set) {
+        if !user_held.contains(key) {
             summary.restored += 1;
             summary.restored_tokens += block_tokens(messages, *key);
         }
     }
 
-    if invalid == active_keys {
+    if set == active_keys {
         summary.transaction_id = active_index.map(|index| state.transactions[index].id.clone());
         return Ok(ReasoningInvalidationOutcome {
             state,
-            summary: Some(summary),
+            summary: (binds || !set.is_empty()).then_some(summary),
             changed: false,
         });
     }
 
     let now = Utc::now();
     let replacement =
-        (!invalid.is_empty()).then(|| format!("reasoning-invalidation-{}", uuid::Uuid::new_v4()));
+        (!set.is_empty()).then(|| format!("reasoning-invalidation-{}", uuid::Uuid::new_v4()));
     if let Some(index) = active_index {
         state.transactions[index]
             .status_events
@@ -335,30 +415,9 @@ fn recompute(
             });
     }
     if let Some(id) = &replacement {
-        let operations = by_cause
-            .into_iter()
-            .map(|(cause, keys)| {
-                suppression(messages, cause, &keys)
-                    .map(StoredContextOperation::ReasoningSuppression)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        state.transactions.push(StoredContextTransaction {
-            id: id.clone(),
-            base_revision: revision.saturating_sub(1),
-            created_at: now,
-            authorization: StoredContextAuthorization::ReasoningInvalidation,
-            operations,
-            status_events: vec![StoredContextStatusEvent {
-                revision,
-                timestamp: now,
-                kind: StoredContextTransactionStatusKind::Applied,
-                reason: None,
-            }],
-            application: None,
-            economics: None,
-            curator_usage: Vec::new(),
-            emergency_audit: None,
-        });
+        state.transactions.push(managed_transaction(
+            messages, &set, &causes, revision, id, now,
+        )?);
     }
     state.revision = revision;
     summary.transaction_id = replacement;
@@ -369,8 +428,8 @@ fn recompute(
     })
 }
 
-/// The view a person's transactions produce: managed invalidations are
-/// derived from it, so they are left out.
+/// The view a person's transactions produce: the derived part of the
+/// managed set is recomputed from it, so managed invalidations are left out.
 fn without_managed(state: &StoredContextViewState) -> StoredContextViewState {
     let mut view = state.clone();
     view.transactions
@@ -378,6 +437,74 @@ fn without_managed(state: &StoredContextViewState) -> StoredContextViewState {
     view
 }
 
+/// `view` (without managed sets) with `set` held as a managed invalidation.
+fn with_managed_set(
+    messages: &[StoredMessage],
+    view: &StoredContextViewState,
+    set: &BTreeSet<BlockKey>,
+    causes: &BTreeMap<BlockKey, StoredReasoningInvalidationCause>,
+    revision: u64,
+) -> Result<StoredContextViewState, ContextServiceError> {
+    let mut view = view.clone();
+    view.revision = view.revision.max(revision);
+    if !set.is_empty() {
+        view.transactions.push(managed_transaction(
+            messages,
+            set,
+            causes,
+            revision,
+            "reasoning-invalidation-candidate",
+            Utc::now(),
+        )?);
+    }
+    Ok(view)
+}
+
+fn managed_transaction(
+    messages: &[StoredMessage],
+    set: &BTreeSet<BlockKey>,
+    causes: &BTreeMap<BlockKey, StoredReasoningInvalidationCause>,
+    revision: u64,
+    id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<StoredContextTransaction, ContextServiceError> {
+    let mut by_cause: BTreeMap<StoredReasoningInvalidationCause, Vec<BlockKey>> = BTreeMap::new();
+    for key in set {
+        let cause = causes.get(key).cloned().unwrap_or(
+            StoredReasoningInvalidationCause::RequestPrefixChanged {
+                recorded_transitions: Vec::new(),
+            },
+        );
+        by_cause.entry(cause).or_default().push(*key);
+    }
+    let operations = by_cause
+        .into_iter()
+        .map(|(cause, keys)| {
+            suppression(messages, cause, &keys).map(StoredContextOperation::ReasoningSuppression)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(StoredContextTransaction {
+        id: id.to_string(),
+        base_revision: revision.saturating_sub(1),
+        created_at: now,
+        authorization: StoredContextAuthorization::ReasoningInvalidation,
+        operations,
+        status_events: vec![StoredContextStatusEvent {
+            revision,
+            timestamp: now,
+            kind: StoredContextTransactionStatusKind::Applied,
+            reason: None,
+        }],
+        application: None,
+        economics: None,
+        curator_usage: Vec::new(),
+        emergency_audit: None,
+    })
+}
+
+/// The replayed blocks the next request, projected from `view`, would carry
+/// that the provider runtime finds invalid. `None` when the route does not
+/// bind reasoning.
 fn invalid_blocks(
     provider: &dyn Provider,
     messages: &[StoredMessage],
@@ -386,38 +513,25 @@ fn invalid_blocks(
 ) -> Result<InvalidBlocks, ContextServiceError> {
     let projection = project_context(messages, view)
         .map_err(|error| ContextServiceError::Projection(error.to_string()))?;
-    let mut replayed = BTreeSet::new();
-    for source in &projection.sources {
-        if let ProjectedMessageSource::RawMessage {
-            stored_index,
-            block_ordinals,
-            ..
-        } = source
-        {
-            for ordinal in block_ordinals {
-                if is_bound_reasoning(&messages[*stored_index].content[*ordinal]) {
-                    replayed.insert((*stored_index, *ordinal));
-                }
-            }
-        }
-    }
-    if replayed.is_empty() {
+    let replayed = projection.sources.iter().any(|source| {
+        matches!(source, ProjectedMessageSource::RawMessage { stored_index, block_ordinals, .. }
+            if block_ordinals
+                .iter()
+                .any(|ordinal| is_bound_reasoning(&messages[*stored_index].content[*ordinal])))
+    });
+    if !replayed {
         // Nothing replayable reaches the provider, so nothing can be invalid.
         return Ok(InvalidBlocks {
             invalid: provider
                 .replayed_reasoning_invalidations(&[], &prefix.tools, &prefix.system)
                 .map(|_| BTreeSet::new()),
-            replayed,
         });
     }
     let request_messages = request_messages(projection.messages);
     let Some(verdict) =
         provider.replayed_reasoning_invalidations(&request_messages, &prefix.tools, &prefix.system)
     else {
-        return Ok(InvalidBlocks {
-            invalid: None,
-            replayed,
-        });
+        return Ok(InvalidBlocks { invalid: None });
     };
     let mut invalid = BTreeSet::new();
     for block in verdict {
@@ -442,7 +556,6 @@ fn invalid_blocks(
     }
     Ok(InvalidBlocks {
         invalid: Some(invalid),
-        replayed,
     })
 }
 
@@ -477,17 +590,37 @@ fn resolve_keys(
     Ok(keys)
 }
 
+/// Blocks the active suppressions of people's own transactions target.
+fn user_suppressed_keys(
+    index: &ContextTargetIndex<'_>,
+    state: &StoredContextViewState,
+) -> BTreeSet<BlockKey> {
+    let mut keys = BTreeSet::new();
+    for transaction in &state.transactions {
+        if transaction.is_reasoning_invalidation() || !transaction.is_active() {
+            continue;
+        }
+        for operation in &transaction.operations {
+            let StoredContextOperation::ReasoningSuppression(suppression) = operation else {
+                continue;
+            };
+            for target in &suppression.targets {
+                if let Ok(resolved) = index.resolve_content_target(target) {
+                    keys.insert((resolved.message_index, resolved.block_index));
+                }
+            }
+        }
+    }
+    keys
+}
+
 /// Causes recorded by the latest managed set that has not been superseded,
 /// for the targets that still resolve.
 fn latest_causes(
     index: &ContextTargetIndex<'_>,
     state: &StoredContextViewState,
 ) -> BTreeMap<BlockKey, StoredReasoningInvalidationCause> {
-    let Some(latest) = state.transactions.iter().rev().find(|transaction| {
-        transaction.is_reasoning_invalidation()
-            && transaction.latest_status().map(|status| status.kind)
-                != Some(StoredContextTransactionStatusKind::Superseded)
-    }) else {
+    let Some(latest) = latest_unsuperseded(state) else {
         return BTreeMap::new();
     };
     let mut causes = BTreeMap::new();
@@ -510,6 +643,16 @@ fn latest_causes(
         }
     }
     causes
+}
+
+/// The latest managed set that was not replaced by a newer one: the active
+/// set, or one a transcript edit ended.
+fn latest_unsuperseded(state: &StoredContextViewState) -> Option<&StoredContextTransaction> {
+    state.transactions.iter().rev().find(|transaction| {
+        transaction.is_reasoning_invalidation()
+            && transaction.latest_status().map(|status| status.kind)
+                != Some(StoredContextTransactionStatusKind::Superseded)
+    })
 }
 
 fn block_tokens(messages: &[StoredMessage], (message, block): BlockKey) -> usize {

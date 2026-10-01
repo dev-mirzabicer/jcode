@@ -20,6 +20,11 @@ fn sse(event_type: &str, data: serde_json::Value) -> SseEvent {
     }
 }
 
+/// [`process_sse_event`] for an event the test knows is well formed.
+fn process_sse_event_ok(event: &SseEvent, state: &mut SseStreamState) -> Vec<StreamEvent> {
+    process_sse_event(event, state).expect("well-formed SSE event")
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -82,10 +87,11 @@ async fn collect_live_smoke_stream(
 
 #[test]
 fn test_parse_sse_event() {
-    let mut buffer = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n".to_string();
-    let event = parse_sse_event(&mut buffer).unwrap();
-    assert_eq!(event.event_type, "message_start");
-    assert!(buffer.is_empty());
+    let events = SseDecoder::default()
+        .push(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "message_start");
 }
 
 #[tokio::test]
@@ -371,13 +377,18 @@ fn unconfigured_efforts_follow_the_default_table() {
     assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
     assert_eq!(temperature, None);
 
-    // Sonnet 5.5 keeps its model default: no effort, and thinking carries only
-    // the binding control (the model always thinks).
+    // Sonnet 5.5 keeps its model default: no effort. The model always
+    // thinks, so thinking carries the binding control, with the display every
+    // thinking request asks for (INT-01/WP-06 R27).
     let (thinking, output_config, temperature) = parts("claude-sonnet-5-5");
     assert!(output_config.is_none());
     assert_eq!(
         serde_json::to_value(thinking.expect("binding control")).unwrap(),
-        json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}})
+        json!({
+            "type": "adaptive",
+            "display": "summarized",
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+        })
     );
     assert_eq!(temperature, None);
 
@@ -722,7 +733,7 @@ fn message_start_warns_when_server_substitutes_a_different_model() {
         })
         .to_string(),
     };
-    let events = process_sse_event(&event, &mut state);
+    let events = process_sse_event_ok(&event, &mut state);
     let warned = events.iter().any(|e| {
         matches!(e, StreamEvent::StatusDetail { detail }
             if detail.contains("claude-haiku-4-5") && detail.contains("claude-fable-5"))
@@ -743,7 +754,7 @@ fn message_start_warns_when_server_substitutes_a_different_model() {
         })
         .to_string(),
     };
-    let events = process_sse_event(&event, &mut state);
+    let events = process_sse_event_ok(&event, &mut state);
     assert!(
         !events
             .iter()
@@ -759,7 +770,7 @@ fn test_anthropic_thinking_sse_events() {
         "claude-opus-5-5",
         test_request_binding(Some("request-last")),
     );
-    let events = process_sse_event(
+    let events = process_sse_event_ok(
         &sse(
             "content_block_start",
             serde_json::json!({
@@ -774,7 +785,7 @@ fn test_anthropic_thinking_sse_events() {
     assert!(state.current_thinking.is_some());
 
     for text in ["reasoning ", "text"] {
-        let events = process_sse_event(
+        let events = process_sse_event_ok(
             &sse(
                 "content_block_delta",
                 serde_json::json!({
@@ -788,7 +799,7 @@ fn test_anthropic_thinking_sse_events() {
         assert!(matches!(events.as_slice(), [StreamEvent::ThinkingDelta(t)] if t == text));
     }
 
-    let events = process_sse_event(
+    let events = process_sse_event_ok(
         &sse(
             "content_block_delta",
             serde_json::json!({
@@ -804,7 +815,7 @@ fn test_anthropic_thinking_sse_events() {
         "the signature is carried by the finished block"
     );
 
-    let events = process_sse_event(
+    let events = process_sse_event_ok(
         &sse(
             "content_block_stop",
             serde_json::json!({"type": "content_block_stop", "index": 0}),
@@ -836,7 +847,7 @@ fn every_thinking_block_is_captured_separately_and_chained_in_stream_order() {
     let mut state = test_sse_state();
     let mut blocks = Vec::new();
     let mut run = |event_type: &str, data: serde_json::Value, state: &mut SseStreamState| {
-        for event in process_sse_event(&sse(event_type, data), state) {
+        for event in process_sse_event_ok(&sse(event_type, data), state) {
             if let StreamEvent::ReplayableReasoning(block) = event {
                 blocks.push(block);
             }
@@ -928,14 +939,14 @@ fn every_thinking_block_is_captured_separately_and_chained_in_stream_order() {
 #[test]
 fn unsigned_thinking_is_display_only() {
     let mut state = test_sse_state();
-    process_sse_event(
+    process_sse_event_ok(
         &sse(
             "content_block_start",
             serde_json::json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "x"}}),
         ),
         &mut state,
     );
-    let events = process_sse_event(
+    let events = process_sse_event_ok(
         &sse(
             "content_block_stop",
             serde_json::json!({"type": "content_block_stop", "index": 0}),
@@ -951,7 +962,7 @@ fn unsigned_thinking_is_display_only() {
 #[test]
 fn input_transformations_are_recorded_and_prefix_mismatches_are_surfaced() {
     let mut state = test_sse_state();
-    let events = process_sse_event(
+    let events = process_sse_event_ok(
         &sse(
             "message_start",
             serde_json::json!({"type": "message_start", "message": {
@@ -992,7 +1003,7 @@ fn input_transformations_are_recorded_and_prefix_mismatches_are_surfaced() {
         );
     }
 
-    let empty = process_sse_event(
+    let empty = process_sse_event_ok(
         &sse(
             "message_start",
             serde_json::json!({"type": "message_start", "message": {"input_transformations": []}}),
@@ -1857,7 +1868,7 @@ fn ping_keepalive_emits_streaming_phase_event() {
         event_type: "ping".to_string(),
         data: r#"{"type": "ping"}"#.to_string(),
     };
-    let events = process_sse_event(&event, &mut state);
+    let events = process_sse_event_ok(&event, &mut state);
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -1939,7 +1950,7 @@ fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
             })
             .to_string(),
         };
-        let events = process_sse_event(&event, &mut state);
+        let events = process_sse_event_ok(&event, &mut state);
         assert!(
             events.is_empty(),
             "{block_type}: unknown block must not synthesize stream events"
@@ -2000,8 +2011,12 @@ fn a_prefix_bound_request_without_thinking_gains_adaptive_thinking_for_the_contr
     let thinking = with_binding_control(None, "claude-opus-5-5", PrefixMismatchBehavior::Error);
     assert_eq!(
         serde_json::to_value(&thinking).unwrap(),
-        serde_json::json!({"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}),
-        "no display is requested, so the model's default display is kept"
+        serde_json::json!({
+            "type": "adaptive",
+            "display": "summarized",
+            "block_binding": {"prefix_mismatch_behavior": "error"}
+        }),
+        "a configuration added only for the control still asks for summarized thinking (R27)"
     );
 }
 
@@ -2048,10 +2063,11 @@ fn unit_tests_default_to_error_and_the_environment_can_choose() {
 #[test]
 fn the_beta_header_follows_the_request_thinking_parameter() {
     let base = "prompt-caching-2024-07-31";
-    assert_eq!(anthropic_beta_header(base, ThinkingBetas::default()), base);
-    let bound = ThinkingBetas {
+    assert_eq!(anthropic_beta_header(base, RequestBetas::default()), base);
+    let bound = RequestBetas {
         thinking: true,
         binding_controls: true,
+        tool_changes: None,
     };
     let header = anthropic_beta_header(base, bound);
     assert_eq!(
@@ -2064,17 +2080,18 @@ fn the_beta_header_follows_the_request_thinking_parameter() {
         "betas already present are not repeated"
     );
     let body = serde_json::json!({"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}});
-    assert_eq!(ThinkingBetas::of_body(&body), bound);
+    assert_eq!(RequestBetas::of_body(&body), bound);
     let mut request = serde_json::from_value::<serde_json::Value>(body).unwrap();
     request["thinking"]
         .as_object_mut()
         .unwrap()
         .remove("block_binding");
     assert_eq!(
-        ThinkingBetas::of_body(&request),
-        ThinkingBetas {
+        RequestBetas::of_body(&request),
+        RequestBetas {
             thinking: true,
-            binding_controls: false
+            binding_controls: false,
+            tool_changes: None,
         }
     );
 }
@@ -2163,12 +2180,14 @@ fn replay_through_production_path(
     use jcode_message_types::ToolCall;
 
     let mut state = SseStreamState::new("claude-opus-5-5", request_binding);
-    let mut buffer = format!("{sse}\n\n");
+    let mut decoder = SseDecoder::default();
+    let decoded = decoder.push(format!("{sse}\n\n").as_bytes()).unwrap();
+    decoder.finish().unwrap();
     let mut turn = AssistantTurnAssembler::new();
     let mut tools: Vec<ToolCall> = Vec::new();
     let mut current: Option<(ToolCall, String)> = None;
-    while let Some(event) = parse_sse_event(&mut buffer) {
-        for event in process_sse_event(&event, &mut state) {
+    for event in decoded {
+        for event in process_sse_event_ok(&event, &mut state) {
             match event {
                 StreamEvent::ThinkingStart => turn.reasoning_started(),
                 StreamEvent::ThinkingDelta(text) => turn.reasoning_delta(&text),
@@ -2198,6 +2217,9 @@ fn replay_through_production_path(
             }
         }
     }
+    state
+        .ensure_complete()
+        .expect("the stream reaches message_stop with every block closed");
     let stored = turn.content_blocks(
         Some(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking),
         &tools,
@@ -2374,6 +2396,7 @@ fn synthetic_multi_block_stream() -> String {
     events.push(json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": "{\"command\": \"echo ok\"}"}}));
     events.push(json!({"type": "content_block_stop", "index": index}));
     events.push(json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}));
+    events.push(json!({"type": "message_stop"}));
     events
         .into_iter()
         .map(|event| {

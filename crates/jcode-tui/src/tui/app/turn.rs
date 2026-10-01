@@ -46,7 +46,7 @@ impl PreparedLocalProviderInvocation {
                 &self.tools,
                 &self.static_part,
                 self.session_id.as_deref(),
-                self.capture.context(),
+                self.capture.replanning_context(),
             )
             .await
     }
@@ -434,6 +434,9 @@ impl App {
                                 Err(err) => {
                                     memory_pending.restore_now();
                                     if invocation.capture.has_received_data(){self.mark_pending_provider_output_started();return Err(err.context("SDK data was received before stream publication; automatic request replay was stopped"));}
+                                    if self.accept_local_provider_replan(&err) {
+                                        continue 'turn_loop;
+                                    }
                                     if let Some(reason) = crate::network_retry::classify_network_interruption(err.as_ref()) {
                                         let plan = crate::network_retry::wait_plan();
                                         self.push_display_message(DisplayMessage::system(format!(
@@ -903,7 +906,13 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::ProviderDroppedReasoning { block_ids, reason } => {
+                                        self.provider_reported_reasoning.push(
+                                            crate::context::ProviderReportedReasoning { block_ids, reason },
+                                        );
+                                    }
                                     StreamEvent::MessageEnd { .. } => {
+                                        self.provider_replans = 0;
                                         self.pause_streaming_tps(true);
                                         self.stream_message_ended = true;
                                         saw_message_end = true;
@@ -1195,6 +1204,12 @@ impl App {
                                     && current_tool.is_none()
                                     && self.streaming.streaming_text.is_empty()
                                     && !saw_message_end && !provider_ingress.has_received_data();
+                                // The runtime handed the request back before any
+                                // output: reconcile and send a newly planned one.
+                                if no_partial_output && self.accept_local_provider_replan(&e) {
+                                    memory_pending.restore_now();
+                                    continue 'turn_loop;
+                                }
                                 if no_partial_output
                                     && let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref())
                                 {

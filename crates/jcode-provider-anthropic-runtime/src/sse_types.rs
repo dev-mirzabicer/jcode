@@ -88,6 +88,10 @@ pub(crate) enum ApiDelta {
     Thinking { thinking: String },
     #[serde(rename = "signature_delta")]
     Signature { signature: String },
+    /// A delta type this build does not recognize (for example a citations
+    /// delta). The event is well formed; there is nothing to surface.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Deserialize)]

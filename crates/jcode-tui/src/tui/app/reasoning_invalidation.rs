@@ -125,6 +125,7 @@ impl App {
             &self.session.messages,
             &self.session.context_view,
             &prefix,
+            &self.provider_reported_reasoning,
         )
         .map_err(|error| {
             format!(
@@ -133,6 +134,7 @@ impl App {
         })?;
         self.pending_prefix_transitions.clear();
         let Some(outcome) = outcome else {
+            self.provider_reported_reasoning.clear();
             return Ok(None);
         };
         let previous = std::mem::replace(&mut self.session.context_view, outcome.state);
@@ -150,6 +152,56 @@ impl App {
         crate::cache_invalidation::record("reasoning invalidation", notice.clone());
         self.provider
             .invalidate_context_continuation("replayed reasoning invalidation changed");
+        self.provider_reported_reasoning.clear();
         Ok(Some(notice))
+    }
+
+    /// Whether `error` is the runtime handing a local request back to be
+    /// planned again, as the agent loops handle it
+    /// (`Agent::accept_provider_replan`): a model fallback is adopted and
+    /// recorded, rejected reasoning is held for suppression, and the turn
+    /// loop reconciles and sends a new request.
+    pub(super) fn accept_local_provider_replan(&mut self, error: &anyhow::Error) -> bool {
+        use jcode_provider_core::ProviderRequestReplan;
+        const MAX_CONSECUTIVE_REPLANS: u32 = 4;
+
+        let Some(replan) = ProviderRequestReplan::of(error) else {
+            return false;
+        };
+        if self.provider_replans >= MAX_CONSECUTIVE_REPLANS {
+            return false;
+        }
+        self.provider_replans += 1;
+        match replan {
+            ProviderRequestReplan::ModelFallback { from, to, cause } => {
+                self.session.model = Some(self.provider.model());
+                self.provider_session_id = None;
+                self.record_local_prefix_transition(
+                    "provider model fallback",
+                    format!("model '{from}' is {cause}; requests continue on '{to}'"),
+                );
+                self.push_display_message(super::DisplayMessage::system(format!(
+                    "Model '{from}' is {cause}; continuing on '{to}'."
+                )));
+            }
+            ProviderRequestReplan::ReplayedReasoningInvalid { .. } => {
+                if !self
+                    .pending_prefix_transitions
+                    .iter()
+                    .any(|label| label == "request plan change")
+                {
+                    self.pending_prefix_transitions
+                        .push("request plan change".to_string());
+                }
+            }
+            ProviderRequestReplan::ReasoningRejected { block_ids, reason } => {
+                self.provider_reported_reasoning
+                    .push(crate::context::ProviderReportedReasoning {
+                        block_ids: block_ids.clone(),
+                        reason: reason.clone(),
+                    });
+            }
+        }
+        true
     }
 }
