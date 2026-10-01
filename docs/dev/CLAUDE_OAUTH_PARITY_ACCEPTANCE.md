@@ -869,3 +869,14 @@ in the program evidence directory. A final live smoke on that runtime
 (`session_palmtree_1790824428698_535241a865a1a6c5`, Opus 5.5, two thinking
 tool turns) read 97.4–99.9% of input from cache on every request and showed
 no `INV-1` warning or binding event.
+
+## WP-05 acceptance
+
+Accepted by Mirza on 2026-10-01 (approval received by 07:18Z) on candidate
+`ea56fc01b`, with no requested changes; the default Claude model stays
+`claude-opus-5` (Mirza picks models explicitly). Activated runtime
+`3a6012c4c-dirty-ca803dbbbde2` (running, current and shared-server channels
+equal, canary passed); later commits are documentation only. R12–R15 are
+closed; R16 is complete for WP-05 and is reconciled at the INT-01 closeout,
+together with the one-release legacy tool-name removal and the pricing
+cache-write rate under the one-hour TTL.
