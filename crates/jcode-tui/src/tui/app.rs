@@ -934,9 +934,6 @@ pub struct App {
     provider_reported_reasoning: Vec<crate::context::ProviderReportedReasoning>,
     /// Consecutive local requests the runtime handed back to be planned again.
     provider_replans: u32,
-    // The tool set local requests carry, with the agent's lifetime rule
-    // (`crate::tool::tool_set`).
-    tool_set: crate::tool::ToolSetLock,
     // Accumulated session cost + cached per-model pricing.
     cost: CostState,
     // Context limit and authoritative request-pressure state.

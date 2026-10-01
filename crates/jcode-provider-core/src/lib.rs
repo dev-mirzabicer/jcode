@@ -485,6 +485,15 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Whether this runtime applies tool-set changes announced in an
+    /// operator notice inside the message, so the request's `tools` array
+    /// stays as first advertised (INT-01/WP-06, D15). Callers then send the
+    /// frozen array. Orchestrators delegate to the runtime they would
+    /// dispatch to.
+    fn renders_tool_changes(&self) -> bool {
+        false
+    }
+
     /// This runtime's identity for a stored replayable reasoning block, in the
     /// scheme its `ProviderDroppedReasoning` events and
     /// [`ProviderRequestReplan::ReasoningRejected`] errors use. `None` for

@@ -27,42 +27,67 @@ impl App {
         }
     }
 
-    /// The tool set the next local request carries: locked at the first
-    /// request and changed only at a recorded tool-set transition, as the
-    /// agent's requests are (`crate::tool::tool_set`).
+    /// The tool set the next local request carries, with the agent's rule
+    /// (`crate::tool::tool_set`): the session's frozen set compared with the
+    /// registry, each change announced once and persisted before the request.
     pub(super) async fn local_tool_definitions(&mut self) -> anyhow::Result<Vec<ToolDefinition>> {
-        let mut tool_set = std::mem::take(&mut self.tool_set);
-        let resolved = tool_set
-            .resolve(
-                &self.registry,
-                &crate::tool::ToolSetFilters::none(),
-                || async {
-                    let mut tools = self.registry.definitions(None).await;
-                    crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
-                    Ok(tools)
-                },
-            )
-            .await;
-        self.tool_set = tool_set;
-        let resolved = resolved?;
-        for transition in resolved.transitions {
+        let mut live = self.registry.definitions(None).await;
+        crate::tool::instruction_guidance::preview(&self.session, &mut live)?;
+        let in_view = if !self.provider.renders_tool_changes() {
+            None
+        } else if crate::tool::tool_set_notice_count(&self.session.messages) == 0 {
+            Some(Vec::new())
+        } else {
+            let projected = self
+                .session
+                .projected_messages_for_provider()
+                .map_err(|error| {
+                    anyhow::anyhow!("The provider context could not be projected: {error:?}")
+                })?;
+            Some(crate::tool::tool_changes_in_view(
+                &self.session.messages,
+                &projected,
+            ))
+        };
+        let plan = crate::tool::plan_tool_set(
+            self.session.tool_set.as_ref(),
+            live,
+            in_view.as_deref(),
+            self.registry.mcp_connecting(),
+        );
+        crate::tool::set_session_unavailable_tools(&self.session.id, plan.unavailable);
+        if plan.announced.is_empty() && self.session.tool_set.as_ref() == Some(&plan.record) {
+            return Ok(plan.tools);
+        }
+        if !plan.announced.is_empty() {
+            let notice = crate::tool::tool_set_notice(
+                crate::tool::tool_set_notice_count(&self.session.messages) + 1,
+                &plan.announced,
+            );
+            let changes = plan
+                .announced
+                .iter()
+                .map(|change| change.change.clone())
+                .collect();
+            if let Some(id) = self.session.append_tool_set_delivery(&notice, changes)
+                && let Some(message) = self.session.messages.iter().rev().find(|m| m.id == id)
+            {
+                let message = message.to_message();
+                self.add_provider_message(message);
+            }
+        }
+        self.session.set_tool_set(plan.record);
+        self.session.save()?;
+        if plan.array_changed {
+            self.provider
+                .invalidate_context_continuation(crate::tool::TOOL_SET_TRANSITION);
+            self.provider_session_id = None;
             self.record_local_prefix_transition(
-                transition.label(),
-                "the local session's tool set changed",
+                crate::tool::TOOL_SET_TRANSITION,
+                "the provider's tool array changed with the announced tool-set changes",
             );
         }
-        Ok(resolved.tools)
-    }
-
-    /// The `mcp` tool may have changed registry membership: the next local
-    /// request rebuilds the tool set.
-    pub(super) fn release_local_tool_set_after_mcp_management(&mut self) {
-        if self.tool_set.release_after_mcp_management() {
-            self.record_local_prefix_transition(
-                crate::tool::ToolSetTransition::McpManagement.label(),
-                "the mcp tool changed MCP servers; the next request rebuilds the tool set",
-            );
-        }
+        Ok(plan.tools)
     }
 
     /// The prefix the local session's next request carries, built as
@@ -83,11 +108,9 @@ impl App {
             .build_system_prompt_split()
             .map_err(|error| ContextServiceError::Runtime(error.to_string()))?
             .static_part;
-        let tools = match self.tool_set.locked() {
-            Some(locked) => {
-                let mut tools = locked.to_vec();
-                tools.retain(|tool| crate::tool::tool_is_globally_available(&tool.name));
-                tools
+        let tools = match self.session.tool_set.as_ref() {
+            Some(record) => {
+                crate::tool::recorded_tools(record, self.provider.renders_tool_changes())
             }
             None => {
                 let mut tools = self

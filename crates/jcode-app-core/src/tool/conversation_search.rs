@@ -571,6 +571,7 @@ mod tests {
             context_budget: template_budget,
             bindings: Default::default(),
             mcp_registration: Default::default(),
+            mcp_connecting: Default::default(),
         };
         let registry = template.clone();
         {

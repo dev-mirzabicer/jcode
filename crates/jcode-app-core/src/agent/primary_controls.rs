@@ -300,8 +300,8 @@ impl Agent {
             });
             let projected = candidate.projected_messages_for_provider()?;
             let split = self.build_system_prompt_split()?;
-            let tools = match self.tool_set.locked() {
-                Some(tools) => tools.to_vec(),
+            let tools = match self.recorded_request_tools() {
+                Some(tools) => tools,
                 None => self.tool_definitions_for_session(&candidate).await?,
             };
             let breakdown =
@@ -336,8 +336,8 @@ impl Agent {
         };
         let projected = candidate.projected_messages_for_provider()?;
         let split = self.build_system_prompt_split()?;
-        let tools = match self.tool_set.locked() {
-            Some(tools) => tools.to_vec(),
+        let tools = match self.recorded_request_tools() {
+            Some(tools) => tools,
             None => self.tool_definitions_for_session(&candidate).await?,
         };
         let breakdown = crate::context::request_token_breakdown(&projected, 0, 0, &split, &tools);

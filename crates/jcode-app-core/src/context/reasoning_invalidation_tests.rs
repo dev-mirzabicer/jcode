@@ -33,9 +33,7 @@ use jcode_context_core::{
 };
 use jcode_message_types::AnthropicThinkingBinding;
 use jcode_provider_anthropic::binding::{analyze_request, stored_thinking_fingerprint};
-use jcode_provider_anthropic::{
-    ApiRequest, ApiToolChoice, build_system_param, format_messages, format_tools,
-};
+use jcode_provider_anthropic::{ApiRequest, ApiToolChoice, build_system_param, format_tools};
 use jcode_session_types::{
     StoredContextAuthorization, StoredContextOperation, StoredContextTransactionStatusKind,
     StoredContextTransitionKind, StoredContextViewState, StoredReasoningInvalidationCause,
@@ -58,12 +56,23 @@ pub(crate) fn fixture_request(
     tools: &[ToolDefinition],
     system: &str,
 ) -> ApiRequest {
+    fixture_request_for(messages, tools, system, Default::default())
+}
+
+/// The fixture request for a model with the given mid-conversation
+/// capabilities (operator notices as system messages, tool changes inside).
+pub(crate) fn fixture_request_for(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    system: &str,
+    caps: jcode_provider_core::AnthropicConversationCaps,
+) -> ApiRequest {
     let api_tools = format_tools(tools);
     let mut request = ApiRequest {
         model: "claude-sonnet-5-5".to_string(),
         max_tokens: 1024,
         system: build_system_param(system, false),
-        messages: format_messages(messages),
+        messages: jcode_provider_anthropic::format_messages_for(messages, caps),
         tool_choice: ApiToolChoice::for_tools(&api_tools),
         tools: (!api_tools.is_empty()).then_some(api_tools),
         metadata: None,
@@ -155,8 +164,17 @@ pub(crate) fn fixture_invalidations(
     tools: &[ToolDefinition],
     system: &str,
 ) -> Vec<InvalidReplayedReasoning> {
+    fixture_invalidations_for(messages, tools, system, Default::default())
+}
+
+pub(crate) fn fixture_invalidations_for(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    system: &str,
+    caps: jcode_provider_core::AnthropicConversationCaps,
+) -> Vec<InvalidReplayedReasoning> {
     jcode_provider_anthropic::binding::plan_suppressions(messages, |candidate| {
-        fixture_request(candidate, tools, system)
+        fixture_request_for(candidate, tools, system, caps)
     })
     .into_iter()
     .map(|block| InvalidReplayedReasoning {

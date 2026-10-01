@@ -359,7 +359,6 @@ impl App {
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
             self.session = session;
-            self.tool_set.reset();
             crate::memory::sync_injected_memories(
                 &self.session.id,
                 &self.session.injected_memory_ids(),

@@ -98,6 +98,7 @@ pub fn format_messages_for(
     // that have dangling tool_uses
     let mut result: Vec<ApiMessage> = Vec::new();
 
+    let mut inline_tools = InlineToolState::default();
     // Operator notice entries of `result`, by index, with their user form.
     let mut notices: std::collections::HashMap<usize, OperatorForms> =
         std::collections::HashMap::new();
@@ -120,7 +121,11 @@ pub fn format_messages_for(
             && caps.system_messages
         {
             let changes = if caps.inline_tool_changes {
-                tool_changes.iter().map(tool_change_block).collect()
+                tool_changes
+                    .iter()
+                    .filter(|change| inline_tools.apply(change))
+                    .map(tool_change_block)
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -368,6 +373,32 @@ fn place_operator_messages(
         });
     }
     placed
+}
+
+/// What the tool changes rendered so far in a conversation have done to each
+/// tool name. A change that repeats the standing one is not rendered again:
+/// a notice announced again after a context edit hid it, and then visible
+/// beside its original once the edit is reverted, would otherwise remove a
+/// tool twice.
+#[derive(Default)]
+struct InlineToolState(std::collections::HashMap<String, Option<ToolDefinition>>);
+
+impl InlineToolState {
+    /// Record `change`; false when it repeats the standing change to its tool.
+    fn apply(&mut self, change: &jcode_message_types::ToolSetChange) -> bool {
+        use jcode_message_types::ToolSetChange;
+        let next = match change {
+            ToolSetChange::Added { definition } | ToolSetChange::Redefined { definition } => {
+                Some(definition.clone())
+            }
+            ToolSetChange::Removed { .. } => None,
+        };
+        if self.0.get(change.name()) == Some(&next) {
+            return false;
+        }
+        self.0.insert(change.name().to_string(), next);
+        true
+    }
 }
 
 /// A tool-set change as a mid-conversation tool-change block: additions and

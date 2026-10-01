@@ -308,9 +308,10 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "mcp:reload" {
         let input = serde_json::json!({"action": "reload"});
-        let mut agent = agent.lock().await;
+        let agent = agent.lock().await;
+        // The next request compares the session's tool set with the reloaded
+        // registry and announces what changed (INT-01/WP-06, D15).
         let result = agent.execute_tool("mcp", input).await?;
-        agent.unlock_tools();
         return Ok(result.output);
     }
 

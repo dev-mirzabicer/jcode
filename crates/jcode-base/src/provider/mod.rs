@@ -2326,6 +2326,11 @@ impl Provider for MultiProvider {
             .is_some_and(|runtime| runtime.renders_operator_notices())
     }
 
+    fn renders_tool_changes(&self) -> bool {
+        self.runtime_for(self.active_provider())
+            .is_some_and(|runtime| runtime.renders_tool_changes())
+    }
+
     fn replayed_reasoning_block_id(&self, block: &crate::message::ContentBlock) -> Option<String> {
         self.runtime_for(self.active_provider())?
             .replayed_reasoning_block_id(block)

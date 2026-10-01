@@ -901,44 +901,6 @@ impl Agent {
         Ok(restored)
     }
 
-    /// The `mcp` tool may have changed registry membership (connect,
-    /// disconnect, reload): the next request rebuilds the tool set, a recorded
-    /// tool-set transition.
-    pub fn unlock_tools(&mut self) {
-        if self.tool_set.release_after_mcp_management() {
-            logging::info("Tool list unlocked — next request will pick up current tools");
-            self.record_tool_set_transition(
-                crate::tool::ToolSetTransition::McpManagement,
-                "the mcp tool changed MCP servers; the next request rebuilds the tool set",
-            );
-        }
-    }
-
-    /// Record an intentional tool-set change: journaled as a cache transition
-    /// and kept as the cause of any replayed reasoning it invalidates.
-    fn record_tool_set_transition(
-        &mut self,
-        transition: crate::tool::ToolSetTransition,
-        detail: &str,
-    ) {
-        self.cache_tracker.reset();
-        if transition == crate::tool::ToolSetTransition::ToolUnavailable {
-            self.provider
-                .invalidate_context_continuation(transition.label());
-            self.provider_session_id = None;
-            self.session.provider_session_id = None;
-        }
-        self.record_prefix_transition(transition.label(), detail);
-    }
-
-    /// Unlock tools if a tool execution may have changed the registry
-    /// (e.g., mcp connect/disconnect/reload)
-    pub(super) fn unlock_tools_if_needed(&mut self, tool_name: &str) {
-        if tool_name == "mcp" {
-            self.unlock_tools();
-        }
-    }
-
     pub fn is_canary(&self) -> bool {
         self.session.is_canary
     }
@@ -1015,51 +977,106 @@ impl Agent {
         self.stdin_request_tx = Some(tx);
     }
 
+    /// The tool definitions the next request carries (INT-01/WP-06, D15):
+    /// the session's frozen set, compared with the live registry. A change is
+    /// recorded and announced once, as an appended operator delivery,
+    /// persisted before the request; if the provider's `tools` array changes
+    /// with it, that is a recorded tool-set transition.
     pub(super) async fn tool_definitions(&mut self) -> Result<Vec<ToolDefinition>> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
-        // The set is locked at the first request and changes only at a
-        // recorded transition. MCP servers connect in the background so the
-        // first turn is never blocked; their tools join the set once, when
-        // they appear (#206).
-        let mut tool_set = std::mem::take(&mut self.tool_set);
-        let filters = crate::tool::ToolSetFilters {
-            allowed: self.allowed_tools.as_ref(),
-            disabled: &self.disabled_tools,
-        };
-        let resolved = tool_set
-            .resolve(&self.registry, &filters, || async {
-                let mut tools = self.build_filtered_tool_definitions().await;
-                crate::tool::instruction_guidance::preview(&self.session, &mut tools)?;
-                Ok(tools)
-            })
-            .await;
-        self.tool_set = tool_set;
-        let resolved = resolved?;
-        for transition in resolved.transitions {
-            let detail = match transition {
-                crate::tool::ToolSetTransition::ToolUnavailable => {
-                    "removed unavailable tool from locked definitions"
-                }
-                _ => "MCP tools registered after the tool set was locked joined it",
-            };
-            self.record_tool_set_transition(transition, detail);
+        let mut live = self.build_filtered_tool_definitions().await;
+        crate::tool::instruction_guidance::preview(&self.session, &mut live)?;
+        let in_view = self.tool_changes_in_view()?;
+        let plan = crate::tool::plan_tool_set(
+            self.session.tool_set.as_ref(),
+            live,
+            in_view.as_deref(),
+            self.registry.mcp_connecting(),
+        );
+        crate::tool::set_session_unavailable_tools(&self.session.id, plan.unavailable);
+        if plan.announced.is_empty() && self.session.tool_set.as_ref() == Some(&plan.record) {
+            return Ok(plan.tools);
         }
-        Ok(resolved.tools)
+        if !plan.announced.is_empty() {
+            let notice = crate::tool::tool_set_notice(
+                crate::tool::tool_set_notice_count(&self.session.messages) + 1,
+                &plan.announced,
+            );
+            self.add_tool_set_delivery(
+                &notice,
+                plan.announced
+                    .iter()
+                    .map(|change| change.change.clone())
+                    .collect(),
+            );
+            logging::info(&format!(
+                "Tool set of session {} changed: {} change(s) announced",
+                self.session.id,
+                plan.announced.len()
+            ));
+        }
+        self.session.set_tool_set(plan.record);
+        self.session.save().map_err(|error| {
+            error.context(
+                "The session's tool set could not be persisted; the provider request was not sent",
+            )
+        })?;
+        if plan.array_changed {
+            self.cache_tracker.reset();
+            self.provider
+                .invalidate_context_continuation(crate::tool::TOOL_SET_TRANSITION);
+            self.provider_session_id = None;
+            self.session.provider_session_id = None;
+            self.record_prefix_transition(
+                crate::tool::TOOL_SET_TRANSITION,
+                "the provider's tool array changed with the announced tool-set changes",
+            );
+        }
+        Ok(plan.tools)
+    }
+
+    /// For a provider that takes tool changes inside a message, the announced
+    /// changes its projected history still carries; `None` for every other
+    /// provider.
+    fn tool_changes_in_view(&mut self) -> Result<Option<Vec<jcode_message_types::ToolSetChange>>> {
+        if !self.provider.renders_tool_changes() {
+            return Ok(None);
+        }
+        if crate::tool::tool_set_notice_count(&self.session.messages) == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let projected = self
+            .session
+            .projected_messages_for_provider()
+            .map_err(|error| {
+                anyhow::anyhow!("The provider context could not be projected: {error:?}")
+            })?;
+        Ok(Some(crate::tool::tool_changes_in_view(
+            &self.session.messages,
+            &projected,
+        )))
+    }
+
+    /// The tools a request carries under the session's recorded tool set,
+    /// without comparing it with the registry. `None` before the first
+    /// request records one.
+    pub(crate) fn recorded_request_tools(&self) -> Option<Vec<ToolDefinition>> {
+        self.session
+            .tool_set
+            .as_ref()
+            .map(|record| crate::tool::recorded_tools(record, self.provider.renders_tool_changes()))
     }
 
     /// The tool definitions the next request carries, read without waiting:
-    /// the locked set, or the set the next request would lock from the
-    /// registry now. A self-dev session registers its self-dev tools at its
-    /// first request, and a late MCP registration can still trigger the
-    /// one-shot rebuild; the request-time reasoning check covers both.
+    /// the recorded set, or the set the first request would freeze from the
+    /// registry now. A change the next request announces is a recorded
+    /// transition the request-time reasoning check covers.
     pub(crate) fn next_request_tool_definitions(
         &self,
     ) -> Result<Vec<ToolDefinition>, crate::protocol::ContextServiceError> {
-        if let Some(locked) = self.tool_set.locked() {
-            let mut tools = locked.to_vec();
-            tools.retain(|tool| crate::tool::tool_is_globally_available(&tool.name));
+        if let Some(tools) = self.recorded_request_tools() {
             return Ok(tools);
         }
         let mut tools = self

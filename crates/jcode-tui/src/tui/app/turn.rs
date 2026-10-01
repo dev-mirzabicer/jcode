@@ -1628,9 +1628,6 @@ impl App {
 
                 self.subagent_status = None; // Clear status after tool completes
                 self.batch_progress = None; // Clear batch progress after tool completes
-                if tc.name == "mcp" {
-                    self.release_local_tool_set_after_mcp_management();
-                }
                 let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
                 let (output, is_error, tool_title) = match result {
                     Ok(o) => {

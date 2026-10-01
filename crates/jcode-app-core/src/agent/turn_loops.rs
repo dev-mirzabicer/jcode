@@ -1160,7 +1160,6 @@ impl Agent {
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 crate::telemetry::record_tool_call();
-                self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();
                 logging::info(&format!(
                     "Tool finished: {} in {:.2}s",

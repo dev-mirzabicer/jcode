@@ -329,6 +329,11 @@ pub struct Session {
     pub swarm_routing_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_guidance: Option<String>,
+    /// The tool set this session's provider history advertised, and every
+    /// change announced since (INT-01/WP-06, D15). Set at the first request;
+    /// a new provider history starts without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_set: Option<jcode_session_types::StoredToolSet>,
     /// Metadata-only startup projection. Full session loads leave this empty.
     #[serde(skip)]
     system_prompt_metadata: Option<StoredSystemPromptMetadata>,
@@ -886,6 +891,17 @@ impl Session {
         }
     }
 
+    /// Persist the session's tool set (INT-01/WP-06, D15).
+    pub fn set_tool_set(&mut self, tool_set: jcode_session_types::StoredToolSet) {
+        if self.tool_set.as_ref() == Some(&tool_set) {
+            return;
+        }
+        self.tool_set = Some(tool_set);
+        self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
+        self.mark_memory_profile_dirty();
+    }
+
     pub fn set_delegation_guidance(&mut self, text: String) {
         self.delegation_guidance = Some(text);
         self.updated_at = Utc::now();
@@ -1278,6 +1294,7 @@ impl Session {
         self.active_skill = parent.active_skill.clone();
         self.swarm_routing_prompt = parent.swarm_routing_prompt.clone();
         self.delegation_guidance = parent.delegation_guidance.clone();
+        self.tool_set = parent.tool_set.clone();
         self.system_prompt_metadata = parent.system_prompt_metadata.clone();
         self.active_skill_metadata = parent.active_skill_metadata.clone();
         self.compaction = parent.compaction.clone();
@@ -1367,6 +1384,9 @@ impl Session {
         session.active_skill = snapshot.active_skill;
         session.swarm_routing_prompt = snapshot.swarm_routing_prompt;
         session.delegation_guidance = snapshot.delegation_guidance;
+        // A remote client sends no provider requests: the server's session
+        // owns the tool set, so the startup projection does not load it.
+        session.tool_set = None;
         session.system_prompt_metadata = None;
         session.active_skill_metadata = None;
         session.compaction = snapshot.compaction;
@@ -2113,6 +2133,7 @@ impl Session {
             active_skill: None,
             swarm_routing_prompt: None,
             delegation_guidance: None,
+            tool_set: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,
@@ -2191,6 +2212,7 @@ impl Session {
             active_skill: None,
             swarm_routing_prompt: None,
             delegation_guidance: None,
+            tool_set: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,
@@ -2817,6 +2839,20 @@ impl Session {
         let id = new_id("message");
         let message =
             jcode_session_types::context_delivery_message(id.clone(), channel, body, Utc::now())?;
+        self.append_stored_message(message);
+        Some(id)
+    }
+
+    /// Append the delivery announcing tool-set changes (INT-01/WP-06, D15).
+    /// The only writer, like `append_context_delivery`.
+    pub fn append_tool_set_delivery(
+        &mut self,
+        body: &str,
+        changes: Vec<jcode_message_types::ToolSetChange>,
+    ) -> Option<String> {
+        let id = new_id("message");
+        let message =
+            jcode_session_types::tool_set_delivery_message(id.clone(), body, changes, Utc::now())?;
         self.append_stored_message(message);
         Some(id)
     }

@@ -25,6 +25,16 @@ impl Agent {
         Some(id)
     }
 
+    pub(crate) fn add_tool_set_delivery(
+        &mut self,
+        body: &str,
+        changes: Vec<jcode_message_types::ToolSetChange>,
+    ) -> Option<String> {
+        let id = self.session.append_tool_set_delivery(body, changes)?;
+        self.record_context_runtime_message_added();
+        Some(id)
+    }
+
     pub(crate) fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
         let id = self.session.add_message(role, content);
         self.record_context_runtime_message_added();

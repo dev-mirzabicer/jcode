@@ -6,7 +6,9 @@
 //! suppresses it explicitly, persists that, and only then sends.
 
 use super::*;
-use crate::context::reasoning_invalidation_tests::{fixture_invalidations, fixture_request};
+use crate::context::reasoning_invalidation_tests::{
+    fixture_invalidations_for, fixture_request, fixture_request_for,
+};
 use crate::provider::{ContextReasoningBlockKind, EventStream, InvalidReplayedReasoning};
 use jcode_message_types::{AnthropicThinkingBinding, ReplayableReasoningBlock};
 use jcode_provider_anthropic::binding::analyze_request;
@@ -36,7 +38,19 @@ struct State {
 
 #[derive(Clone, Default)]
 struct ThinkingProvider {
+    /// Whether the model takes operator notices as system messages and tool
+    /// changes inside them (Opus 5.5), or neither.
+    inline: bool,
     state: Arc<StdMutex<State>>,
+}
+
+impl ThinkingProvider {
+    fn caps(&self) -> jcode_provider_core::AnthropicConversationCaps {
+        jcode_provider_core::AnthropicConversationCaps {
+            system_messages: self.inline,
+            inline_tool_changes: self.inline,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -60,7 +74,8 @@ impl Provider for ThinkingProvider {
             .pop_front()
             .unwrap_or_else(|| panic!("request {index} has no scripted reply"));
         // Bound exactly as the Anthropic runtime binds a response's blocks.
-        let binding = analyze_request(&fixture_request(messages, tools, system)).binding;
+        let binding =
+            analyze_request(&fixture_request_for(messages, tools, system, self.caps())).binding;
         let mut events = vec![StreamEvent::ReplayableReasoning(
             ReplayableReasoningBlock::AnthropicThinking {
                 thinking: format!("thinking {index}"),
@@ -114,7 +129,20 @@ impl Provider for ThinkingProvider {
         tools: &[ToolDefinition],
         system: &str,
     ) -> Option<Vec<InvalidReplayedReasoning>> {
-        Some(fixture_invalidations(messages, tools, system))
+        Some(fixture_invalidations_for(
+            messages,
+            tools,
+            system,
+            self.caps(),
+        ))
+    }
+
+    fn renders_operator_notices(&self) -> bool {
+        self.inline
+    }
+
+    fn renders_tool_changes(&self) -> bool {
+        self.inline
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -339,10 +367,11 @@ async fn thinking_agent(provider: &ThinkingProvider, project: &std::path::Path) 
     agent
 }
 
-/// INT-01 WP-05 (carried from WP-04): a context transition changes history,
-/// not tools. The next request keeps the locked tool bytes and every earlier
-/// Claude thinking block, even when the registry changed in between. An
-/// intentional tool-set change is a recorded, attributed transition.
+/// A context transition changes history, not tools (INT-01/WP-05): the next
+/// request keeps the tool bytes and every earlier Claude thinking block. A
+/// registry change is announced at the next request (INT-01/WP-06, D15); on a
+/// provider whose `tools` array carries it, that is a recorded tool-set
+/// transition, named as the cause of the thinking it invalidates.
 #[tokio::test]
 async fn a_context_transition_keeps_the_tool_set_and_earlier_thinking() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
@@ -363,19 +392,19 @@ async fn a_context_transition_keeps_the_tool_set_and_earlier_thinking() -> Resul
     agent
         .run_once_streaming_mpsc("first task", Vec::new(), None, tx.clone())
         .await?;
-    let (_, locked_tools, _) = provider.request(1);
+    let (_, frozen_tools, _) = provider.request(1);
 
-    // Registry unchanged: the transition hook every context apply, revert
-    // and reapply runs, then the next request.
+    // The transition hook every context apply, revert and reapply runs, then
+    // the next request.
     agent.after_provider_context_changed("context transaction", "fixture revision", true)?;
     provider.script(&[Reply::ThinkThenAnswer]);
     agent
         .run_once_streaming_mpsc("second task", Vec::new(), None, tx.clone())
         .await?;
-    let (third, tools, _) = provider.request(2);
+    let (third, tools, system) = provider.request(2);
     assert_eq!(
         serde_json::to_value(&tools)?,
-        serde_json::to_value(&locked_tools)?,
+        serde_json::to_value(&frozen_tools)?,
         "the tool bytes are kept"
     );
     assert_eq!(
@@ -383,35 +412,8 @@ async fn a_context_transition_keeps_the_tool_set_and_earlier_thinking() -> Resul
         vec!["signature-0", "signature-1"],
         "every earlier thinking block is replayed"
     );
-
-    // Registry changed since the lock (membership grew), then another
-    // transition: the change is not picked up, so nothing is invalidated.
-    agent
-        .registry
-        .register(
-            "fixture_extra".to_string(),
-            Arc::new(FixtureTool {
-                name: "fixture_extra",
-            }),
-        )
-        .await;
-    agent.after_provider_context_changed("context transaction", "fixture revision 2", true)?;
-    provider.script(&[Reply::ThinkThenAnswer]);
-    agent
-        .run_once_streaming_mpsc("third task", Vec::new(), None, tx.clone())
-        .await?;
-    let (fourth, tools, system) = provider.request(3);
-    assert_eq!(
-        serde_json::to_value(&tools)?,
-        serde_json::to_value(&locked_tools)?
-    );
-    assert!(!tool_names(&tools).contains(&"fixture_extra".to_string()));
-    assert_eq!(
-        replayed_signatures(&fourth),
-        vec!["signature-0", "signature-1", "signature-2"]
-    );
     assert!(
-        analyze_request(&fixture_request(&fourth, &tools, &system))
+        analyze_request(&fixture_request(&third, &tools, &system))
             .invalid()
             .next()
             .is_none()
@@ -425,18 +427,38 @@ async fn a_context_transition_keeps_the_tool_set_and_earlier_thinking() -> Resul
         "no thinking was invalidated"
     );
 
-    // The `mcp` tool's release is the intentional change: the next request
-    // carries the current registry, the thinking bound to the old set is
-    // suppressed explicitly, and the cause names the transition.
+    // The registry gains a tool. The next request announces it once; this
+    // provider's array must carry it, so the thinking bound to the old set
+    // is suppressed explicitly and the cause names the transition.
     let since = std::time::Instant::now();
-    agent.unlock_tools();
-    provider.script(&[Reply::ThinkThenAnswer]);
     agent
-        .run_once_streaming_mpsc("fourth task", Vec::new(), None, tx)
+        .registry
+        .register(
+            "fixture_extra".to_string(),
+            Arc::new(FixtureTool {
+                name: "fixture_extra",
+            }),
+        )
+        .await;
+    provider.script(&[Reply::ThinkThenAnswer, Reply::ThinkThenAnswer]);
+    agent
+        .run_once_streaming_mpsc("third task", Vec::new(), None, tx.clone())
         .await?;
-    let (fifth, tools, _) = provider.request(4);
-    assert!(tool_names(&tools).contains(&"fixture_extra".to_string()));
-    assert!(replayed_signatures(&fifth).is_empty());
+    let (fourth, tools, _) = provider.request(3);
+    assert_eq!(
+        tool_names(&tools).last().map(String::as_str),
+        Some("fixture_extra")
+    );
+    assert_eq!(
+        serde_json::to_value(&tools[..frozen_tools.len()])?,
+        serde_json::to_value(&frozen_tools)?,
+        "first-sent tools keep their bytes and order"
+    );
+    assert!(replayed_signatures(&fourth).is_empty());
+    assert_eq!(
+        crate::tool::tool_set_notice_count(&agent.session.messages),
+        1
+    );
     let managed = agent
         .session
         .context_view
@@ -449,23 +471,41 @@ async fn a_context_transition_keeps_the_tool_set_and_earlier_thinking() -> Resul
         suppression.selection,
         jcode_session_types::StoredReasoningSelection::Invalidated {
             cause: StoredReasoningInvalidationCause::RequestPrefixChanged {
-                recorded_transitions: vec!["MCP tool set reload".to_string()],
+                recorded_transitions: vec![crate::tool::TOOL_SET_TRANSITION.to_string()],
             },
         }
     );
     assert!(
         crate::cache_invalidation::recorded_since(since)
             .iter()
-            .any(|entry| entry.source == "MCP tool set reload"),
+            .any(|entry| entry.source == crate::tool::TOOL_SET_TRANSITION),
         "the tool-set change is journaled"
+    );
+
+    // Once announced, the set is stable: the next request replays the
+    // thinking produced after the transition and announces nothing.
+    agent
+        .run_once_streaming_mpsc("fourth task", Vec::new(), None, tx)
+        .await?;
+    let (fifth, later_tools, _) = provider.request(4);
+    assert_eq!(
+        serde_json::to_value(&later_tools)?,
+        serde_json::to_value(&tools)?
+    );
+    assert_eq!(replayed_signatures(&fifth), vec!["signature-3"]);
+    assert_eq!(
+        crate::tool::tool_set_notice_count(&agent.session.messages),
+        1
     );
     Ok(())
 }
 
-/// A late MCP registration joins the locked set once, as a recorded
-/// transition named in the cause of the thinking it invalidates.
+/// The same registry change on a model that takes tool changes inside a
+/// message (INT-01/WP-06, D15): the `tools` array keeps its first-sent bytes,
+/// the change rides in the notice, and every earlier thinking block stays
+/// valid under the production binding rule.
 #[tokio::test]
-async fn a_late_mcp_registration_is_one_recorded_attributed_transition() -> Result<()> {
+async fn an_in_message_tool_change_keeps_the_array_and_earlier_thinking() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir()?;
     let _home = super::tests::AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
@@ -475,14 +515,20 @@ async fn a_late_mcp_registration_is_one_recorded_attributed_transition() -> Resu
     );
     crate::config::invalidate_config_cache();
     let project = tempfile::tempdir()?;
-    let provider = ThinkingProvider::default();
+    std::fs::write(project.path().join("notes.txt"), "WP-06 fixture notes\n")?;
+    let provider = ThinkingProvider {
+        inline: true,
+        ..Default::default()
+    };
+    let caps = provider.caps();
     let mut agent = thinking_agent(&provider, project.path()).await;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-    provider.script(&[Reply::ThinkThenAnswer]);
+    provider.script(&[Reply::ThinkThenRead, Reply::ThinkThenAnswer]);
     agent
         .run_once_streaming_mpsc("first task", Vec::new(), None, tx.clone())
         .await?;
+    let (_, frozen_tools, _) = provider.request(1);
 
     let since = std::time::Instant::now();
     agent
@@ -498,41 +544,68 @@ async fn a_late_mcp_registration_is_one_recorded_attributed_transition() -> Resu
     agent
         .run_once_streaming_mpsc("second task", Vec::new(), None, tx.clone())
         .await?;
-    let (second, tools, _) = provider.request(1);
-    assert!(tool_names(&tools).contains(&"mcp__fixture__probe".to_string()));
-    assert!(replayed_signatures(&second).is_empty());
-    let managed = agent
-        .session
-        .context_view
-        .active_reasoning_invalidation()
-        .expect("managed reasoning invalidation");
-    let StoredContextOperation::ReasoningSuppression(suppression) = &managed.operations[0] else {
-        panic!("managed set holds suppressions");
-    };
+    let (third, tools, system) = provider.request(2);
     assert_eq!(
-        suppression.selection,
-        jcode_session_types::StoredReasoningSelection::Invalidated {
-            cause: StoredReasoningInvalidationCause::RequestPrefixChanged {
-                recorded_transitions: vec!["late MCP tool registration".to_string()],
-            },
-        }
+        serde_json::to_value(&tools)?,
+        serde_json::to_value(&frozen_tools)?,
+        "the array is as first advertised"
+    );
+    let changes: Vec<_> = third
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::OperatorNotice { tool_changes, .. } => Some(tool_changes.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(matches!(
+        changes.as_slice(),
+        [jcode_message_types::ToolSetChange::Added { definition }]
+            if definition.name == "mcp__fixture__probe"
+    ));
+    assert_eq!(
+        replayed_signatures(&third),
+        vec!["signature-0", "signature-1"]
     );
     assert!(
-        crate::cache_invalidation::recorded_since(since)
+        analyze_request(&fixture_request_for(&third, &tools, &system, caps))
+            .invalid()
+            .next()
+            .is_none()
+    );
+    assert!(
+        agent
+            .session
+            .context_view
+            .active_reasoning_invalidation()
+            .is_none()
+    );
+    assert!(
+        !crate::cache_invalidation::recorded_since(since)
             .iter()
-            .any(|entry| entry.source == "late MCP tool registration")
+            .any(|entry| entry.source == crate::tool::TOOL_SET_TRANSITION),
+        "no tool-set transition: the array did not change"
     );
 
-    // Once joined, the set is stable: the next request replays the thinking
-    // produced after the transition.
+    // The thinking produced after the notice is bound to it and replays.
     agent
         .run_once_streaming_mpsc("third task", Vec::new(), None, tx)
         .await?;
-    let (third, later_tools, _) = provider.request(2);
+    let (fourth, tools, system) = provider.request(3);
     assert_eq!(
-        serde_json::to_value(&later_tools)?,
-        serde_json::to_value(&tools)?
+        replayed_signatures(&fourth),
+        vec!["signature-0", "signature-1", "signature-2"]
     );
-    assert_eq!(replayed_signatures(&third), vec!["signature-1"]);
+    assert!(
+        analyze_request(&fixture_request_for(&fourth, &tools, &system, caps))
+            .invalid()
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        crate::tool::tool_set_notice_count(&agent.session.messages),
+        1
+    );
     Ok(())
 }

@@ -207,7 +207,7 @@ struct ActiveTurnContext {
     partial_output_persistence_error: Option<String>,
     last_preflight: Option<ContextPreflightReport>,
     cache_tracker_before_pending: CacheTracker,
-    tool_set_before_pending: crate::tool::ToolSetLock,
+    tool_set_before_pending: Option<jcode_session_types::StoredToolSet>,
     tool_output_scan_index_before_pending: usize,
     unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
     emergency_attempted: bool,
@@ -379,9 +379,6 @@ pub struct Agent {
     cache_tracker: CacheTracker,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
-    /// The tool set requests carry: locked at the first request, changed
-    /// only at a recorded tool-set transition (see `crate::tool::tool_set`).
-    tool_set: crate::tool::ToolSetLock,
     /// Labels of recorded prompt or tool-set transitions since the previous
     /// provider request. They name why replayed reasoning stopped matching
     /// its prefix, and are cleared once a request reconciles it.
@@ -460,7 +457,6 @@ impl Agent {
             graceful_shutdown: InterruptSignal::new(),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
-            tool_set: crate::tool::ToolSetLock::default(),
             pending_prefix_transitions: Vec::new(),
             provider_reported_reasoning: Vec::new(),
             provider_replans: 0,
@@ -986,8 +982,6 @@ impl Agent {
         self.graceful_shutdown.reset();
         self.cache_tracker.reset();
         self.last_usage = TokenUsage::default();
-        // A new provider history locks a new tool set at its first request.
-        self.tool_set.reset();
         self.rewind_undo_snapshot = None;
     }
 
@@ -1514,6 +1508,9 @@ mod reasoning_invalidation_tests;
 #[cfg(test)]
 #[path = "agent/request_replan_tests.rs"]
 mod request_replan_tests;
+#[cfg(test)]
+#[path = "agent/tool_set_tests.rs"]
+mod tool_set_tests;
 
 impl crate::context::RequestPrefixSource for Agent {
     fn request_prefix(

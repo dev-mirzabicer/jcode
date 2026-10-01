@@ -12,7 +12,9 @@ pub use context::*;
 mod startup_context;
 pub use startup_context::*;
 mod context_delivery;
+mod tool_set;
 pub use context_delivery::*;
+pub use tool_set::*;
 
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in

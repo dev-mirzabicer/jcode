@@ -217,6 +217,41 @@ fn tool_changes_ride_in_the_system_message_by_value_and_by_name() {
     assert!(moved.iter().all(|block| block["type"] != "text"));
 }
 
+/// A change announced again (after a context edit hid its notice) beside its
+/// original (once the edit is reverted) is rendered once.
+#[test]
+fn a_repeated_tool_change_is_rendered_once() {
+    let removed = ToolSetChange::Removed {
+        name: "read".to_string(),
+    };
+    let added = ToolSetChange::Added {
+        definition: tool("probe_echo", "Echo text"),
+    };
+    let messages = [
+        Message::user("one"),
+        notice_with("update 1", vec![added.clone(), removed.clone()]),
+        Message::assistant_text("ok"),
+        Message::user("two"),
+        notice_with("update 2", vec![added.clone(), removed.clone()]),
+        Message::assistant_text("ok"),
+        Message::user("three"),
+        // A real later change to the same tool is rendered.
+        notice_with(
+            "update 3",
+            vec![ToolSetChange::Redefined {
+                definition: tool("probe_echo", "Echo text, revised"),
+            }],
+        ),
+    ];
+    let value = wire(&messages, BOTH);
+    assert_eq!(value[1]["content"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        value[4]["content"],
+        json!([{"type": "text", "text": "update 2"}])
+    );
+    assert_eq!(value[7]["content"][1]["type"], "tool_addition");
+}
+
 #[test]
 fn thinking_produced_after_a_system_message_is_bound_to_it() {
     let mut messages = vec![Message::user("go"), notice("note")];

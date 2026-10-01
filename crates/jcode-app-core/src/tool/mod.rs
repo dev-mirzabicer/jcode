@@ -70,7 +70,10 @@ pub(crate) use jcode_tool_core::intent_schema_property;
 pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
-pub use tool_set::{ResolvedToolSet, ToolSetFilters, ToolSetLock, ToolSetTransition};
+pub use tool_set::{
+    TOOL_SET_TRANSITION, ToolSetPlan, plan_tool_set, recorded_tools, tool_changes_in_view,
+    tool_set_notice, tool_set_notice_count,
+};
 
 pub(crate) fn parsed_patch_file_paths(tool_name: &str, patch_text: &str) -> Result<Vec<String>> {
     match tool_name {
@@ -122,6 +125,45 @@ pub(crate) fn clear_session_tool_policy(session_id: &str) {
     policies.remove(session_id);
 }
 
+/// Why a tool a session's model was offered cannot run now
+/// (INT-01/WP-06, D15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnavailableTool {
+    /// The tool was removed from the session's tool set.
+    Removed,
+    /// Its MCP server is reconnecting; the tool is expected back.
+    Reconnecting,
+}
+
+static SESSION_UNAVAILABLE_TOOLS: LazyLock<
+    StdRwLock<HashMap<String, HashMap<String, UnavailableTool>>>,
+> = LazyLock::new(|| StdRwLock::new(HashMap::new()));
+
+/// Record which tools of a session's tool set cannot run now, so a call to
+/// one reports why instead of an unknown tool.
+pub fn set_session_unavailable_tools(
+    session_id: &str,
+    unavailable: HashMap<String, UnavailableTool>,
+) {
+    let mut sessions = SESSION_UNAVAILABLE_TOOLS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if unavailable.is_empty() {
+        sessions.remove(session_id);
+    } else {
+        sessions.insert(session_id.to_string(), unavailable);
+    }
+}
+
+fn session_unavailable_tool(session_id: &str, name: &str) -> Option<UnavailableTool> {
+    SESSION_UNAVAILABLE_TOOLS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)?
+        .get(name)
+        .copied()
+}
+
 fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
     SESSION_TOOL_POLICIES
         .read()
@@ -143,6 +185,9 @@ pub struct Registry {
     child_policy: Option<Arc<child_policy::ChildToolPolicy>>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     mcp_registration: Arc<tokio::sync::OnceCell<()>>,
+    /// MCP servers are connecting in the background and have not registered
+    /// their tools yet. A session keeps their earlier tools meanwhile.
+    mcp_connecting: Arc<std::sync::atomic::AtomicBool>,
     skills: Arc<RwLock<SkillRegistry>>,
     context_budget: Arc<RwLock<ContextBudgetTracker>>,
     bindings: Arc<StdRwLock<HashMap<String, BoundTool>>>,
@@ -160,6 +205,7 @@ pub(crate) struct WeakRegistry {
     child_policy: Option<Arc<child_policy::ChildToolPolicy>>,
     tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     mcp_registration: Arc<tokio::sync::OnceCell<()>>,
+    mcp_connecting: Arc<std::sync::atomic::AtomicBool>,
     skills: Arc<RwLock<SkillRegistry>>,
     context_budget: Arc<RwLock<ContextBudgetTracker>>,
 }
@@ -170,6 +216,7 @@ impl WeakRegistry {
                 anyhow::anyhow!("Originating tool registry is no longer available")
             })?,
             mcp_registration: self.mcp_registration.clone(),
+            mcp_connecting: self.mcp_connecting.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
             // Management changes the tool map, not a provider's frozen input bindings.
@@ -184,6 +231,7 @@ impl Clone for Registry {
         Self {
             tools: self.tools.clone(),
             mcp_registration: self.mcp_registration.clone(),
+            mcp_connecting: self.mcp_connecting.clone(),
             skills: self.skills.clone(),
             // Each clone gets fresh session-local accounting so parallel
             // subagents cannot corrupt one another.
@@ -219,6 +267,7 @@ impl Registry {
             child_policy: self.child_policy.clone(),
             tools: Arc::downgrade(&self.tools),
             mcp_registration: self.mcp_registration.clone(),
+            mcp_connecting: self.mcp_connecting.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
         }
@@ -322,6 +371,7 @@ impl Registry {
         Self {
             tools: self.tools.clone(),
             mcp_registration: self.mcp_registration.clone(),
+            mcp_connecting: self.mcp_connecting.clone(),
             skills: self.skills.clone(),
             context_budget: self.context_budget.clone(),
             child_policy: self.child_policy.clone(),
@@ -388,6 +438,7 @@ impl Registry {
         Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             mcp_registration: Default::default(),
+            mcp_connecting: Default::default(),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             context_budget: Arc::new(RwLock::new(ContextBudgetTracker::new())),
             child_policy: None,
@@ -532,6 +583,7 @@ impl Registry {
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             mcp_registration: Default::default(),
+            mcp_connecting: Default::default(),
             skills: skills.clone(),
             context_budget: context_budget.clone(),
             child_policy: None,
@@ -669,6 +721,19 @@ impl Registry {
             .collect::<Vec<_>>();
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(definitions)
+    }
+
+    /// Whether MCP servers are still connecting in the background, so tools
+    /// they will register may be missing for now.
+    pub fn mcp_connecting(&self) -> bool {
+        self.mcp_connecting
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mcp_connecting(&self, connecting: bool) {
+        self.mcp_connecting
+            .store(connecting, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
@@ -937,6 +1002,18 @@ impl Registry {
             }
             let tool = match tools.get(resolved_name) {
                 Some(tool) => tool.clone(),
+                None if let Some(state) =
+                    session_unavailable_tool(&ctx.session_id, resolved_name) =>
+                {
+                    return Err(anyhow::anyhow!(match state {
+                        UnavailableTool::Removed => format!(
+                            "Tool `{resolved_name}` is no longer available in this session; it was removed from the tool set."
+                        ),
+                        UnavailableTool::Reconnecting => format!(
+                            "Tool `{resolved_name}` is not available yet: its MCP server is reconnecting. Try again shortly."
+                        ),
+                    }));
+                }
                 None => {
                     // List available tools so the model can recover instead of
                     // spiraling through hallucinated names like "ToolSearch" (#104).
@@ -1361,6 +1438,8 @@ impl Registry {
             }
 
             // Spawn connection and tool registration in background
+            self.mcp_connecting
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             let registry = self.clone();
             tokio::spawn(async move {
                 let (successes, failures) = {
@@ -1398,6 +1477,9 @@ impl Registry {
                     // schema, which is correct (handles schema drift).
                     registry.register(name.clone(), tool.clone()).await;
                 }
+                registry
+                    .mcp_connecting
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
 
                 // Reconcile the on-disk schema cache with the live schemas so the
                 // next spawn can advertise the up-to-date tools with zero cache

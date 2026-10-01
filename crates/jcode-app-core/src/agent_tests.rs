@@ -66,8 +66,11 @@ fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
             description: "SYNTHETIC".into(),
             input_schema: serde_json::json!({}),
         };
-        agent.tool_set =
-            crate::tool::ToolSetLock::from_parts(Some(vec![tool("read"), tool("swarm")]), true);
+        // A tool set frozen while Swarm was available (INT-01/WP-06 D15).
+        agent.session.tool_set = Some(jcode_session_types::StoredToolSet::new(vec![
+            tool("read"),
+            tool("swarm"),
+        ]));
         let invalidations = provider.invalidations.load(Ordering::SeqCst);
         let first = agent.tool_definitions().await.unwrap();
         let second = agent.tool_definitions().await.unwrap();
@@ -86,9 +89,22 @@ fn swarm_retirement_locked_tools_change_once_without_rewriting_history() {
             provider.invalidations.load(Ordering::SeqCst),
             invalidations + 1
         );
+        // History is not rewritten: the removal is announced by appending.
+        let after = serde_json::to_value(&agent.session.messages).unwrap();
+        let after = after.as_array().unwrap();
         assert_eq!(
-            serde_json::to_value(&agent.session.messages).unwrap(),
+            serde_json::Value::Array(after[..after.len() - 1].to_vec()),
             before
+        );
+        assert_eq!(
+            agent
+                .session
+                .messages
+                .last()
+                .unwrap()
+                .context_delivery()
+                .map(|(channel, _)| channel),
+            Some(jcode_session_types::ContextDeliveryChannel::ToolSet)
         );
         assert_eq!(
             agent.session.swarm_routing_prompt.as_deref(),
@@ -1648,7 +1664,7 @@ async fn historical_context_change_resets_provider_runtime_exactly_once() {
     );
     let before = agent.messages_for_provider().expect("baseline projection");
     agent.cache_tracker.record_request(&before);
-    agent.tool_set = crate::tool::ToolSetLock::from_parts(Some(Vec::new()), true);
+    agent.session.tool_set = Some(jcode_session_types::StoredToolSet::new(Vec::new()));
     agent.provider_session_id = Some("agent-provider-session".to_string());
     agent.session.provider_session_id = Some("stored-provider-session".to_string());
     agent.update_context_usage_from_stream(9_000, None, None);
@@ -1675,8 +1691,10 @@ async fn historical_context_change_resets_provider_runtime_exactly_once() {
     assert!(agent.session.provider_session_id.is_none());
     // A context change keeps the tool set (INT-01 WP-05): the tools are not
     // part of what the transition changed.
-    assert_eq!(agent.tool_set.locked().map(<[_]>::len), Some(0));
-    assert!(agent.tool_set.late_mcp_settled());
+    assert_eq!(
+        agent.session.tool_set,
+        Some(jcode_session_types::StoredToolSet::new(Vec::new()))
+    );
     assert_eq!(agent.cache_tracker.turn_count(), 0);
     let projected = agent.messages_for_provider().expect("changed projection");
     let stats = agent_context_budget_stats(&agent).await;
@@ -1871,7 +1889,7 @@ async fn phase10_provider_payload_rejection_preserves_historical_images_and_neve
         .cache_tracker
         .record_request(&baseline_provider_messages);
     let cache_turns_before = agent.cache_tracker.turn_count();
-    agent.tool_set = crate::tool::ToolSetLock::from_parts(None, true);
+    agent.session.tool_set = None;
     agent.tool_output_scan_index = agent.session.messages.len();
     let raw_before = serde_json::to_vec(&agent.session.messages).unwrap();
     let (event_tx, mut event_rx) = tokio_mpsc::unbounded_channel();
@@ -1890,8 +1908,8 @@ async fn phase10_provider_payload_rejection_preserves_historical_images_and_neve
     assert!(error.to_string().contains("images were preserved"));
     assert_eq!(provider.request_count(), 1);
     assert_eq!(agent.cache_tracker.turn_count(), cache_turns_before);
-    assert!(agent.tool_set.locked().is_none());
-    assert!(agent.tool_set.late_mcp_settled());
+    // The tool set frozen by the rolled-back request is rolled back with it.
+    assert!(agent.session.tool_set.is_none());
     assert_eq!(agent.tool_output_scan_index, agent.session.messages.len());
     assert_eq!(
         serde_json::to_vec(&agent.session.messages).unwrap(),
@@ -3229,14 +3247,13 @@ fn seed_transient_session_state(agent: &mut Agent) {
         cache_read_input_tokens: Some(3),
         cache_creation_input_tokens: Some(5),
     };
-    agent.tool_set = crate::tool::ToolSetLock::from_parts(
-        Some(vec![ToolDefinition {
+    agent.session.tool_set = Some(jcode_session_types::StoredToolSet::new(vec![
+        ToolDefinition {
             name: "test_tool".to_string(),
             description: "test tool".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
-        }]),
-        false,
-    );
+        },
+    ]));
 }
 
 #[tokio::test]
@@ -3264,7 +3281,7 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.last_connection_type.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.tool_set.locked().is_none());
+    assert!(agent.session.tool_set.is_none());
 }
 
 #[tokio::test]
@@ -3303,7 +3320,7 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.last_connection_type.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.tool_set.locked().is_none());
+    assert!(agent.session.tool_set.is_none());
 }
 
 #[tokio::test]
@@ -3912,79 +3929,54 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
     );
 }
 
-/// The intentional, MCP-driven prompt-cache miss must happen at most ONCE per
-/// locked snapshot. After the first late-registered `mcp__*` tool is picked up
-/// (the one accepted miss), a *second* MCP tool that registers even later must
-/// NOT trigger another rebuild — otherwise a server that connects in waves would
-/// thrash the provider prompt cache. Guards the tool-set lock's late-MCP
-/// one-shot flag (#206 follow-up).
+/// Late MCP registration is an ordinary tool-set change (INT-01/WP-06, D15,
+/// which replaces the one-shot rebuild of the #206 follow-up): each wave of
+/// tools is announced once, as an appended notice, and joins the array of a
+/// provider that cannot take tool changes inside a message. Nothing waits
+/// for the `mcp` tool, and an unchanged registry announces nothing.
 #[tokio::test]
-async fn mcp_late_registration_rebuild_happens_at_most_once() {
+async fn each_late_mcp_wave_is_announced_once_and_joins_the_array() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
+    let notices = |agent: &Agent| crate::tool::tool_set_notice_count(&agent.session.messages);
+    let names = |tools: &[ToolDefinition]| -> Vec<String> {
+        tools.iter().map(|tool| tool.name.clone()).collect()
+    };
 
-    // First turn locks the snapshot with no MCP tools yet.
-    let _ = agent.tool_definitions().await.unwrap();
+    // The first request freezes the set with no MCP tools yet.
+    let frozen = agent.tool_definitions().await.unwrap();
+    assert_eq!(notices(&agent), 0);
 
-    // First MCP tool arrives -> one accepted rebuild exposes it.
-    agent
-        .registry
-        .register(
-            "mcp__test__first".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "mcp__test__first".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let after_first = agent.tool_definitions().await.unwrap();
-    assert!(
-        after_first.iter().any(|t| t.name == "mcp__test__first"),
-        "first late MCP tool must be picked up by the one accepted rebuild"
-    );
-    assert!(
-        agent.tool_set.late_mcp_settled(),
-        "one-shot guard must latch after the accepted rebuild"
-    );
-
-    // A SECOND MCP tool registers even later (server connected in a second
-    // wave). The one-shot guard means we do NOT rebuild again, so the snapshot
-    // stays cache-stable and this tool is intentionally not surfaced until the
-    // tool list is explicitly unlocked.
-    agent
-        .registry
-        .register(
-            "mcp__test__second".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "mcp__test__second".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let after_second = agent.tool_definitions().await.unwrap();
-    let names: Vec<String> = after_second.iter().map(|t| t.name.clone()).collect();
-    assert!(
-        names.iter().any(|n| n == "mcp__test__first"),
-        "previously surfaced MCP tool must remain"
-    );
-    assert!(
-        !names.iter().any(|n| n == "mcp__test__second"),
-        "second-wave MCP tool must NOT trigger a second cache-busting rebuild"
-    );
-
-    // An explicit unlock (e.g. the `mcp` reload tool) re-arms the one-shot guard
-    // and lets the next snapshot pick up everything currently registered.
-    agent.unlock_tools();
-    assert!(
-        !agent.tool_set.late_mcp_settled(),
-        "explicit unlock must re-arm the one-shot guard"
-    );
-    let after_unlock = agent.tool_definitions().await.unwrap();
-    let unlocked_names: Vec<String> = after_unlock.iter().map(|t| t.name.clone()).collect();
-    assert!(
-        unlocked_names.iter().any(|n| n == "mcp__test__second"),
-        "after explicit unlock, the second-wave MCP tool must finally surface"
-    );
+    for (wave, name) in ["mcp__test__first", "mcp__test__second"]
+        .into_iter()
+        .enumerate()
+    {
+        agent
+            .registry
+            .register(
+                name.to_string(),
+                Arc::new(FakeMcpTool {
+                    name: name.to_string(),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+        let after = agent.tool_definitions().await.unwrap();
+        // First-sent tools keep their bytes and order; the wave is appended.
+        assert_eq!(after[..frozen.len()], frozen[..]);
+        assert_eq!(names(&after).last().map(String::as_str), Some(name));
+        assert_eq!(notices(&agent), wave + 1);
+        let delivery = agent.session.messages.last().unwrap();
+        let announced = delivery.operator_delivery().expect("an operator delivery");
+        assert!(matches!(
+            announced.tool_changes,
+            [jcode_message_types::ToolSetChange::Added { definition }] if definition.name == name
+        ));
+        // The same registry again: the same array, nothing announced.
+        assert_eq!(agent.tool_definitions().await.unwrap(), after);
+        assert_eq!(notices(&agent), wave + 1);
+    }
 }
 
 /// Without any newly-registered MCP tools, the locked snapshot must be returned

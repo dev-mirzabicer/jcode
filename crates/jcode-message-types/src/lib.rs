@@ -15,7 +15,7 @@ pub struct ToolCall {
 }
 
 /// Tool definition advertised to model providers.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     /// Prompt-visible text sent to the model by provider adapters.
@@ -267,7 +267,7 @@ pub enum ContentBlock {
 
 /// One change to a session's advertised tool set, announced by a notice
 /// (INT-01/WP-06, D15). Definitions are provider-neutral.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolSetChange {
     /// A tool joined the set.

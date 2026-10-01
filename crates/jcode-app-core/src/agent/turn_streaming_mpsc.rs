@@ -1526,7 +1526,6 @@ impl Agent {
                         }
                     }
                 }
-                self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();
                 crate::session_metrics::record_activity(&self.session.id);
 

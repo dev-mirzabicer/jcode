@@ -75,6 +75,7 @@ fn registry_with_context_budget_and_observation(
         context_budget: Arc::new(RwLock::new(context_budget)),
         bindings: Default::default(),
         mcp_registration: Default::default(),
+        mcp_connecting: Default::default(),
     }
 }
 

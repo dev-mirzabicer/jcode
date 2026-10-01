@@ -163,8 +163,8 @@ impl crate::tool::Tool for LocalFixtureTool {
 }
 
 #[test]
-fn local_requests_keep_the_locked_tool_set_until_a_recorded_transition() {
-    // INT-01 WP-05: the local loop follows the agent's tool-set lifetime.
+fn local_requests_keep_the_frozen_tool_set_and_announce_a_change_once() {
+    // INT-01/WP-06 (D15): the local loop follows the agent's tool-set rule.
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     let provider: Arc<dyn Provider> = Arc::new(PrefixBoundTestProvider);
@@ -175,30 +175,48 @@ fn local_requests_keep_the_locked_tool_set_until_a_recorded_transition() {
     // Frozen tool guidance keeps the set independent of shared instruction
     // stores, as a session that already sent a request has it.
     app.session.delegation_guidance = Some("fixture delegation guidance".to_string());
-    let names = |tools: &[crate::message::ToolDefinition]| -> Vec<String> {
-        tools.iter().map(|tool| tool.name.clone()).collect()
-    };
+    let notices = |app: &App| crate::tool::tool_set_notice_count(&app.session.messages);
 
+    // The first request freezes the set and persists it with the session.
     let first = rt.block_on(app.local_tool_definitions()).expect("tools");
+    let again = rt.block_on(app.local_tool_definitions()).expect("tools");
+    assert_eq!(first, again);
+    assert_eq!(
+        app.session.tool_set.as_ref().map(|set| &set.advertised),
+        Some(&first)
+    );
+    assert_eq!(notices(&app), 0);
+    assert!(app.pending_prefix_transitions.is_empty());
+
+    // A registry change is announced once, as a delivery appended to the
+    // session the request is projected from. This provider's array must
+    // carry the addition, which is a recorded tool-set transition.
     rt.block_on(app.registry.register(
         "local_fixture_extra".to_string(),
         Arc::new(LocalFixtureTool),
     ));
-    let second = rt.block_on(app.local_tool_definitions()).expect("tools");
-    assert_eq!(names(&first), names(&second), "the locked set is kept");
-    assert!(!names(&second).contains(&"local_fixture_extra".to_string()));
-    assert!(app.pending_prefix_transitions.is_empty());
-    // Context edits stage against the set the next request carries.
+    let changed = rt.block_on(app.local_tool_definitions()).expect("tools");
+    assert_eq!(changed[..first.len()], first[..]);
     assert_eq!(
-        app.tool_set.locked().map(&names),
-        Some(names(&second))
+        changed.last().map(|tool| tool.name.as_str()),
+        Some("local_fixture_extra")
     );
-
-    app.release_local_tool_set_after_mcp_management();
+    assert_eq!(notices(&app), 1);
+    assert!(matches!(
+        app.session
+            .messages
+            .last()
+            .and_then(|message| message.operator_delivery())
+            .map(|delivery| delivery.tool_changes),
+        Some([crate::message::ToolSetChange::Added { definition }])
+            if definition.name == "local_fixture_extra"
+    ));
     assert_eq!(
         app.pending_prefix_transitions,
-        vec!["MCP tool set reload".to_string()]
+        vec![crate::tool::TOOL_SET_TRANSITION.to_string()]
     );
-    let rebuilt = rt.block_on(app.local_tool_definitions()).expect("tools");
-    assert!(names(&rebuilt).contains(&"local_fixture_extra".to_string()));
+
+    let settled = rt.block_on(app.local_tool_definitions()).expect("tools");
+    assert_eq!(settled, changed);
+    assert_eq!(notices(&app), 1);
 }

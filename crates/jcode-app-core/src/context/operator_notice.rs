@@ -25,10 +25,10 @@ pub fn with_operator_notices(
     if !provider.renders_operator_notices() {
         return projected;
     }
-    let notices: HashMap<&str, &str> = stored
+    let notices: HashMap<&str, jcode_session_types::OperatorDelivery<'_>> = stored
         .iter()
         .filter_map(StoredMessage::operator_delivery)
-        .map(|delivery| (delivery.text, delivery.body))
+        .map(|delivery| (delivery.text, delivery))
         .collect();
     if notices.is_empty() {
         return projected;
@@ -40,11 +40,11 @@ pub fn with_operator_notices(
         let [ContentBlock::Text { text, .. }] = message.content.as_slice() else {
             continue;
         };
-        if let Some(body) = notices.get(text.as_str()) {
+        if let Some(delivery) = notices.get(text.as_str()) {
             message.content = vec![ContentBlock::OperatorNotice {
                 text: text.clone(),
-                body: (*body).to_string(),
-                tool_changes: Vec::new(),
+                body: delivery.body.to_string(),
+                tool_changes: delivery.tool_changes.to_vec(),
             }];
         }
     }

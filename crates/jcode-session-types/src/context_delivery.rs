@@ -6,7 +6,7 @@
 //! removed, so every provider request stays an append of the previous one
 //! (INT-01, INV-1). The text form is the same for every provider.
 
-use jcode_message_types::{ContentBlock, Role};
+use jcode_message_types::{ContentBlock, Role, ToolSetChange};
 use serde::{Deserialize, Serialize};
 
 use crate::{StoredMessage, StoredMessageOrigin};
@@ -20,6 +20,9 @@ pub enum ContextDeliveryChannel {
     TurnReminder,
     /// The batch-tool nudge after repeated single-tool rounds.
     BatchNudge,
+    /// A change to the session's tool set (INT-01/WP-06, D15). The changes
+    /// travel structurally in the delivery's origin.
+    ToolSet,
 }
 
 impl ContextDeliveryChannel {
@@ -27,7 +30,7 @@ impl ContextDeliveryChannel {
     /// and nudges are operator guidance (INT-01/WP-06, D17).
     pub fn preferred_authority(self) -> DeliveryAuthority {
         match self {
-            Self::TurnReminder | Self::BatchNudge => DeliveryAuthority::Operator,
+            Self::TurnReminder | Self::BatchNudge | Self::ToolSet => DeliveryAuthority::Operator,
         }
     }
 }
@@ -59,6 +62,9 @@ pub struct StoredContextDelivery {
     pub fingerprint: String,
     #[serde(default, skip_serializing_if = "DeliveryAuthority::is_user")]
     pub authority: DeliveryAuthority,
+    /// The tool-set changes a `ToolSet` delivery announces, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_changes: Vec<ToolSetChange>,
 }
 
 const OPEN: &str = "<system-reminder>\n";
@@ -75,7 +81,7 @@ pub fn context_delivery_text(channel: ContextDeliveryChannel, body: &str) -> Opt
     }
     let heading = match channel {
         ContextDeliveryChannel::TurnReminder => REMINDER_HEADING,
-        ContextDeliveryChannel::BatchNudge => "",
+        ContextDeliveryChannel::BatchNudge | ContextDeliveryChannel::ToolSet => "",
     };
     Some(format!("{OPEN}{heading}{body}{CLOSE}"))
 }
@@ -86,6 +92,34 @@ pub fn context_delivery_message(
     id: String,
     channel: ContextDeliveryChannel,
     body: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Option<StoredMessage> {
+    delivery_message(id, channel, body, Vec::new(), timestamp)
+}
+
+/// Build the stored message announcing tool-set changes. `body` states them
+/// for every provider; `changes` carries them for providers that apply tool
+/// changes inside a message.
+pub fn tool_set_delivery_message(
+    id: String,
+    body: &str,
+    changes: Vec<ToolSetChange>,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Option<StoredMessage> {
+    delivery_message(
+        id,
+        ContextDeliveryChannel::ToolSet,
+        body,
+        changes,
+        timestamp,
+    )
+}
+
+fn delivery_message(
+    id: String,
+    channel: ContextDeliveryChannel,
+    body: &str,
+    tool_changes: Vec<ToolSetChange>,
     timestamp: chrono::DateTime<chrono::Utc>,
 ) -> Option<StoredMessage> {
     let text = context_delivery_text(channel, body)?;
@@ -106,6 +140,7 @@ pub fn context_delivery_message(
                 channel,
                 fingerprint,
                 authority: channel.preferred_authority(),
+                tool_changes,
             },
         )),
     })
@@ -145,7 +180,11 @@ impl StoredMessage {
         let [ContentBlock::Text { text, .. }] = self.content.as_slice() else {
             return None;
         };
-        Some(OperatorDelivery { text, body })
+        Some(OperatorDelivery {
+            text,
+            body,
+            tool_changes: &delivery.tool_changes,
+        })
     }
 }
 
@@ -156,6 +195,8 @@ pub struct OperatorDelivery<'a> {
     pub text: &'a str,
     /// The text without the wrapper.
     pub body: &'a str,
+    /// The tool-set changes it announces.
+    pub tool_changes: &'a [ToolSetChange],
 }
 
 #[cfg(test)]

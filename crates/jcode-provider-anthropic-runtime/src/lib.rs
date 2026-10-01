@@ -1501,6 +1501,10 @@ impl Provider for AnthropicProvider {
         true
     }
 
+    fn renders_tool_changes(&self) -> bool {
+        jcode_provider_core::anthropic_conversation_caps(&self.model()).inline_tool_changes
+    }
+
     fn replayed_reasoning_invalidations(
         &self,
         messages: &[Message],

@@ -1,180 +1,189 @@
-//! The tool-set lifetime owner (INT-01 WP-05).
+//! The tool-set planner (INT-01/WP-06, D15).
 
 use super::*;
-use crate::tool::{Tool, ToolContext, ToolOutput};
-use async_trait::async_trait;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use serde_json::json;
 
-struct Named(&'static str);
-
-#[async_trait]
-impl Tool for Named {
-    fn name(&self) -> &str {
-        self.0
+fn tool(name: &str, description: &str, property: &str) -> ToolDefinition {
+    ToolDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        input_schema: json!({"type": "object", "properties": {property: {"type": "string"}}}),
     }
-    fn description(&self) -> &str {
-        "fixture"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "properties": {}})
-    }
-    fn decode_input(&self, _: &serde_json::Value) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn execute(&self, _: serde_json::Value, _: ToolContext) -> anyhow::Result<ToolOutput> {
-        Ok(ToolOutput::new("ok"))
-    }
-}
-
-async fn register(registry: &Registry, name: &'static str) {
-    registry
-        .register(name.to_string(), Arc::new(Named(name)))
-        .await;
-}
-
-/// Resolve with a builder that reads the registry and counts its calls.
-async fn resolve(
-    lock: &mut ToolSetLock,
-    registry: &Registry,
-    builds: &AtomicUsize,
-) -> ResolvedToolSet {
-    lock.resolve(registry, &ToolSetFilters::none(), || async {
-        builds.fetch_add(1, Ordering::SeqCst);
-        Ok(registry.definitions(None).await)
-    })
-    .await
-    .expect("resolve")
 }
 
 fn names(tools: &[ToolDefinition]) -> Vec<&str> {
     tools.iter().map(|tool| tool.name.as_str()).collect()
 }
 
-#[tokio::test]
-async fn the_first_request_locks_the_set_and_later_ones_reuse_it() {
-    let registry = Registry::empty();
-    register(&registry, "read").await;
-    let builds = AtomicUsize::new(0);
-    let mut lock = ToolSetLock::default();
-
-    let first = resolve(&mut lock, &registry, &builds).await;
-    register(&registry, "added_later").await;
-    let second = resolve(&mut lock, &registry, &builds).await;
-
-    assert_eq!(builds.load(Ordering::SeqCst), 1);
-    assert_eq!(names(&second.tools), vec!["read"]);
-    assert!(first.transitions.is_empty() && second.transitions.is_empty());
-    assert!(lock.locked().is_some());
+#[test]
+fn the_first_request_freezes_the_set_and_an_unchanged_registry_keeps_it() {
+    let live = vec![tool("bash", "Run", "c"), tool("read", "Read", "p")];
+    for inline in [Some(&[][..]), None] {
+        let first = plan_tool_set(None, live.clone(), inline, false);
+        assert_eq!(first.tools, live);
+        assert!(first.announced.is_empty() && !first.array_changed);
+        let again = plan_tool_set(Some(&first.record), live.clone(), inline, false);
+        assert_eq!(again.tools, live);
+        assert!(again.announced.is_empty() && !again.array_changed);
+        assert_eq!(again.record, first.record);
+    }
 }
 
-#[tokio::test]
-async fn late_mcp_tools_join_once_as_a_named_transition() {
-    let registry = Registry::empty();
-    register(&registry, "read").await;
-    let builds = AtomicUsize::new(0);
-    let mut lock = ToolSetLock::default();
-    resolve(&mut lock, &registry, &builds).await;
+#[test]
+fn each_change_is_announced_once_and_the_array_follows_the_provider() {
+    let frozen = plan_tool_set(
+        None,
+        vec![tool("bash", "Run", "c"), tool("read", "Read", "p")],
+        Some(&[]),
+        false,
+    )
+    .record;
+    let live = vec![
+        tool("bash", "Run (revised)", "c"),
+        tool("probe", "Probe", "x"),
+    ];
 
-    register(&registry, "mcp__server__first").await;
-    let joined = resolve(&mut lock, &registry, &builds).await;
-    assert_eq!(names(&joined.tools), vec!["mcp__server__first", "read"]);
+    // In-message changes: the array never changes.
+    let inline = plan_tool_set(Some(&frozen), live.clone(), Some(&[]), false);
+    assert_eq!(inline.announced.len(), 3);
+    assert_eq!(inline.tools, frozen.advertised);
+    assert!(!inline.array_changed);
     assert_eq!(
-        joined.transitions,
-        vec![ToolSetTransition::LateMcpRegistration]
+        inline.unavailable.get("read"),
+        Some(&UnavailableTool::Removed)
     );
 
-    // A later wave waits for an explicit `mcp` release (#206 follow-up).
-    register(&registry, "mcp__server__second").await;
-    let stable = resolve(&mut lock, &registry, &builds).await;
-    assert!(stable.transitions.is_empty());
-    assert_eq!(names(&stable.tools), names(&joined.tools));
-    assert_eq!(builds.load(Ordering::SeqCst), 2);
+    // Array changes: the addition joins; the description keeps its bytes.
+    let array = plan_tool_set(Some(&frozen), live.clone(), None, false);
+    assert_eq!(names(&array.tools), vec!["bash", "read", "probe"]);
+    assert_eq!(array.tools[0].description, "Run");
+    assert!(array.array_changed);
 
-    assert!(lock.release_after_mcp_management());
-    let reloaded = resolve(&mut lock, &registry, &builds).await;
-    assert!(names(&reloaded.tools).contains(&"mcp__server__second"));
+    // Recorded once.
+    let after = plan_tool_set(Some(&array.record), live, None, false);
+    assert!(after.announced.is_empty() && !after.array_changed);
+
+    // The notice names every change, and its text is unique per update.
+    let notice = tool_set_notice(1, &inline.announced);
+    for name in ["bash", "read", "probe"] {
+        assert!(notice.contains(&format!("`{name}`")), "{notice}");
+    }
+    assert_ne!(notice, tool_set_notice(2, &inline.announced));
+}
+
+#[test]
+fn a_description_change_alone_leaves_every_array_unchanged() {
+    let frozen = StoredToolSet::new(vec![tool("bash", "Run", "c")]);
+    for inline in [Some(&[][..]), None] {
+        let plan = plan_tool_set(
+            Some(&frozen),
+            vec![tool("bash", "Run!", "c")],
+            inline,
+            false,
+        );
+        assert_eq!(plan.announced.len(), 1);
+        assert!(!plan.array_changed);
+        assert_eq!(plan.tools, frozen.advertised);
+    }
+    // A schema change moves the array where tools are not changed in-message.
+    let plan = plan_tool_set(Some(&frozen), vec![tool("bash", "Run", "x")], None, false);
+    assert!(plan.array_changed);
+    assert!(plan.announced[0].schema_changed);
+}
+
+#[test]
+fn mcp_tools_wait_for_their_servers_after_a_start() {
+    let frozen = StoredToolSet::new(vec![tool("bash", "Run", "c"), tool("mcp__s__q", "Q", "x")]);
+    let starting = vec![tool("bash", "Run", "c")];
+    let plan = plan_tool_set(Some(&frozen), starting.clone(), Some(&[]), true);
+    assert!(plan.announced.is_empty());
+    assert_eq!(plan.tools, frozen.advertised);
+    assert_eq!(
+        plan.unavailable.get("mcp__s__q"),
+        Some(&UnavailableTool::Reconnecting)
+    );
+    // Reconnected: nothing to announce, the same bytes, nothing unavailable.
+    let plan = plan_tool_set(Some(&frozen), frozen.advertised.clone(), Some(&[]), false);
+    assert!(plan.announced.is_empty() && plan.unavailable.is_empty());
+    // Settled without it: a removal.
+    let plan = plan_tool_set(Some(&frozen), starting, Some(&[]), false);
     assert!(
-        reloaded.transitions.is_empty(),
-        "the release itself is the recorded transition"
+        matches!(&plan.announced[0].change, ToolSetChange::Removed { name } if name == "mcp__s__q")
     );
 }
 
-#[tokio::test]
-async fn mcp_tools_the_session_excludes_do_not_rebuild_the_set() {
-    let registry = Registry::empty();
-    register(&registry, "read").await;
-    let builds = AtomicUsize::new(0);
-    let mut lock = ToolSetLock::default();
-    resolve(&mut lock, &registry, &builds).await;
-    register(&registry, "mcp__server__blocked").await;
+fn changes(plan: &ToolSetPlan) -> Vec<ToolSetChange> {
+    plan.announced
+        .iter()
+        .map(|change| change.change.clone())
+        .collect()
+}
 
-    let disabled: HashSet<String> = ["mcp__server__blocked".to_string()].into();
-    let filters = ToolSetFilters {
-        allowed: None,
-        disabled: &disabled,
+/// A provider that takes changes inside a message sees only the notices its
+/// history still holds. A change whose notice a summary or a rewind hid is
+/// announced again; the record and the array do not change.
+#[test]
+fn a_change_whose_notice_left_the_history_is_announced_again() {
+    let frozen = StoredToolSet::new(vec![tool("bash", "Run", "c"), tool("read", "Read", "p")]);
+    let live = vec![tool("bash", "Run", "c"), tool("probe", "Probe", "x")];
+    let first = plan_tool_set(Some(&frozen), live.clone(), Some(&[]), false);
+    let in_view = changes(&first);
+    assert_eq!(in_view.len(), 2);
+
+    // The notice is in view: nothing more to say.
+    let seen = plan_tool_set(Some(&first.record), live.clone(), Some(&in_view), false);
+    assert!(seen.announced.is_empty());
+    assert_eq!(seen.record, first.record);
+
+    // The notice is hidden: the same changes again, the record unchanged.
+    let hidden = plan_tool_set(Some(&first.record), live.clone(), Some(&[]), false);
+    assert_eq!(changes(&hidden), in_view);
+    assert_eq!(hidden.record, first.record);
+    assert!(!hidden.array_changed);
+    assert_eq!(hidden.tools, frozen.advertised);
+
+    // Both the original and the repeat in view (the edit was reverted).
+    let both: Vec<ToolSetChange> = in_view.iter().chain(&in_view).cloned().collect();
+    let reverted = plan_tool_set(Some(&first.record), live.clone(), Some(&both), false);
+    assert!(reverted.announced.is_empty());
+
+    // A provider whose array carries the changes has nothing to repeat.
+    let array = plan_tool_set(Some(&first.record), live, None, false);
+    assert!(array.announced.is_empty());
+}
+
+#[test]
+fn the_changes_in_view_are_those_of_notices_still_projected() {
+    use chrono::Utc;
+    let change = |name: &str| ToolSetChange::Removed {
+        name: name.to_string(),
     };
-    let resolved = lock
-        .resolve(&registry, &filters, || async {
-            builds.fetch_add(1, Ordering::SeqCst);
-            Ok(registry.definitions(None).await)
-        })
-        .await
-        .expect("resolve");
-    assert!(resolved.transitions.is_empty());
-    assert_eq!(names(&resolved.tools), vec!["read"]);
-    assert_eq!(builds.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn a_reset_locks_a_new_set_at_the_next_request() {
-    let registry = Registry::empty();
-    register(&registry, "read").await;
-    let builds = AtomicUsize::new(0);
-    let mut lock = ToolSetLock::default();
-    resolve(&mut lock, &registry, &builds).await;
-    register(&registry, "write").await;
-
-    lock.reset();
-    assert!(lock.locked().is_none());
-    let renewed = resolve(&mut lock, &registry, &builds).await;
-    assert_eq!(names(&renewed.tools), vec!["read", "write"]);
-    assert!(
-        renewed.transitions.is_empty(),
-        "a new history is not a transition"
-    );
-}
-
-#[test]
-fn a_failed_build_leaves_no_lock() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime");
-    runtime.block_on(async {
-        let registry = Registry::empty();
-        let mut lock = ToolSetLock::default();
-        let error = lock
-            .resolve(&registry, &ToolSetFilters::none(), || async {
-                anyhow::bail!("guidance failed")
-            })
-            .await;
-        assert!(error.is_err());
-        assert!(lock.locked().is_none());
-    });
-}
-
-#[test]
-fn transitions_have_stable_labels() {
+    let notice = |sequence: usize, name: &str| {
+        jcode_session_types::tool_set_delivery_message(
+            format!("message_{sequence}"),
+            &tool_set_notice(
+                sequence,
+                &[StoredToolSetChange {
+                    change: change(name),
+                    schema_changed: false,
+                }],
+            ),
+            vec![change(name)],
+            Utc::now(),
+        )
+        .expect("delivery")
+    };
+    let stored = vec![notice(1, "read"), notice(2, "bash")];
+    assert_eq!(tool_set_notice_count(&stored), 2);
+    let all: Vec<Message> = stored.iter().map(StoredMessage::to_message).collect();
     assert_eq!(
-        ToolSetTransition::LateMcpRegistration.label(),
-        "late MCP tool registration"
+        tool_changes_in_view(&stored, &all),
+        vec![change("read"), change("bash")]
     );
+    // A summary stands where the first notice was.
+    let summarized = vec![Message::user("summary of earlier work"), all[1].clone()];
     assert_eq!(
-        ToolSetTransition::McpManagement.label(),
-        "MCP tool set reload"
-    );
-    assert_eq!(
-        ToolSetTransition::ToolUnavailable.label(),
-        "Swarm globally disabled"
+        tool_changes_in_view(&stored, &summarized),
+        vec![change("bash")]
     );
 }
