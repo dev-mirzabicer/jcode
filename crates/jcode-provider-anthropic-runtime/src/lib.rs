@@ -1335,26 +1335,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
-        let model = self.model();
-        if !Self::model_supports_reasoning_effort(&model) {
-            return vec![];
-        }
-        let mut efforts = if jcode_provider_core::anthropic_thinking_off(&model)
-            == jcode_provider_core::ThinkingOff::AlwaysOn
-        {
-            // Thinking cannot be turned off; `none` would mean `low`.
-            vec!["low", "medium", "high"]
-        } else {
-            vec!["none", "low", "medium", "high"]
-        };
-        if Self::model_supports_xhigh_effort(&model) {
-            efforts.push("xhigh");
-        }
-        if Self::model_supports_max_effort(&model) {
-            efforts.push("max");
-        }
-        efforts.extend(["swarm", "swarm-deep"]);
-        efforts
+        jcode_provider_core::anthropic_selectable_efforts(&self.model())
     }
 
     fn service_tier(&self) -> Option<String> {
