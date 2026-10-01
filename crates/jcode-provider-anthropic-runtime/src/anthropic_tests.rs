@@ -1150,7 +1150,7 @@ async fn test_dangling_tool_use_repair() {
         // Missing tool_results for tool_123 and tool_456!
     ];
 
-    let formatted = provider.format_messages(&messages);
+    let formatted = provider.format_messages(&provider.model(), &messages);
 
     // Should have 3 messages:
     // 1. User: "Hello"
@@ -1225,7 +1225,7 @@ async fn test_no_repair_when_tool_results_present() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages);
+    let formatted = provider.format_messages(&provider.model(), &messages);
 
     // Should have exactly 3 messages (no synthetic ones added)
     assert_eq!(formatted.len(), 3);
@@ -1307,7 +1307,7 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
         make_image_result("tool_c", "c.png"),
     ];
 
-    let formatted = provider.format_messages(&messages);
+    let formatted = provider.format_messages(&provider.model(), &messages);
 
     // assistant message + merged user tool_result message
     assert_eq!(formatted.len(), 2);
@@ -1420,7 +1420,7 @@ async fn test_sanitize_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages);
+    let formatted = provider.format_messages(&provider.model(), &messages);
 
     let sanitized_id = "chatcmpl-BF2xX_tool_call_0";
     for msg in &formatted {
@@ -1465,7 +1465,7 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages);
+    let formatted = provider.format_messages(&provider.model(), &messages);
 
     let sanitized_id = "call_with_dots";
     for msg in &formatted {
@@ -2768,4 +2768,55 @@ fn an_unconfigured_effort_is_the_model_default_not_none() {
     // A jcode default is surfaced as itself.
     use_model(&provider, "claude-opus-5-5");
     assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
+}
+
+/// INT-01/WP-06 D17: the production request renders an operator notice from
+/// the model's capability data.
+#[test]
+fn operator_notices_follow_each_models_capability() {
+    let provider = AnthropicProvider::new();
+    let notice = Message {
+        role: Role::User,
+        content: vec![ContentBlock::OperatorNotice {
+            text: "<system-reminder>\nnote\n</system-reminder>".to_string(),
+            body: "note".to_string(),
+            tool_changes: vec![jcode_message_types::ToolSetChange::Removed {
+                name: "bash".to_string(),
+            }],
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let messages = [Message::user("go"), notice];
+    let roles = |model: &str| {
+        let request = provider.build_api_request(model, &messages, &[], None, true);
+        let value = serde_json::to_value(&request.messages).unwrap();
+        let roles: Vec<String> = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap().to_string())
+            .collect();
+        (
+            roles,
+            value,
+            RequestBetas::of_request(&request).tool_changes,
+        )
+    };
+    for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5"] {
+        let (roles, value, betas) = roles(model);
+        assert_eq!(roles, vec!["user", "system"], "{model}");
+        assert_eq!(value[1]["content"][1]["type"], "tool_removal", "{model}");
+        assert_eq!(betas, Some(ToolChangeBeta::ByReference), "{model}");
+    }
+    for model in ["claude-sonnet-5", "claude-opus-4-7"] {
+        let (roles, value, betas) = roles(model);
+        assert_eq!(roles, vec!["user"], "{model}");
+        assert_eq!(
+            value[0]["content"][1]["text"], "<system-reminder>\nnote\n</system-reminder>",
+            "{model}"
+        );
+        assert_eq!(betas, None, "{model}");
+    }
+    assert!(provider.renders_operator_notices());
 }

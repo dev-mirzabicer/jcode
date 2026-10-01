@@ -2321,6 +2321,11 @@ impl Provider for MultiProvider {
             .replayed_reasoning_invalidations(messages, tools, system)
     }
 
+    fn renders_operator_notices(&self) -> bool {
+        self.runtime_for(self.active_provider())
+            .is_some_and(|runtime| runtime.renders_operator_notices())
+    }
+
     fn replayed_reasoning_block_id(&self, block: &crate::message::ContentBlock) -> Option<String> {
         self.runtime_for(self.active_provider())?
             .replayed_reasoning_block_id(block)

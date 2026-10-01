@@ -275,7 +275,8 @@ impl Tool for ConversationSearchTool {
 
                     for block in &msg.content {
                         match block {
-                            crate::message::ContentBlock::Text { text, .. } => {
+                            crate::message::ContentBlock::Text { text, .. }
+                            | crate::message::ContentBlock::OperatorNotice { text, .. } => {
                                 output.push_str(text);
                                 output.push('\n');
                             }

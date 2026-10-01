@@ -651,7 +651,7 @@ fn build_web_prompt(
         let mut blocks = Vec::with_capacity(message.content.len());
         for block in &message.content {
             match block {
-                ContentBlock::Text { text, .. } => {
+                ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                     blocks.push(json!({ "type": "text", "text": text }));
                 }
                 ContentBlock::ToolUse {

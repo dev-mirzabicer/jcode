@@ -210,11 +210,13 @@ impl Provider for ScriptedProvider {
 struct Fixture {
     agent: Agent,
     provider: ScriptedProvider,
+    /// Fields drop in order: the environment is restored, then the home
+    /// removed, and only then the lock released.
     _guards: (
-        std::sync::MutexGuard<'static, ()>,
+        super::tests::AgentTestEnvRestore,
+        super::tests::AgentTestEnvRestore,
         tempfile::TempDir,
-        super::tests::AgentTestEnvRestore,
-        super::tests::AgentTestEnvRestore,
+        std::sync::MutexGuard<'static, ()>,
     ),
 }
 
@@ -239,7 +241,7 @@ async fn fixture(script: Vec<Step>) -> Result<Fixture> {
     Ok(Fixture {
         agent,
         provider,
-        _guards: (lock, home, home_guard, runtime_guard),
+        _guards: (runtime_guard, home_guard, home, lock),
     })
 }
 

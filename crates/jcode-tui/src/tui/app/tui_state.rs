@@ -1181,7 +1181,8 @@ impl crate::tui::TuiState for App {
 
                 for block in &msg.content {
                     match block {
-                        ContentBlock::Text { text, .. } => {
+                        ContentBlock::Text { text, .. }
+                        | ContentBlock::OperatorNotice { text, .. } => {
                             if msg.role == Role::User
                                 && text.starts_with("<system-reminder>\n# Session Context")
                             {

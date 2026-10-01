@@ -98,6 +98,13 @@ fn orphan_tool_output_to_user_message(item: &Value, missing_output: &str) -> Opt
     }))
 }
 
+/// Whether jcode sends operator notices to OpenAI Responses routes as
+/// `developer` messages. The Responses API documents the role; acceptance and
+/// caching on the ChatGPT OAuth (Codex) backend are decided by live probe
+/// G6.3 (INT-01/WP-06). When this is `false`, OpenAI receives every notice as
+/// the stored user-role delivery text, as before WP-06.
+pub const OPENAI_OPERATOR_MESSAGES: bool = true;
+
 pub fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     build_responses_input_with_logger(messages, |_, _| {})
 }
@@ -143,6 +150,23 @@ pub fn build_responses_input_with_logger(
                             content_parts.push(serde_json::json!({
                                 "type": "input_text",
                                 "text": text
+                            }));
+                        }
+                        // An operator notice is a developer message in place
+                        // (INT-01/WP-06, D17). Tool changes it announces reach
+                        // OpenAI through the tool array, never here.
+                        ContentBlock::OperatorNotice { body, .. } => {
+                            if !content_parts.is_empty() {
+                                items.push(serde_json::json!({
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": std::mem::take(&mut content_parts)
+                                }));
+                            }
+                            items.push(serde_json::json!({
+                                "type": "message",
+                                "role": "developer",
+                                "content": [{"type": "input_text", "text": body}]
                             }));
                         }
                         ContentBlock::OpenAICompaction { encrypted_content } => {
@@ -903,6 +927,31 @@ mod tests {
     /// the bug was that this whole request got rejected, so the guarantee is
     /// worth asserting on the real tool payload, including after the strict
     /// pass runs on top.
+    #[test]
+    fn an_operator_notice_is_a_developer_message_in_place() {
+        let notice = ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::OperatorNotice {
+                text: "<system-reminder>\nnote\n</system-reminder>".to_string(),
+                body: "note".to_string(),
+                tool_changes: Vec::new(),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let input = build_responses_input(&[ChatMessage::user("go"), notice]);
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(
+            input[1],
+            serde_json::json!({
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "note"}]
+            })
+        );
+    }
+
     #[test]
     fn build_tools_strips_unique_items_from_the_request_payload() {
         // The reporter's MCP schema (@tubealfred/mcp youtube_*_batch).

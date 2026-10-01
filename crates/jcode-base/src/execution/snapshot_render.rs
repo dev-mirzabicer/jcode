@@ -97,7 +97,7 @@ impl SnapshotRead {
             let mut blocks = Vec::new();
             for block in &message.content {
                 blocks.push(match block {
-                    ContentBlock::Text{text,..}=>serde_json::json!({"type":"text","text":text}),
+                    ContentBlock::Text{text,..} | ContentBlock::OperatorNotice {text,..}=>serde_json::json!({"type":"text","text":text}),
                     ContentBlock::ToolUse{id,name,input,..}=>{
                         let source_id=&self.manifest.messages[projected.start-1].id;
                         let tool=self.manifest.tools.iter().find(|tool|tool.message_id==*source_id && tool.provider_id==*id);

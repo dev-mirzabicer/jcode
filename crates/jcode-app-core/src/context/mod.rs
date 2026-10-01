@@ -26,6 +26,8 @@ pub use curator::*;
 pub use draft::*;
 pub use history::*;
 pub use preflight::*;
+mod operator_notice;
+pub use operator_notice::with_operator_notices;
 pub use reasoning_invalidation::{
     ContextRequestPrefix, ProviderReportedReasoning, ReasoningInvalidationOutcome,
     RequestPrefixSource, describe_reasoning_invalidation, reasoning_reconciliation_needed,

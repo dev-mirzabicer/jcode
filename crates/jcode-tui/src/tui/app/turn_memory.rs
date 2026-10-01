@@ -170,7 +170,7 @@ impl App {
             transcript.push_str(&format!("**{}:**\n", role));
             for block in &msg.content {
                 match block {
-                    ContentBlock::Text { text, .. } => {
+                    ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                         transcript.push_str(text);
                         transcript.push('\n');
                     }

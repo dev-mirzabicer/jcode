@@ -61,7 +61,7 @@ impl ContentBlockMemoryStats {
     fn record_block(&mut self, block: &ContentBlock) {
         self.block_count += 1;
         match block {
-            ContentBlock::Text { text, .. } => {
+            ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                 self.text_blocks += 1;
                 self.text_bytes += text.len();
                 self.record_bytes(text.len());

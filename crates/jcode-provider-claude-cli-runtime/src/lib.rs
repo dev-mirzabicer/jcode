@@ -126,7 +126,9 @@ impl ClaudeProvider {
             let mut parts = Vec::new();
             for block in &msg.content {
                 match block {
-                    ContentBlock::Text { text, .. } => parts.push(text.clone()),
+                    ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
+                        parts.push(text.clone())
+                    }
                     ContentBlock::ToolResult { content, .. } => parts.push(content.clone()),
                     ContentBlock::ToolUse { .. } => {}
                     ContentBlock::Reasoning { .. }

@@ -18,6 +18,15 @@ fn saturating_sum(values: impl IntoIterator<Item = usize>) -> usize {
         .fold(0usize, |total, value| total.saturating_add(value))
 }
 
+/// Serialized size of the tool definitions a notice announces.
+fn tool_change_chars(changes: &[jcode_message_types::ToolSetChange]) -> usize {
+    saturating_sum(changes.iter().map(|change| {
+        serde_json::to_string(change)
+            .map(|text| text.len())
+            .unwrap_or(0)
+    }))
+}
+
 /// Estimate provider-relevant character-equivalents for one block.
 ///
 /// This deliberately excludes history-only reasoning traces and bounds images
@@ -27,6 +36,9 @@ fn saturating_sum(values: impl IntoIterator<Item = usize>) -> usize {
 pub fn estimate_content_block_chars(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => text.len(),
+        ContentBlock::OperatorNotice {
+            text, tool_changes, ..
+        } => text.len().saturating_add(tool_change_chars(tool_changes)),
         ContentBlock::ReasoningTrace { .. } => 0,
         // Thinking stored without a binding record is never replayed.
         ContentBlock::AnthropicThinking { binding: None, .. } => 0,
@@ -98,6 +110,9 @@ pub fn estimate_content_block_chars(block: &ContentBlock) -> usize {
 pub fn estimate_content_block_tokens(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => text_tokens(text),
+        ContentBlock::OperatorNotice {
+            text, tool_changes, ..
+        } => text_tokens(text).saturating_add(tool_change_chars(tool_changes).div_ceil(4)),
         ContentBlock::ReasoningTrace { .. } => 0,
         // Thinking stored without a binding record is never replayed.
         ContentBlock::AnthropicThinking { binding: None, .. } => 0,

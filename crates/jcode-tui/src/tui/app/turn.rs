@@ -101,6 +101,12 @@ impl App {
                 .map_err(|error| error.to_string())?,
             None => self.projected_messages_for_provider_send()?,
         };
+        // The same request form the agent loops send (INT-01/WP-06 D17).
+        let provider_messages = crate::context::with_operator_notices(
+            self.provider.as_ref(),
+            &self.session.messages,
+            provider_messages,
+        );
         if let Some(pending) = self.pending_composer_input.as_mut() {
             pending.request_payload_pressure =
                 Some(crate::context::request_payload_pressure(&provider_messages));

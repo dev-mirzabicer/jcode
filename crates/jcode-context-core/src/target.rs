@@ -347,7 +347,9 @@ impl<'a> ContextTargetIndex<'a> {
 
 pub fn context_block_kind(block: &ContentBlock) -> StoredContextBlockKind {
     match block {
-        ContentBlock::Text { .. } => StoredContextBlockKind::Text,
+        ContentBlock::Text { .. } | ContentBlock::OperatorNotice { .. } => {
+            StoredContextBlockKind::Text
+        }
         ContentBlock::Reasoning { .. } => StoredContextBlockKind::Reasoning,
         ContentBlock::ReasoningTrace { .. } => StoredContextBlockKind::ReasoningTrace,
         // Thinking stored without a binding record is never replayed, so it is

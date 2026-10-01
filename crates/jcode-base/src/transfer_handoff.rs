@@ -80,7 +80,7 @@ fn render_conversation(messages: &[Message]) -> String {
         rendered.push_str(":**\n");
         for block in &message.content {
             match block {
-                ContentBlock::Text { text, .. } => {
+                ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                     rendered.push_str(text);
                     rendered.push('\n');
                 }

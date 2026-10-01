@@ -48,7 +48,7 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
 
         for block in &message.content {
             match block {
-                ContentBlock::Text { text, .. } => {
+                ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                     out.push_str(text);
                     out.push('\n');
                 }
@@ -124,7 +124,9 @@ fn validate_projected_messages(
 
     let has_provider_visible_content = messages.iter().any(|message| {
         message.content.iter().any(|block| match block {
-            ContentBlock::Text { text, .. } => !text.is_empty(),
+            ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
+                !text.is_empty()
+            }
             ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. }
             | ContentBlock::Image { .. } => true,

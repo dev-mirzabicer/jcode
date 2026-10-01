@@ -2639,6 +2639,7 @@ impl Session {
             for block in &mut msg.content {
                 match block {
                     ContentBlock::Text { text, .. }
+                    | ContentBlock::OperatorNotice { text, .. }
                     | ContentBlock::Reasoning { text }
                     | ContentBlock::ReasoningTrace { text } => {
                         *text = crate::message::redact_secrets(text);

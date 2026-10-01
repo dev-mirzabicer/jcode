@@ -126,7 +126,8 @@ pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> 
         transcript.push_str(&format!("**{}:**\n", role));
         for block in &msg.content {
             match block {
-                crate::message::ContentBlock::Text { text, .. } => {
+                crate::message::ContentBlock::Text { text, .. }
+                | crate::message::ContentBlock::OperatorNotice { text, .. } => {
                     transcript.push_str(text);
                     transcript.push('\n');
                 }

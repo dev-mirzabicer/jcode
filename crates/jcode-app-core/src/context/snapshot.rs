@@ -352,6 +352,7 @@ pub fn build_context_message_detail(
 
     match block {
         ContentBlock::Text { text: value, .. }
+        | ContentBlock::OperatorNotice { text: value, .. }
         | ContentBlock::Reasoning { text: value }
         | ContentBlock::ReasoningTrace { text: value } => text = value.clone(),
         ContentBlock::AnthropicThinking {
@@ -536,7 +537,9 @@ fn bounded_message_preview(message: &StoredMessage) -> String {
         .content
         .iter()
         .find_map(|block| match block {
-            ContentBlock::Text { text, .. } => non_empty(text).map(ToOwned::to_owned),
+            ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
+                non_empty(text).map(ToOwned::to_owned)
+            }
             ContentBlock::ToolUse { name, .. } => Some(format!("[tool: {name}]")),
             ContentBlock::ToolResult { content, .. } => {
                 non_empty(content).map(|content| format!("[result: {content}]"))

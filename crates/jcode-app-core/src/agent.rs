@@ -1057,7 +1057,11 @@ impl Agent {
             user_count,
             assistant_count,
         ));
-        Ok(messages)
+        Ok(crate::context::with_operator_notices(
+            self.provider.as_ref(),
+            &self.session.messages,
+            messages,
+        ))
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
@@ -1436,7 +1440,7 @@ impl Agent {
             md.push_str(&format!("### {}\n\n", role_label));
             for block in &msg.content {
                 match block {
-                    ContentBlock::Text { text, .. } => {
+                    ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                         md.push_str(text);
                         md.push_str("\n\n");
                     }

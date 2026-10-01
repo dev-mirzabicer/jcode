@@ -311,7 +311,8 @@ pub fn build_contents_with_signature_policy(
             let mut parts = Vec::new();
             for block in &message.content {
                 match block {
-                    ContentBlock::Text { text, .. } => {
+                    // No operator channel here: the notice is user text.
+                    ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                         parts.push(GeminiPart {
                             text: Some(text.clone()),
                             ..Default::default()

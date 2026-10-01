@@ -556,7 +556,8 @@ fn render_messages_and_images_with_compacted_history_inner(
 
         for block in &msg.content {
             match block {
-                ContentBlock::Text { text: t, .. } => {
+                ContentBlock::Text { text: t, .. }
+                | ContentBlock::OperatorNotice { text: t, .. } => {
                     // The `[Attached image associated with the preceding tool
                     // result: ...]` block is synthetic metadata jcode injects so
                     // the model can associate a label with the image. It lives in

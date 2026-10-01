@@ -686,6 +686,14 @@ impl Provider for OpenAIProvider {
         Some(jcode_provider_core::ContextReasoningBlockKind::OpenAiReasoning)
     }
 
+    /// Responses routes render operator notices as `developer` messages. The
+    /// ChatGPT web conversation route has no such channel and keeps the
+    /// stored user text.
+    fn renders_operator_notices(&self) -> bool {
+        jcode_provider_openai::request::OPENAI_OPERATOR_MESSAGES
+            && !is_chatgpt_web_model(&self.model())
+    }
+
     fn on_auth_changed(&self) {
         self.reload_credentials_now();
     }

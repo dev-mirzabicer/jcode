@@ -453,6 +453,7 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
                 changed |= cache_control.is_some();
                 text.clone()
             }
+            ContentBlock::OperatorNotice { text, .. } => text.clone(),
             // Provider-native reasoning cannot safely be replayed under a
             // different provider and is not required to continue the visible
             // conversation. Dropping it also avoids importing large hidden

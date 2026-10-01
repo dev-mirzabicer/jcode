@@ -2,7 +2,9 @@ use jcode_message_types::{
     AnthropicThinkingBinding, ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT,
     ToolDefinition, sanitize_tool_id,
 };
-use jcode_provider_core::{ANTHROPIC_TOOL_NAME_POLICY, ContextRequestBuilderValidation};
+use jcode_provider_core::{
+    ANTHROPIC_TOOL_NAME_POLICY, AnthropicConversationCaps, ContextRequestBuilderValidation,
+};
 use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
@@ -25,7 +27,32 @@ pub use cache_breakpoints::{
     INTERMEDIATE_AFTER_POSITIONS, LOOKBACK_POSITIONS, place_cache_breakpoints,
 };
 
+/// Format messages for a model with no mid-conversation operator channel:
+/// every operator notice is user text, exactly as it was stored.
 pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
+    format_messages_for(messages, AnthropicConversationCaps::default())
+}
+
+/// Format messages for a model with the given mid-conversation capabilities.
+///
+/// An operator notice (`ContentBlock::OperatorNotice`, INT-01/WP-06 D17)
+/// becomes a `role: "system"` message carrying its body when the model
+/// accepts one and the documented placement holds: it follows a user
+/// message, and it is the last message or an assistant message follows it
+/// (a run of notices counts as one). Anywhere else it is the stored user
+/// text, merged with the user content around it. The decision is a pure
+/// function of the messages, so a rendering changes only when a notice that
+/// never got a reply is followed by a new user message, which invalidates no
+/// reasoning: nothing was produced after the notice.
+///
+/// Tool changes a notice announces go into its system message when the model
+/// accepts them there. When the notice is user text, they move to a system
+/// message of their own before the next assistant message, the first position
+/// where the placement rules hold.
+pub fn format_messages_for(
+    messages: &[Message],
+    caps: AnthropicConversationCaps,
+) -> Vec<ApiMessage> {
     use std::collections::HashSet;
 
     // Pre-pass: drop duplicate tool_results for the same tool_use_id.
@@ -71,11 +98,50 @@ pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
     // that have dangling tool_uses
     let mut result: Vec<ApiMessage> = Vec::new();
 
+    // Operator notice entries of `result`, by index, with their user form.
+    let mut notices: std::collections::HashMap<usize, OperatorForms> =
+        std::collections::HashMap::new();
     for msg in messages {
         let role = match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
+
+        if let (
+            Role::User,
+            [
+                ContentBlock::OperatorNotice {
+                    text,
+                    body,
+                    tool_changes,
+                },
+            ],
+        ) = (&msg.role, msg.content.as_slice())
+            && caps.system_messages
+        {
+            let changes = if caps.inline_tool_changes {
+                tool_changes.iter().map(tool_change_block).collect()
+            } else {
+                Vec::new()
+            };
+            notices.insert(
+                result.len(),
+                OperatorForms {
+                    user_text: text.clone(),
+                    changes: changes.clone(),
+                },
+            );
+            let mut content = vec![ApiContentBlock::Text {
+                text: body.clone(),
+                cache_control: None,
+            }];
+            content.extend(changes);
+            result.push(ApiMessage {
+                role: "system".to_string(),
+                content,
+            });
+            continue;
+        }
 
         let content = format_content_blocks(&msg.content);
 
@@ -111,6 +177,8 @@ pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
             }
         }
     }
+
+    let result = place_operator_messages(result, &notices);
 
     // Third pass: merge consecutive messages of the same role
     // Anthropic API requires strictly alternating user/assistant messages
@@ -236,6 +304,93 @@ pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
     }
 
     merged
+}
+
+/// The user form of an operator notice rendered as a system message, and
+/// the tool-change blocks it carries.
+struct OperatorForms {
+    user_text: String,
+    changes: Vec<ApiContentBlock>,
+}
+
+/// Keep each run of system messages where the placement rules hold; turn the
+/// others into user text, moving their tool changes to the next valid
+/// position (before the next assistant message, or the end).
+fn place_operator_messages(
+    entries: Vec<ApiMessage>,
+    notices: &std::collections::HashMap<usize, OperatorForms>,
+) -> Vec<ApiMessage> {
+    if notices.is_empty() {
+        return entries;
+    }
+    let mut placed: Vec<ApiMessage> = Vec::with_capacity(entries.len());
+    let mut pending: Vec<ApiContentBlock> = Vec::new();
+    let mut index = 0;
+    while index < entries.len() {
+        if entries[index].role != "system" {
+            if entries[index].role == "assistant" && !pending.is_empty() {
+                placed.push(ApiMessage {
+                    role: "system".to_string(),
+                    content: std::mem::take(&mut pending),
+                });
+            }
+            placed.push(entries[index].clone());
+            index += 1;
+            continue;
+        }
+        let end = entries[index..]
+            .iter()
+            .position(|entry| entry.role != "system")
+            .map_or(entries.len(), |offset| index + offset);
+        let follows_user = placed.last().is_some_and(|last| last.role == "user");
+        let before_assistant = entries.get(end).is_none_or(|next| next.role == "assistant");
+        if follows_user && before_assistant {
+            placed.extend(entries[index..end].iter().cloned());
+        } else {
+            for position in index..end {
+                let forms = &notices[&position];
+                placed.push(ApiMessage {
+                    role: "user".to_string(),
+                    content: vec![ApiContentBlock::Text {
+                        text: forms.user_text.clone(),
+                        cache_control: None,
+                    }],
+                });
+                pending.extend(forms.changes.iter().cloned());
+            }
+        }
+        index = end;
+    }
+    if !pending.is_empty() {
+        placed.push(ApiMessage {
+            role: "system".to_string(),
+            content: pending,
+        });
+    }
+    placed
+}
+
+/// A tool-set change as a mid-conversation tool-change block: additions and
+/// redefinitions by value (`inline-tools-2026-09-15`), removals by name.
+fn tool_change_block(change: &jcode_message_types::ToolSetChange) -> ApiContentBlock {
+    use jcode_message_types::ToolSetChange;
+    match change {
+        ToolSetChange::Added { definition } | ToolSetChange::Redefined { definition } => {
+            ApiContentBlock::ToolAddition {
+                tool: ApiToolChangeTarget::ToolDefinition {
+                    definition: format_tools(std::slice::from_ref(definition))
+                        .pop()
+                        .expect("one definition formats to one tool"),
+                },
+                cache_control: None,
+            }
+        }
+        ToolSetChange::Removed { name } => ApiContentBlock::ToolRemoval {
+            tool: ApiToolChangeTarget::ToolReference {
+                name: ANTHROPIC_TOOL_NAME_POLICY.wire_name(name).to_string(),
+            },
+        },
+    }
 }
 
 /// Returns true when a tool_result body is one of the synthetic placeholders
@@ -368,6 +523,12 @@ pub fn format_content_blocks(blocks: &[ContentBlock]) -> Vec<ApiContentBlock> {
                 });
             }
             ContentBlock::AnthropicThinking { binding: None, .. } => {}
+            // Operator notices outside a standalone notice message are user
+            // text, exactly as stored.
+            ContentBlock::OperatorNotice { text, .. } => result.push(ApiContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            }),
             ContentBlock::AnthropicRedactedThinking { data, binding } => {
                 result.push(ApiContentBlock::RedactedThinking {
                     data: data.clone(),
@@ -957,3 +1118,7 @@ mod wedge_fixture_check;
 #[cfg(test)]
 #[path = "context_validation_tests.rs"]
 mod context_validation_tests;
+
+#[cfg(test)]
+#[path = "operator_messages_tests.rs"]
+mod operator_messages_tests;

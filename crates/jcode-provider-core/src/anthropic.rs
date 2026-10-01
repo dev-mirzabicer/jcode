@@ -508,6 +508,47 @@ pub fn anthropic_reasoning_binding(model: &str) -> ReasoningBinding {
     }
 }
 
+/// Mid-conversation features a Claude model accepts (INT-01/WP-06, D15 and
+/// D17). Policy as data: each entry cites its evidence, and an unknown model
+/// gets neither feature until a probe shows it (`jcode provider-doctor claude
+/// --contract claude-oauth-boundaries`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnthropicConversationCaps {
+    /// A `role: "system"` message inside `messages`: jcode's operator channel.
+    pub system_messages: bool,
+    /// `tool_addition` (by value, beta `inline-tools-2026-09-15`) and
+    /// `tool_removal` blocks in such a message.
+    pub inline_tool_changes: bool,
+}
+
+/// Mid-conversation capabilities for `model`.
+///
+/// Measured on Claude OAuth on 2026-10-01 (probes G6.1 and G6.2): Opus 5.5,
+/// Sonnet 5.5 and Opus 5 accept both. Sonnet 5 accepted `role: "system"` but
+/// rejected tool changes ("tool_addition/tool_removal is not supported on
+/// this model"); Anthropic's documentation lists Sonnet 5 as unsupported for
+/// system messages, so jcode follows the documentation there and keeps the
+/// user form. Documented, not measured: Opus 4.8, Fable 5 and 5.1, Mythos 5
+/// and 5.1 support both. Every other model, including future generations,
+/// supports neither until measured.
+pub fn anthropic_conversation_caps(model: &str) -> AnthropicConversationCaps {
+    const BOTH: AnthropicConversationCaps = AnthropicConversationCaps {
+        system_messages: true,
+        inline_tool_changes: true,
+    };
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude") {
+        return AnthropicConversationCaps::default();
+    }
+    let (family, version) = parse_claude_family_version(&base);
+    match (family, version) {
+        (Some("opus"), Some((5, 5) | (5, 0) | (4, 8)))
+        | (Some("sonnet"), Some((5, 5)))
+        | (Some("fable" | "mythos"), Some((5, 0) | (5, 1))) => BOTH,
+        _ => AnthropicConversationCaps::default(),
+    }
+}
+
 /// Effort and thinking-shape capabilities, without the binding policy.
 fn anthropic_effort_caps(model: &str) -> AnthropicReasoningCaps {
     let base = normalized_claude_caps_key(model);
@@ -584,6 +625,41 @@ pub fn anthropic_stainless_os() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversation_caps_follow_the_measured_and_documented_models() {
+        use super::anthropic_conversation_caps as caps;
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-mythos-5-1",
+            "claude-opus-5-5[1m]",
+        ] {
+            assert!(
+                caps(model).system_messages && caps(model).inline_tool_changes,
+                "{model}"
+            );
+        }
+        for model in [
+            "claude-sonnet-5",
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "claude-opus-6",
+            "claude-sonnet-6-0",
+            "gpt-5.6-sol",
+        ] {
+            assert_eq!(
+                caps(model),
+                super::AnthropicConversationCaps::default(),
+                "{model}"
+            );
+        }
+    }
+
     use super::*;
     use crate::ALL_CLAUDE_MODELS;
 

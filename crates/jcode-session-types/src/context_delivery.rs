@@ -22,12 +22,43 @@ pub enum ContextDeliveryChannel {
     BatchNudge,
 }
 
-/// Persisted identity of one delivery: its channel and the fingerprint of the
-/// exact delivered text.
+impl ContextDeliveryChannel {
+    /// The authority a delivery on this channel asks for. Harness reminders
+    /// and nudges are operator guidance (INT-01/WP-06, D17).
+    pub fn preferred_authority(self) -> DeliveryAuthority {
+        match self {
+            Self::TurnReminder | Self::BatchNudge => DeliveryAuthority::Operator,
+        }
+    }
+}
+
+/// Whom the model should read a delivery as coming from.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryAuthority {
+    /// User-role text. Every delivery stored before INT-01/WP-06 has it, so
+    /// stored history never changes how it renders.
+    #[default]
+    User,
+    /// Operator authority: a native operator message where the provider and
+    /// model support one at that position, user-role text otherwise.
+    Operator,
+}
+
+impl DeliveryAuthority {
+    fn is_user(&self) -> bool {
+        *self == Self::User
+    }
+}
+
+/// Persisted identity of one delivery: its channel, the fingerprint of the
+/// exact delivered text, and the authority it asks for.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredContextDelivery {
     pub channel: ContextDeliveryChannel,
     pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "DeliveryAuthority::is_user")]
+    pub authority: DeliveryAuthority,
 }
 
 const OPEN: &str = "<system-reminder>\n";
@@ -74,6 +105,7 @@ pub fn context_delivery_message(
             StoredContextDelivery {
                 channel,
                 fingerprint,
+                authority: channel.preferred_authority(),
             },
         )),
     })
@@ -99,6 +131,31 @@ impl StoredMessage {
         let body = text.strip_prefix(OPEN)?.strip_suffix(CLOSE)?;
         Some((delivery.channel, body))
     }
+
+    /// A valid delivery that asks for operator authority: its stored text and
+    /// the text without the `<system-reminder>` wrapper.
+    pub fn operator_delivery(&self) -> Option<OperatorDelivery<'_>> {
+        let (_, body) = self.context_delivery()?;
+        let StoredMessageOrigin::ContextDelivery(delivery) = self.origin.as_ref()? else {
+            return None;
+        };
+        if delivery.authority != DeliveryAuthority::Operator {
+            return None;
+        }
+        let [ContentBlock::Text { text, .. }] = self.content.as_slice() else {
+            return None;
+        };
+        Some(OperatorDelivery { text, body })
+    }
+}
+
+/// A stored delivery that asks for operator authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorDelivery<'a> {
+    /// The stored text, wrapper included.
+    pub text: &'a str,
+    /// The text without the wrapper.
+    pub body: &'a str,
 }
 
 #[cfg(test)]
@@ -143,6 +200,31 @@ mod tests {
             serde_json::to_value(decoded.to_message().content).unwrap(),
             serde_json::to_value(&message.content).unwrap()
         );
+    }
+
+    #[test]
+    fn new_deliveries_ask_for_operator_authority_and_old_ones_keep_the_user_form() {
+        let message = delivered(ContextDeliveryChannel::TurnReminder, "synthetic reminder");
+        let operator = message.operator_delivery().expect("operator preference");
+        assert_eq!(
+            operator.text,
+            "<system-reminder>\n# System Reminder\n\nsynthetic reminder\n</system-reminder>"
+        );
+        assert_eq!(operator.body, "# System Reminder\n\nsynthetic reminder");
+        // The preference is persisted with the delivery.
+        let stored = serde_json::to_value(&message).unwrap();
+        assert_eq!(stored["origin"]["parts"]["authority"], "operator");
+        let decoded: StoredMessage = serde_json::from_value(stored.clone()).unwrap();
+        assert!(decoded.operator_delivery().is_some());
+        // A delivery stored before the preference existed has none.
+        let mut old = stored;
+        old["origin"]["parts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("authority");
+        let decoded: StoredMessage = serde_json::from_value(old).unwrap();
+        assert!(decoded.context_delivery().is_some());
+        assert!(decoded.operator_delivery().is_none());
     }
 
     #[test]

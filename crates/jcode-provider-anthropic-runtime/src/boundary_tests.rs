@@ -164,10 +164,12 @@ impl Drop for EnvGuard {
 /// home so no real credential or catalog is read. Hold the returned guards.
 struct TestProvider {
     provider: AnthropicProvider,
+    /// Fields drop in order: the environment is restored, then the home
+    /// removed, and only then the lock released.
     _guards: (
-        std::sync::MutexGuard<'static, ()>,
-        tempfile::TempDir,
         Vec<EnvGuard>,
+        tempfile::TempDir,
+        std::sync::MutexGuard<'static, ()>,
     ),
 }
 
@@ -185,7 +187,7 @@ fn provider_for(fixture: &Fixture, model: &str) -> TestProvider {
     *provider.reasoning_effort.write().unwrap() = None;
     TestProvider {
         provider,
-        _guards: (lock, home, guards),
+        _guards: (guards, home, lock),
     }
 }
 
@@ -921,5 +923,7 @@ async fn a_credential_mode_change_decides_the_next_request_route() {
         .set_credential_mode(AnthropicCredentialMode::OAuth)
         .unwrap();
     assert_eq!(invalid(&provider), 2);
-    drop(lock);
+    // `_guards` drops before `lock` and `home`: the environment is restored
+    // while the lock is still held.
+    let _ = (&home, &lock);
 }

@@ -15,7 +15,7 @@ pub struct ToolCall {
 }
 
 /// Tool definition advertised to model providers.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     /// Prompt-visible text sent to the model by provider adapters.
@@ -248,6 +248,44 @@ pub enum ContentBlock {
     OpenAICompaction {
         encrypted_content: String,
     },
+    /// Harness context the model should read with operator authority
+    /// (INT-01/WP-06, D17). It exists only in provider-facing messages: a
+    /// stored delivery whose origin prefers operator authority projects to
+    /// it, and the stored text never changes. A provider renders it as a
+    /// native operator message where its model allows one there, and
+    /// otherwise as user text with exactly `text`.
+    OperatorNotice {
+        /// The delivery's stored text, `<system-reminder>` wrapper included.
+        text: String,
+        /// The same text without the wrapper, for an operator message.
+        body: String,
+        /// Tool-set changes the notice announces, in order (D15).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_changes: Vec<ToolSetChange>,
+    },
+}
+
+/// One change to a session's advertised tool set, announced by a notice
+/// (INT-01/WP-06, D15). Definitions are provider-neutral.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolSetChange {
+    /// A tool joined the set.
+    Added { definition: ToolDefinition },
+    /// A tool already in the set has a new description or schema.
+    Redefined { definition: ToolDefinition },
+    /// A tool left the set. Its definition stays where a provider keeps
+    /// first-sent tools; calling it reports that it is not available.
+    Removed { name: String },
+}
+
+impl ToolSetChange {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Added { definition } | Self::Redefined { definition } => &definition.name,
+            Self::Removed { name } => name,
+        }
+    }
 }
 
 impl ContentBlock {

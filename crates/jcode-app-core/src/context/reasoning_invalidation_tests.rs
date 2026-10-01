@@ -32,9 +32,7 @@ use jcode_context_core::{
     resolve_reasoning_suppression_keep_latest,
 };
 use jcode_message_types::AnthropicThinkingBinding;
-use jcode_provider_anthropic::binding::{
-    analyze_request, blocks_to_suppress, stored_thinking_fingerprint,
-};
+use jcode_provider_anthropic::binding::{analyze_request, stored_thinking_fingerprint};
 use jcode_provider_anthropic::{
     ApiRequest, ApiToolChoice, build_system_param, format_messages, format_tools,
 };
@@ -267,6 +265,8 @@ impl Conversation {
     /// stamp them.
     fn projected(&self) -> Vec<Message> {
         super::reasoning_invalidation::request_messages(
+            &self.provider,
+            &self.session.messages,
             project_context(&self.session.messages, &self.session.context_view)
                 .expect("projection")
                 .messages,
@@ -1413,6 +1413,8 @@ fn emergency_recovery_stages_the_same_rule_inside_its_authorization() {
     let mut indices = HashMap::new();
     for signature in ["a", "b", "c"] {
         let projected = super::reasoning_invalidation::request_messages(
+            &BindingProvider { binds: true },
+            agent.messages(),
             project_context(agent.messages(), agent.context_view_state())
                 .unwrap()
                 .messages,

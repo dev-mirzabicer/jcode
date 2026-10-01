@@ -6,6 +6,13 @@
 //! transition), a reload mid-turn and two reload resumes. Each recorded
 //! request is then formatted exactly as the Anthropic and OpenAI runtimes
 //! format it, and consecutive requests are compared.
+//!
+//! INT-01/WP-06 extends it to operator-role deliveries (D17): the recording
+//! runtime renders operator notices, and every request is checked on the
+//! Anthropic builder with and without mid-conversation system messages and on
+//! the OpenAI builder with developer messages. A request that fails after a
+//! delivery and is followed by a new prompt is the one place a rendering may
+//! change, and only after that request's last reply.
 
 use super::*;
 use crate::provider::EventStream;
@@ -34,6 +41,8 @@ struct RecorderState {
     /// is in flight.
     inject_during: Option<(usize, jcode_session_types::PrimaryInputEnvelope)>,
     next_tool_id: usize,
+    /// Requests that failed before any reply.
+    failed: Vec<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -96,7 +105,10 @@ impl RecordingProvider {
                     },
                 ]
             }
-            Reply::Fail => anyhow::bail!("synthetic process exit before the provider replied"),
+            Reply::Fail => {
+                state.failed.push(index);
+                anyhow::bail!("synthetic process exit before the provider replied")
+            }
         };
         Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
     }
@@ -120,6 +132,10 @@ impl Provider for RecordingProvider {
 
     fn model(&self) -> String {
         "wp03-recording-model".into()
+    }
+
+    fn renders_operator_notices(&self) -> bool {
+        true
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -147,7 +163,10 @@ fn strip_cache_control(value: &mut Value) {
     }
 }
 
-fn anthropic_view(request: &Recorded) -> View {
+fn anthropic_view(
+    request: &Recorded,
+    caps: jcode_provider_core::AnthropicConversationCaps,
+) -> View {
     let system = jcode_provider_anthropic::build_system_param(&request.system, true);
     let mut system = serde_json::to_value(system).unwrap();
     let mut tools =
@@ -155,7 +174,7 @@ fn anthropic_view(request: &Recorded) -> View {
     strip_cache_control(&mut system);
     strip_cache_control(&mut tools);
     let mut blocks = Vec::new();
-    for message in jcode_provider_anthropic::format_messages(&request.messages) {
+    for message in jcode_provider_anthropic::format_messages_for(&request.messages, caps) {
         let mut message = serde_json::to_value(message).unwrap();
         strip_cache_control(&mut message);
         let role = message["role"].clone();
@@ -179,8 +198,15 @@ fn openai_view(request: &Recorded) -> View {
 }
 
 /// Every consecutive pair must keep system and tools byte-identical (except
-/// across the declared transitions) and extend the block sequence.
-fn append_only_failures(label: &str, views: &[View], transitions: &[usize]) -> Vec<String> {
+/// across the declared transitions) and extend the block sequence. After a
+/// request that failed before any reply, the blocks after its last assistant
+/// block may change: nothing was produced after them.
+fn append_only_failures(
+    label: &str,
+    views: &[View],
+    transitions: &[usize],
+    unanswered: &[usize],
+) -> Vec<String> {
     let mut failures = Vec::new();
     for (index, pair) in views.windows(2).enumerate() {
         let current = index + 1;
@@ -196,12 +222,19 @@ fn append_only_failures(label: &str, views: &[View], transitions: &[usize]) -> V
             .iter()
             .zip(&after.blocks)
             .position(|(left, right)| left != right);
-        if let Some(position) = first_difference {
+        let answered_until = before
+            .blocks
+            .iter()
+            .rposition(|block| block["role"] == "assistant" || block["type"] == "function_call");
+        let unanswered_suffix = |position: usize| {
+            unanswered.contains(&index) && answered_until.is_none_or(|last| position > last)
+        };
+        if let Some(position) = first_difference.filter(|position| !unanswered_suffix(*position)) {
             failures.push(format!(
                 "{label}: request {current} rewrote history block {position} of {}",
                 before.blocks.len()
             ));
-        } else if after.blocks.len() < before.blocks.len() {
+        } else if first_difference.is_none() && after.blocks.len() < before.blocks.len() {
             failures.push(format!(
                 "{label}: request {current} removed {} trailing history block(s)",
                 before.blocks.len() - after.blocks.len()
@@ -305,6 +338,16 @@ async fn scripted_session_is_append_only_on_both_production_builders() -> Result
     );
     provider.script(&[Reply::Read, Reply::Text("five")]);
     streaming_turn(&mut agent, "fifth prompt", Some("REMINDER_BETA")).await?;
+    // A request fails right after a delivery; the next prompt follows the
+    // unanswered delivery (INT-01/WP-06 D17 rendering flip).
+    provider.script(&[Reply::Fail]);
+    assert!(
+        streaming_turn(&mut agent, "unanswered prompt", Some("REMINDER_DELTA"))
+            .await
+            .is_err()
+    );
+    provider.script(&[Reply::Text("recovered")]);
+    streaming_turn(&mut agent, "recovery prompt", None).await?;
     // The process dies mid-turn after a tool result was persisted.
     provider.script(&[Reply::Read, Reply::Fail]);
     assert!(
@@ -343,10 +386,58 @@ async fn scripted_session_is_append_only_on_both_production_builders() -> Result
     );
 
     let mut failures = Vec::new();
-    let anthropic: Vec<View> = requests.iter().map(anthropic_view).collect();
+    let operator_caps = jcode_provider_core::anthropic_conversation_caps("claude-opus-5-5");
+    let anthropic: Vec<View> = requests
+        .iter()
+        .map(|request| anthropic_view(request, operator_caps))
+        .collect();
+    let anthropic_user_form: Vec<View> = requests
+        .iter()
+        .map(|request| anthropic_view(request, Default::default()))
+        .collect();
     let openai: Vec<View> = requests.iter().map(openai_view).collect();
-    failures.extend(append_only_failures("anthropic", &anthropic, &transitions));
-    failures.extend(append_only_failures("openai", &openai, &transitions));
+    let unanswered = state.failed.clone();
+    failures.extend(append_only_failures(
+        "anthropic",
+        &anthropic,
+        &transitions,
+        &unanswered,
+    ));
+    failures.extend(append_only_failures(
+        "anthropic (user form)",
+        &anthropic_user_form,
+        &transitions,
+        &[],
+    ));
+    failures.extend(append_only_failures("openai", &openai, &transitions, &[]));
+
+    // Operator deliveries really reached each builder in its native form.
+    let notices = requests
+        .iter()
+        .flat_map(|request| &request.messages)
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, ContentBlock::OperatorNotice { .. }))
+        .count();
+    let last = |views: &[View]| views.last().unwrap().blocks.clone();
+    let system_blocks = last(&anthropic)
+        .iter()
+        .filter(|block| block["role"] == "system")
+        .count();
+    let developer_items = last(&openai)
+        .iter()
+        .filter(|item| item["role"] == "developer")
+        .count();
+    if notices == 0 || system_blocks == 0 || developer_items == 0 {
+        failures.push(format!(
+            "operator deliveries: {notices} notices sent, {system_blocks} system blocks, {developer_items} developer items"
+        ));
+    }
+    if last(&anthropic_user_form)
+        .iter()
+        .any(|block| block["role"] == "system")
+    {
+        failures.push("a model without system messages received one".to_string());
+    }
 
     // The declared transition really changed the static prompt, on both.
     for (label, views) in [("anthropic", &anthropic), ("openai", &openai)] {
@@ -370,6 +461,7 @@ async fn scripted_session_is_append_only_on_both_production_builders() -> Result
         (TurnReminder, "REMINDER_BACKGROUND", 1),
         (TurnReminder, "REMINDER_CONTINUE", 2),
         (TurnReminder, "REMINDER_GAMMA", 1),
+        (TurnReminder, "REMINDER_DELTA", 1),
         (BatchNudge, "", 1),
     ] {
         let delivered = delivered_count(&durable, channel, text);

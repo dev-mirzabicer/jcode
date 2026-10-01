@@ -10,8 +10,8 @@
 //!    no system. Tools render before system, so one marker covers both.
 //! 2. **Newest content.** The last block of the newest message, written for
 //!    the next request.
-//! 3. **Previous newest.** The last block of the user message before the
-//!    latest assistant response, which is where the previous request's newest
+//! 3. **Previous newest.** The last block of the user (or operator system)
+//!    message before the latest assistant response, which is where the previous request's newest
 //!    marker sat. The request reads exactly the entry the previous request
 //!    wrote, however much it appended.
 //! 4. **Lookback.** A breakpoint finds an earlier entry at most
@@ -101,7 +101,13 @@ fn message_breakpoints(messages: &[ApiMessage]) -> Vec<(usize, usize)> {
     let previous = messages
         .iter()
         .rposition(|message| message.role == "assistant")
-        .and_then(|assistant| messages[..assistant].iter().rposition(|m| m.role == "user"))
+        // A user message, or a system message (an operator notice) that
+        // ended the previous request.
+        .and_then(|assistant| {
+            messages[..assistant]
+                .iter()
+                .rposition(|m| m.role != "assistant")
+        })
         .and_then(|user| last_markable(&blocks, |located| located.message <= user));
     if let Some(previous) = previous {
         targets.push(previous);

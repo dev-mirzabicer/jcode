@@ -1134,8 +1134,11 @@ impl AnthropicProvider {
 
     /// Convert our Message type to Anthropic API format
     /// Also repairs dangling tool_uses by injecting synthetic tool_results
-    fn format_messages(&self, messages: &[Message]) -> Vec<ApiMessage> {
-        jcode_provider_anthropic::format_messages(messages)
+    fn format_messages(&self, model: &str, messages: &[Message]) -> Vec<ApiMessage> {
+        jcode_provider_anthropic::format_messages_for(
+            messages,
+            jcode_provider_core::anthropic_conversation_caps(model),
+        )
     }
 
     /// Convert our ContentBlock to Anthropic API format
@@ -1165,7 +1168,7 @@ impl AnthropicProvider {
             model: String::new(),
             max_tokens: 0,
             system,
-            messages: self.format_messages(messages),
+            messages: self.format_messages(model, messages),
             tool_choice: ApiToolChoice::for_tools(&api_tools),
             tools: (!api_tools.is_empty()).then_some(api_tools),
             metadata: is_oauth.then(|| oauth_request_metadata(&self.oauth_session_id)),
@@ -1492,6 +1495,10 @@ impl Provider for AnthropicProvider {
 
     fn reasoning_replay_kind(&self) -> Option<jcode_provider_core::ContextReasoningBlockKind> {
         Some(jcode_provider_core::ContextReasoningBlockKind::AnthropicThinking)
+    }
+
+    fn renders_operator_notices(&self) -> bool {
+        true
     }
 
     fn replayed_reasoning_invalidations(

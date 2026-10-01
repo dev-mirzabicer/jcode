@@ -192,7 +192,7 @@ impl ProviderMessageMemoryStats {
         for block in &message.content {
             self.content_blocks += 1;
             match block {
-                ContentBlock::Text { text, .. } => {
+                ContentBlock::Text { text, .. } | ContentBlock::OperatorNotice { text, .. } => {
                     self.text_bytes += text.len();
                     self.record_bytes(text.len());
                 }

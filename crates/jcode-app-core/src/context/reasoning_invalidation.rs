@@ -527,7 +527,7 @@ fn invalid_blocks(
                 .map(|_| BTreeSet::new()),
         });
     }
-    let request_messages = request_messages(projection.messages);
+    let request_messages = request_messages(provider, messages, projection.messages);
     let Some(verdict) =
         provider.replayed_reasoning_invalidations(&request_messages, &prefix.tools, &prefix.system)
     else {
@@ -559,8 +559,14 @@ fn invalid_blocks(
     })
 }
 
-/// The messages exactly as the request loops send them.
-pub(crate) fn request_messages(projected: Vec<Message>) -> Vec<Message> {
+/// The messages exactly as the request loops send them: operator notices
+/// for a runtime that renders them, then timestamps.
+pub(crate) fn request_messages(
+    provider: &dyn Provider,
+    stored: &[StoredMessage],
+    projected: Vec<Message>,
+) -> Vec<Message> {
+    let projected = super::with_operator_notices(provider, stored, projected);
     if crate::config::config().features.message_timestamps {
         Message::with_timestamps(&projected)
     } else {

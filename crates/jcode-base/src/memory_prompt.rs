@@ -13,7 +13,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> Option<String> {
     match block {
-        crate::message::ContentBlock::Text { text, .. } => {
+        crate::message::ContentBlock::Text { text, .. }
+        | crate::message::ContentBlock::OperatorNotice { text, .. } => {
             let trimmed = text.trim();
             if trimmed.is_empty() {
                 None
@@ -51,7 +52,8 @@ fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> O
 
 fn format_content_block_for_extraction(block: &crate::message::ContentBlock) -> Option<String> {
     match block {
-        crate::message::ContentBlock::Text { text, .. } => {
+        crate::message::ContentBlock::Text { text, .. }
+        | crate::message::ContentBlock::OperatorNotice { text, .. } => {
             let trimmed = text.trim();
             if trimmed.is_empty() {
                 None

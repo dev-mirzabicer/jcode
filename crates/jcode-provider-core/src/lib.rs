@@ -26,11 +26,12 @@ pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
-    AnthropicReasoningCaps, ReasoningBinding, ThinkingOff, anthropic_accepts_sampling_parameters,
-    anthropic_context_mode, anthropic_default_reasoning_effort, anthropic_effectively_1m,
-    anthropic_is_1m_model, anthropic_oauth_beta_headers, anthropic_reasoning_binding,
-    anthropic_reasoning_caps, anthropic_stainless_arch, anthropic_stainless_os,
-    anthropic_strip_1m_suffix, anthropic_thinking_off, anthropic_tool_name_is_valid,
+    AnthropicConversationCaps, AnthropicReasoningCaps, ReasoningBinding, ThinkingOff,
+    anthropic_accepts_sampling_parameters, anthropic_context_mode, anthropic_conversation_caps,
+    anthropic_default_reasoning_effort, anthropic_effectively_1m, anthropic_is_1m_model,
+    anthropic_oauth_beta_headers, anthropic_reasoning_binding, anthropic_reasoning_caps,
+    anthropic_stainless_arch, anthropic_stainless_os, anthropic_strip_1m_suffix,
+    anthropic_thinking_off, anthropic_tool_name_is_valid,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -472,6 +473,16 @@ pub trait Provider: Send + Sync {
         _system: &str,
     ) -> Option<Vec<InvalidReplayedReasoning>> {
         None
+    }
+
+    /// Whether this runtime renders `ContentBlock::OperatorNotice` itself: as
+    /// a native operator message where its model and the position allow one,
+    /// and otherwise as the notice's user text (INT-01/WP-06, D17). Callers
+    /// send operator notices only to a runtime that does; every other runtime
+    /// receives the stored delivery text unchanged. Orchestrators delegate to
+    /// the runtime they would dispatch to.
+    fn renders_operator_notices(&self) -> bool {
+        false
     }
 
     /// This runtime's identity for a stored replayable reasoning block, in the

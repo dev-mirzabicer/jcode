@@ -54,6 +54,7 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
     for block in &message.content {
         match block {
             ContentBlock::Text { text, .. }
+            | ContentBlock::OperatorNotice { text, .. }
             | ContentBlock::Reasoning { text }
             | ContentBlock::ReasoningTrace { text }
             | ContentBlock::AnthropicThinking { thinking: text, .. } => {

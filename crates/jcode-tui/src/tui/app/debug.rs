@@ -348,7 +348,8 @@ impl ProviderMessageMemoryStats {
         for block in &message.content {
             self.content_blocks += 1;
             match block {
-                crate::message::ContentBlock::Text { text, .. } => {
+                crate::message::ContentBlock::Text { text, .. }
+                | crate::message::ContentBlock::OperatorNotice { text, .. } => {
                     self.text_bytes += text.len();
                     self.record_bytes(text.len());
                 }
