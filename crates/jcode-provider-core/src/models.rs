@@ -17,6 +17,9 @@ pub const GPT_6_ASTRA_MODEL: &str = "gpt-6-astra";
 /// GPT-5.6 Sol-specific short/long profile split.
 pub const GPT_6_SOL_MODEL: &str = "gpt-6-sol";
 pub const GPT_6_LUNA_MODEL: &str = "gpt-6-luna";
+/// GPT-6.1 Sol follows the same named GPT-6 policy: a native 1M window with no
+/// separate `[1m]` profile.
+pub const GPT_6_1_SOL_MODEL: &str = "gpt-6.1-sol";
 pub const DEFAULT_OPENAI_MODEL: &str = GPT_5_6_SOL_MODEL;
 
 /// Available Claude models used by model lists and provider routing.
@@ -77,6 +80,7 @@ pub fn is_openai_api_only_pro_model(model: &str) -> bool {
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
     GPT_5_6_SOL_1M_MODEL,
+    GPT_6_1_SOL_MODEL,
     GPT_6_ASTRA_MODEL,
     GPT_6_SOL_MODEL,
     GPT_6_LUNA_MODEL,
@@ -119,6 +123,7 @@ mod openai_catalog_tests {
     #[test]
     fn openai_catalog_exposes_named_gpt_6_and_the_complete_gpt_5_6_family() {
         for model in [
+            GPT_6_1_SOL_MODEL,
             GPT_6_ASTRA_MODEL,
             GPT_6_SOL_MODEL,
             GPT_6_LUNA_MODEL,
@@ -135,7 +140,7 @@ mod openai_catalog_tests {
         assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol[1m]"));
-        for model in [GPT_6_SOL_MODEL, GPT_6_LUNA_MODEL] {
+        for model in [GPT_6_1_SOL_MODEL, GPT_6_SOL_MODEL, GPT_6_LUNA_MODEL] {
             assert!(!is_openai_api_only_pro_model(model));
             assert_eq!(
                 ALL_OPENAI_MODELS.iter().filter(|id| **id == model).count(),
@@ -148,7 +153,12 @@ mod openai_catalog_tests {
 
     #[test]
     fn named_gpt_6_models_use_same_context_policy_and_respect_catalog_overrides() {
-        for model in [GPT_6_ASTRA_MODEL, GPT_6_SOL_MODEL, GPT_6_LUNA_MODEL] {
+        for model in [
+            GPT_6_1_SOL_MODEL,
+            GPT_6_ASTRA_MODEL,
+            GPT_6_SOL_MODEL,
+            GPT_6_LUNA_MODEL,
+        ] {
             assert_eq!(provider_for_model(model), Some("openai"));
             assert_eq!(
                 context_limit_for_model_with_provider_and_cache(model, Some("openai"), |_| None),

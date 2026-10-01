@@ -117,12 +117,13 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
 }
 
 #[test]
-fn gpt_6_sol_and_luna_select_without_long_context_profiles() {
+fn named_gpt_6_models_select_without_long_context_profiles() {
     let _guard = jcode_base::storage::lock_test_env();
     let _model = EnvVarGuard::remove("JCODE_OPENAI_MODEL");
     let _effort = EnvVarGuard::remove("JCODE_OPENAI_REASONING_EFFORT");
     jcode_base::auth::codex::set_active_account_override(Some("gpt-6-options".to_string()));
     let models = [
+        jcode_provider_core::GPT_6_1_SOL_MODEL,
         jcode_provider_core::GPT_6_SOL_MODEL,
         jcode_provider_core::GPT_6_LUNA_MODEL,
     ];

@@ -349,8 +349,8 @@ safe-input budget. **GPT-5.6 Sol (1M)** (`gpt-5.6-sol[1m]`) is an explicit opt-i
 upstream model slug `gpt-5.6-sol`; `[1m]` is a Jcode picker/session/config identity,
 not an OpenRouter model slug and not an automatic-compaction mode.
 
-**GPT-6 Astra** (`gpt-6-astra`), **GPT-6 Sol** (`gpt-6-sol`) and **GPT-6 Luna**
-(`gpt-6-luna`) are built-in OpenAI options, including offline catalog fallback.
+**GPT-6.1 Sol** (`gpt-6.1-sol`), **GPT-6 Astra** (`gpt-6-astra`), **GPT-6 Sol**
+(`gpt-6-sol`) and **GPT-6 Luna** (`gpt-6-luna`) are built-in OpenAI options, including offline catalog fallback.
 Live account availability still controls selection. They use the existing GPT-6
 context policy without separate `[1m]` picker entries: the native OpenAI runtime
 uses a 1,000,000-token window, while cache-aware capability lookup honors a
