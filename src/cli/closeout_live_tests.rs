@@ -24,7 +24,10 @@
 //! ```
 //!
 //! `JCODE_CLOSEOUT_SKILL` names the skill to activate (default: the first
-//! available skill).
+//! available skill). `JCODE_CLOSEOUT_CHILD_ALIAS` names the model-roster alias
+//! the delegated child runs on (default `fast-worker`); the value `skip`
+//! leaves the delegation turn out and the report records it as skipped, for
+//! runs where no alias reaches a usable route.
 
 use crate::cli::provider_init::{ProviderChoice, init_provider_quiet};
 use jcode_base::message::{ContentBlock, Role};
@@ -241,22 +244,34 @@ async fn closeout_journeys_live() -> anyhow::Result<()> {
     );
     let first_turn_end = agent.lock().await.messages().len() - 1;
 
-    let delegation_calls = run_turn(
-        &agent,
-        &mut ledger,
-        "delegation",
-        "Call get_catalog to find an isolated-capable agent profile. Then use the subagent tool to create a child with that profile, model alias fast-worker, permission read_only, and exactly this prompt: Reply with exactly: READY. When the child has replied, reply with exactly: DELEGATED",
-        None,
-    )
-    .await?;
-    calls.insert(
-        "delegation".into(),
-        serde_json::to_value(&delegation_calls)?,
-    );
-    anyhow::ensure!(
-        delegation_calls.iter().any(|name| name == "subagent"),
-        "the delegation turn called subagent: {delegation_calls:?}"
-    );
+    let child_alias = std::env::var("JCODE_CLOSEOUT_CHILD_ALIAS")
+        .ok()
+        .map(|alias| alias.trim().to_string())
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or_else(|| "fast-worker".to_string());
+    if child_alias.eq_ignore_ascii_case("skip") {
+        eprintln!("closeout journey: delegation skipped (JCODE_CLOSEOUT_CHILD_ALIAS=skip)");
+        calls.insert("delegation".into(), serde_json::json!("skipped"));
+    } else {
+        let delegation_calls = run_turn(
+            &agent,
+            &mut ledger,
+            "delegation",
+            &format!(
+                "Call get_catalog to find an isolated-capable agent profile. Then use the subagent tool to create a child with that profile, model alias {child_alias}, permission read_only, and exactly this prompt: Reply with exactly: READY. When the child has replied, reply with exactly: DELEGATED"
+            ),
+            None,
+        )
+        .await?;
+        calls.insert(
+            "delegation".into(),
+            serde_json::to_value(&delegation_calls)?,
+        );
+        anyhow::ensure!(
+            delegation_calls.iter().any(|name| name == "subagent"),
+            "the delegation turn called subagent: {delegation_calls:?}"
+        );
+    }
 
     // A skill activation is a declared static-prompt transition.
     let activation = agent.lock().await.activate_skill(&skill)?;
