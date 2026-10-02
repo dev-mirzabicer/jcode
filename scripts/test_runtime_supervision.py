@@ -333,10 +333,14 @@ try:
         wait(lambda: db.execute('SELECT state FROM runs WHERE id=?', (live_run,)).fetchone()[0] == 'completed', 'live command completes under its own owner')
     assert effects.read_text() == 'x', 'the surviving command ran exactly once'
     outcomes['crash_reports_live_native_owner'] = live_run
-    # The in-process webfetch died with its runtime image: listed, not live.
-    lost = [e for e in worker_item.get('executions', []) if e['tool'] == 'webfetch']
-    assert lost and not lost[0]['live_owner'], worker_item
-    lost_run = lost[0]['id']
+    # The in-process webfetch died with its runtime image. The replacement
+    # settles it with the lost-owner receipt when it claims the namespace, so
+    # it is neither listed as unfinished work nor left to block Finish/Stop.
+    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
+        lost = db.execute("SELECT id,state,stop_cause FROM runs WHERE tool='webfetch'").fetchall()
+    assert len(lost) == 1 and lost[0][1] == 'interrupted', lost
+    assert not any(e['id'] == lost[0][0] for e in worker_item.get('executions', [])), worker_item
+    outcomes['startup_settles_lost_owner_row'] = {'run': lost[0][0], 'state': lost[0][1], 'cause': lost[0][2]}
     results = []
     def decide():
         results.append(run('runtime', 'recover', 'continue', worker_item['id'], '--revision', str(worker_item['revision']), '--json', success=False))
@@ -360,14 +364,8 @@ try:
     count = len(f.posts)
     submit(worker, 'HOLD:sigterm work')
     settle_posts(count + 1, 1)
-    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
-        lost_state = db.execute('SELECT state FROM runs WHERE id=?', (lost_run,)).fetchone()[0]
     p2.send_signal(signal.SIGTERM)
     assert p2.wait(timeout=40) == 0, 'graceful external termination exits successfully'
-    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
-        settled = db.execute('SELECT state FROM runs WHERE id=?', (lost_run,)).fetchone()[0]
-    assert settled == 'interrupted', (lost_state, settled)
-    outcomes['shutdown_settles_lost_owner_row'] = {'before': lost_state, 'after': settled}
     (f.ROOT / 'release-sigterm').write_text('release')
     offline = status()
     assert not offline['response']['value']['desired_stopped'], offline

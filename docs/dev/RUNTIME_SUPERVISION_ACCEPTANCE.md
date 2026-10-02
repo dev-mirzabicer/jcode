@@ -11,13 +11,12 @@ acceptance fixture.
 ## Exercised boundary
 
 Implementation commits `f1adfcde9`, `5380d9dc4`, `d1e04b08e`, `2991a9456`,
-`b7e479043`, `405f7cc94`, `9ec4375fe`, `598d45c86`, `3998243e3` on
-`mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`. Supervision journeys
-ran against an immutable copy of the `3998243e3` selfdev build (v0.75.534-dev,
-SHA-256 `1acf77372beae5cf703427123c758d7166a38e84ef16260f39c443ef5306729e`); the
-WP-08 regression last ran on the `598d45c86` build, which differs only in the
-service plan's environment selection. Activation identity is recorded in the
-completion report.
+`b7e479043`, `405f7cc94`, `9ec4375fe`, `598d45c86`, `3998243e3`, `cdcf64ecf`,
+`fe0aa3f32` on `mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`.
+Supervision journeys and the WP-08 regression ran against an immutable copy of
+the `fe0aa3f32` selfdev build (v0.75.537-dev, SHA-256
+`446f85203bce8f5b3718694615cfb6e265d514edab7e2fb43eb93392d1aaea3c`). Activation
+identity is recorded in the completion report.
 
 Journeys: `scripts/run_isolated_test.py python3 scripts/test_runtime_supervision.py
 --binary <image> --artifact-dir <dir>` (all stages passed, exit 0, every fixture
@@ -36,6 +35,7 @@ background Stop, background survival).
 | Only runtime-owned intents wake sessions; legacy intents stay attach-only and yield to an unresolved recovery item | `primary_host::failed_reload_after_interruption_continues_the_turn_locally_once` (legacy intent untouched); `client_state_tests::history_reports_crash_recovery_without_inferring_continuation` | Validated |
 | Durable handoff, incarnation-scoped, crash-safe | Base `reload_handoff_receipt_classifies_only_its_own_incarnation`, `failed_continuation_persistence_retains_the_turn_record_for_retry`; `only_planned_transitions_retain_interrupted_turn_records` | Validated |
 | Selfdev initiator | Live activation build-reload of this candidate (see completion report) | Recorded at activation |
+| Executions left by earlier runtime images never block a restart or Finish | Found while preparing the real handoff (eleven lost-owner rows would have made a reviewed restart `Blocked`). `execution::shutdown::tests::historical_rows_whose_owner_is_gone_neither_run_nor_block_stop` fails without the Stop fix (`Execution control endpoint is no longer owned`) and passes with it; `runtime_startup_settles_lost_owner_rows`; journey `startup_settles_lost_owner_row` (crash during an in-process tool, row settled `interrupted`/`owner_crash` when the replacement claims the namespace, not listed as unfinished work) | Verified |
 | Native survivor and child quiescence regressions | WP-08 `test_runtime_work.py` on the candidate image; reload interrupts owned delegations through the existing `await_delegations_for_reload` | Verified (native), child path validated |
 
 ## R33: unexpected exit restores availability, inference needs a decision
