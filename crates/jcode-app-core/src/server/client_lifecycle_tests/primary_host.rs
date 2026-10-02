@@ -1707,6 +1707,18 @@ fn failed_reload_after_interruption_continues_the_turn_locally_once() -> Result<
             prefer_selfdev_binary: false,
             request_id: "reload-failed-fixture".into(),
         };
+        // An intent written before runtime-owned continuation has no
+        // verified evidence; the runtime never wakes its session itself.
+        crate::server::reload_recovery::persist_intent(
+            "legacy-reload",
+            "session_legacy_fixture",
+            crate::server::reload_recovery::ReloadRecoveryRole::Initiator,
+            crate::protocol::ReloadRecoverySnapshot {
+                reconnect_notice: None,
+                continuation_message: "legacy".into(),
+            },
+            "legacy",
+        )?;
         crate::server::reload::fail_reload_for_test(
             &signal,
             &host,
@@ -1745,10 +1757,13 @@ fn failed_reload_after_interruption_continues_the_turn_locally_once() -> Result<
             owner.recovery().unresolved(&session)?.is_empty(),
             "a failed reload is not a crash"
         );
-        assert!(
-            crate::server::reload_recovery::pending_records()?.is_empty(),
-            "intent retired"
+        let pending = crate::server::reload_recovery::pending_records()?;
+        assert_eq!(
+            pending.len(),
+            1,
+            "runtime intent retired, legacy intent untouched"
         );
+        assert_eq!(pending[0].session_id, "session_legacy_fixture");
         host.shutdown().await
     })
 }

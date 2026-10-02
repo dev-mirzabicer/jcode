@@ -364,7 +364,7 @@ fn persist_reload_continuations(
         ) else {
             continue;
         };
-        super::reload_recovery::persist_intent(
+        super::reload_recovery::persist_runtime_intent(
             &signal.request_id,
             &record.session,
             if context.is_some() {

@@ -43,7 +43,7 @@ pub(crate) fn persist_planned_continuation(
         None,
     )
     .context("Interrupted turn has no continuation directive")?;
-    reload_recovery::persist_intent(
+    reload_recovery::persist_runtime_intent(
         &reload_id,
         &record.session,
         ReloadRecoveryRole::InterruptedPeer,
@@ -75,7 +75,11 @@ pub(crate) async fn deliver_planned_continuations(
     let mut delivered = 0;
     for record in records {
         // Headless members keep their established startup continuation owner.
-        if record.role == ReloadRecoveryRole::Headless {
+        // Intents written before runtime-owned continuation keep their
+        // original semantics (continued when a client reattaches): they carry
+        // no verified evidence that the turn was interrupted by this runtime's
+        // planned transition, so the runtime never wakes them on its own.
+        if record.role == ReloadRecoveryRole::Headless || !record.runtime_owned {
             continue;
         }
         let superseded = match host

@@ -357,6 +357,7 @@ fn history_reports_crash_recovery_without_inferring_continuation() -> Result<()>
     // Crashed status, a final user message and an active reload marker used
     // to make History ask the client to continue. Nothing is inferred now.
     assert!(super::unresolved_runtime_recovery(session_id).is_none());
+    assert_eq!(super::history_recovery(session_id), (None, None));
 
     let store = crate::runtime_lifecycle::RuntimeStopStore::new(
         &crate::storage::durable_state_dir(),
@@ -370,6 +371,21 @@ fn history_reports_crash_recovery_without_inferring_continuation() -> Result<()>
         anyhow::bail!("an unexpected exit is never a planned transition")
     })?;
     assert_eq!(items.len(), 1);
+    // A legacy reload intent for the same session must not let a client
+    // continue a turn that now needs an explicit decision.
+    let directive = crate::protocol::ReloadRecoverySnapshot {
+        reconnect_notice: None,
+        continuation_message: "legacy continuation".to_string(),
+    };
+    super::super::reload_recovery::persist_intent(
+        "legacy-reload",
+        session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::Initiator,
+        directive.clone(),
+        "legacy",
+    )?;
+    let (attached, recovery) = super::history_recovery(session_id);
+    assert!(attached.is_none() && recovery.is_some());
     let reported = super::unresolved_runtime_recovery(session_id)
         .expect("unresolved recovery is reported to clients");
     assert_eq!(reported.id, items[0].id);
@@ -380,5 +396,19 @@ fn history_reports_crash_recovery_without_inferring_continuation() -> Result<()>
     next.recovery()
         .supersede(session_id, crate::workspace::RequestId::new())?;
     assert!(super::unresolved_runtime_recovery(session_id).is_none());
+    // Without a pending decision a legacy intent keeps its attach semantics;
+    // a runtime-owned intent is delivered by the runtime, never by a client.
+    assert_eq!(
+        super::history_recovery(session_id),
+        (Some(directive.clone()), None)
+    );
+    super::super::reload_recovery::persist_runtime_intent(
+        "runtime-reload",
+        session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        directive,
+        "verified",
+    )?;
+    assert_eq!(super::history_recovery(session_id), (None, None));
     Ok(())
 }

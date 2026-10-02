@@ -42,6 +42,11 @@ pub(super) struct ReloadRecoveryRecord {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<String>,
+    /// Written by the runtime from a verified planned transition's retained
+    /// turn record; the runtime delivers it itself. Older records (absent
+    /// field) keep their original attach-to-continue semantics.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_owned: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -184,12 +189,39 @@ fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
     Ok(stats)
 }
 
+/// Write an intent in the form earlier versions wrote (not runtime-owned).
+/// Production writes only runtime-owned intents; tests use this to exercise
+/// the legacy attach-on-reconnect path.
+#[cfg(test)]
 pub(super) fn persist_intent(
     reload_id: &str,
     session_id: &str,
     role: ReloadRecoveryRole,
     directive: ReloadRecoveryDirective,
     reason: impl Into<String>,
+) -> Result<()> {
+    write_intent(reload_id, session_id, role, directive, reason.into(), false)
+}
+
+/// Persist a continuation the runtime itself delivers (verified planned
+/// reload or restart). Clients never receive it through History.
+pub(super) fn persist_runtime_intent(
+    reload_id: &str,
+    session_id: &str,
+    role: ReloadRecoveryRole,
+    directive: ReloadRecoveryDirective,
+    reason: impl Into<String>,
+) -> Result<()> {
+    write_intent(reload_id, session_id, role, directive, reason.into(), true)
+}
+
+fn write_intent(
+    reload_id: &str,
+    session_id: &str,
+    role: ReloadRecoveryRole,
+    directive: ReloadRecoveryDirective,
+    reason: String,
+    runtime_owned: bool,
 ) -> Result<()> {
     let role_label = role.as_str();
     let record = ReloadRecoveryRecord {
@@ -198,9 +230,10 @@ pub(super) fn persist_intent(
         role,
         status: ReloadRecoveryStatus::Pending,
         directive,
-        reason: reason.into(),
+        reason,
         created_at: chrono::Utc::now().to_rfc3339(),
         delivered_at: None,
+        runtime_owned,
     };
     let path = path_for_session(session_id)?;
     crate::storage::write_json(&path, &record)?;
@@ -314,6 +347,26 @@ pub(super) fn pending_directive_for_session(
         record.role.as_str()
     ));
     Ok(Some(directive))
+}
+
+/// A pending directive from before runtime-owned continuation, attached to
+/// History so a reattaching client continues it as it always did. Runtime-
+/// owned intents are delivered by the runtime and never attached.
+pub(super) fn legacy_directive_for_history(
+    session_id: &str,
+) -> Option<crate::protocol::ReloadRecoverySnapshot> {
+    match peek_for_session(session_id) {
+        Ok(Some(record)) if !record.runtime_owned => {
+            pending_directive_for_session(session_id).ok().flatten()
+        }
+        Ok(_) => None,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "reload recovery store: legacy intent for {session_id} is unreadable: {error:#}"
+            ));
+            None
+        }
+    }
 }
 
 pub(super) fn mark_delivered_if_matching_continuation(
@@ -591,6 +644,7 @@ mod tests {
                 directive: directive("done"),
                 reason: "delivered".to_string(),
                 created_at: chrono::Utc::now().to_rfc3339(),
+                runtime_owned: false,
                 delivered_at: Some(chrono::Utc::now().to_rfc3339()),
             },
             ReloadRecoveryRecord {
@@ -601,6 +655,7 @@ mod tests {
                 directive: directive("too late"),
                 reason: "stale".to_string(),
                 created_at: old.to_rfc3339(),
+                runtime_owned: false,
                 delivered_at: None,
             },
             ReloadRecoveryRecord {
@@ -611,6 +666,7 @@ mod tests {
                 directive: directive("continue"),
                 reason: "fresh".to_string(),
                 created_at: chrono::Utc::now().to_rfc3339(),
+                runtime_owned: false,
                 delivered_at: None,
             },
         ];
@@ -650,6 +706,7 @@ mod tests {
             directive: directive("continue"),
             reason: "invalid timestamp".to_string(),
             created_at: "not-an-rfc3339-timestamp".to_string(),
+            runtime_owned: false,
             delivered_at: None,
         };
         crate::storage::write_json(&path_for_session(&malformed.session_id)?, &malformed)?;

@@ -59,8 +59,11 @@ item never receives a planned continuation; the stale plan is discarded because
 the unexpected exit happened later. An unreadable recovery state retains the plan.
 The selfdev initiator keeps its exact reload-context directive only when the
 context names this reload's target version; every other interrupted turn receives
-the existing interrupted-turn continuation. Clients no longer synthesize
-continuations.
+the existing interrupted-turn continuation. These intents are marked
+runtime-owned. Intents written by earlier versions carry no such evidence: the
+runtime never wakes their sessions; History still attaches them so a reattaching
+client continues as before, unless the session has an unresolved recovery item.
+Clients otherwise never synthesize continuations.
 
 ## Reload
 

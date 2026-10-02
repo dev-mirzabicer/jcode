@@ -471,6 +471,24 @@ fn unresolved_runtime_recovery(
     }
 }
 
+/// Recovery facts for History. An unresolved unexpected-exit item takes
+/// precedence: a legacy reload intent for the same session must not let a
+/// client continue a turn that now needs an explicit decision.
+fn history_recovery(
+    session_id: &str,
+) -> (
+    Option<crate::protocol::ReloadRecoverySnapshot>,
+    Option<Box<crate::workspace::runtime::RecoveryItem>>,
+) {
+    match unresolved_runtime_recovery(session_id) {
+        Some(item) => (None, Some(Box::new(item))),
+        None => (
+            super::reload_recovery::legacy_directive_for_history(session_id),
+            None,
+        ),
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "persisted history fallback still needs session/client/server metadata for a usable bootstrap payload"
@@ -537,6 +555,7 @@ async fn send_history_from_persisted_session(
         (all, count)
     };
 
+    let (reload_recovery, runtime_recovery) = history_recovery(session_id);
     let history_event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
@@ -561,11 +580,11 @@ async fn send_history_from_persisted_session(
         server_icon: Some(server_icon.to_string()),
         server_has_update: Some(server_has_newer_binary()),
         // Continuation after a reload or restart is server-owned durable input;
-        // an unexpected exit waits for an explicit decision. Clients are never
-        // asked to infer or queue a continuation themselves.
+        // an unexpected exit waits for an explicit decision. Clients never infer
+        // a continuation; only a pre-existing legacy intent is attached.
         was_interrupted: None,
-        reload_recovery: None,
-        runtime_recovery: unresolved_runtime_recovery(session_id).map(Box::new),
+        reload_recovery,
+        runtime_recovery,
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
@@ -804,6 +823,7 @@ pub(super) async fn send_history(
         (all, count)
     };
 
+    let (reload_recovery, runtime_recovery) = history_recovery(session_id);
     let history_event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
@@ -828,11 +848,11 @@ pub(super) async fn send_history(
         server_icon: Some(server_icon.to_string()),
         server_has_update: Some(server_has_newer_binary()),
         // Continuation after a reload or restart is server-owned durable input;
-        // an unexpected exit waits for an explicit decision. Clients are never
-        // asked to infer or queue a continuation themselves.
+        // an unexpected exit waits for an explicit decision. Clients never infer
+        // a continuation; only a pre-existing legacy intent is attached.
         was_interrupted: None,
-        reload_recovery: None,
-        runtime_recovery: unresolved_runtime_recovery(session_id).map(Box::new),
+        reload_recovery,
+        runtime_recovery,
         connection_type,
         status_detail,
         upstream_provider,
