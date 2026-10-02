@@ -11,12 +11,11 @@ acceptance fixture.
 ## Exercised boundary
 
 Implementation commits `f1adfcde9`, `5380d9dc4`, `d1e04b08e`, `2991a9456`,
-`b7e479043`, `405f7cc94` on `mirza/sp58-c01-wp09-runtime-supervision` from
-`ceb39d99d`. Native journeys ran against an immutable copy of the `b7e479043`
-selfdev build (v0.75.525-dev class, SHA-256
-`ba871c953ab0822df89d63291e2ea2ff4fef557402fb0c2289a654f7a4a299b7`); the later
-commit changes only the journey script. Activation identity is recorded in the
-completion report.
+`b7e479043`, `405f7cc94`, `9ec4375fe` on `mirza/sp58-c01-wp09-runtime-supervision`
+from `ceb39d99d`. Native journeys ran against an immutable copy of the `9ec4375fe`
+selfdev build (v0.75.530-dev, SHA-256
+`0603b1582a889f32dc8b788ea595d819693297f60237e9ae9738eea7507c553c`). Activation
+identity is recorded in the completion report.
 
 Journeys: `scripts/run_isolated_test.py python3 scripts/test_runtime_supervision.py
 --binary <image> --artifact-dir <dir>` (all stages passed, exit 0, every fixture
@@ -32,6 +31,7 @@ background Stop, background survival).
 | Reload waits for real quiescence and checkpoints, continues exactly the interrupted turn | Journey `reload_continues_interrupted_turn_once`: same-PID exec, one continuation request carrying the interrupted prompt and reload directive, idle peer makes no request, no recovery item | Verified |
 | Failed reload after interruption keeps serving and continues locally | `primary_host::failed_reload_after_interruption_continues_the_turn_locally_once` (real Agent turn, one provider call, record settled, intent retired, no recovery item) | Validated through production owners |
 | Reviewed restart reaches a new incarnation without intentional Stop | Journey `restart_new_incarnation_continues_once` (different runtime identity, `desired_stopped=false`, `wait` reports Restarted, one continuation); `shutdown_tests::verified_restart_publishes_a_replacement_exit_without_intentional_stop`; base `verified_restart_keeps_desired_running_and_hands_interrupted_turns_to_continuation` | Verified |
+| Only runtime-owned intents wake sessions; legacy intents stay attach-only and yield to an unresolved recovery item | `primary_host::failed_reload_after_interruption_continues_the_turn_locally_once` (legacy intent untouched); `client_state_tests::history_reports_crash_recovery_without_inferring_continuation` | Validated |
 | Durable handoff, incarnation-scoped, crash-safe | Base `reload_handoff_receipt_classifies_only_its_own_incarnation`, `failed_continuation_persistence_retains_the_turn_record_for_retry`; `only_planned_transitions_retain_interrupted_turn_records` | Validated |
 | Selfdev initiator | Live activation build-reload of this candidate (see completion report) | Recorded at activation |
 | Native survivor and child quiescence regressions | WP-08 `test_runtime_work.py` on the candidate image; reload interrupts owned delegations through the existing `await_delegations_for_reload` | Verified (native), child path validated |
