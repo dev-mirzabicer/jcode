@@ -11,11 +11,11 @@ acceptance fixture.
 ## Exercised boundary
 
 Implementation commits `f1adfcde9`, `5380d9dc4`, `d1e04b08e`, `2991a9456`,
-`b7e479043`, `405f7cc94`, `9ec4375fe` on `mirza/sp58-c01-wp09-runtime-supervision`
-from `ceb39d99d`. Native journeys ran against an immutable copy of the `9ec4375fe`
-selfdev build (v0.75.530-dev, SHA-256
-`0603b1582a889f32dc8b788ea595d819693297f60237e9ae9738eea7507c553c`). Activation
-identity is recorded in the completion report.
+`b7e479043`, `405f7cc94`, `9ec4375fe`, `598d45c86` on
+`mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`. Native journeys ran
+against an immutable copy of the `598d45c86` selfdev build (v0.75.532-dev,
+SHA-256 `eae5a2072e33f02bd2db03432689c314b98bca2c4cfbdb65114f09edd99477d7`).
+Activation identity is recorded in the completion report.
 
 Journeys: `scripts/run_isolated_test.py python3 scripts/test_runtime_supervision.py
 --binary <image> --artifact-dir <dir>` (all stages passed, exit 0, every fixture
@@ -69,6 +69,7 @@ background Stop, background survival).
 | Detached work holds an assertion; released after | Journey `power_follows_runtime_work`: `caffeinate -i -s` child of the supervised runtime while a turn runs with no client attached, `pmset -g assertions` shows `PreventUserIdleSystemSleep`, released when the turn settles; status reports `active`/`active_work` | Verified |
 | User switch | Journey `power_switch_respected`: `prevent_sleep_while_streaming=false` reread live, no assertion during work, status `enabled=false` | Verified |
 | Surviving native worker | Journey `survivor_power`: worker-held assertion persists after a KeepSupported Stop exits the runtime, released when the command settles | Verified |
+| Historical rows whose owner is gone do not hold an assertion | Found during activation (eleven lost-owner rows kept the assertion held); `execution::shutdown::tests::running_excludes_historical_rows_whose_owner_is_gone`; Stop inventory unchanged | Validated; live check at activation |
 | Existing guard behavior | `power_inhibit` tests | Validated |
 
 ## Limits
