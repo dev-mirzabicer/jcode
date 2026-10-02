@@ -1333,3 +1333,14 @@ subsets are in its section above.
 - A real delegated Claude child was not run live: no model-roster alias
   reaches a usable Claude route on this account. Children share the runtime
   and loop that WP-02 exercised.
+
+## INT-01 acceptance
+
+Mirza accepted WP-06 and the INT-01 closeout together on 2026-10-02 (decision
+D14), with the effort migration rule and the tool-set notice and tool-error
+text as shipped. The accepted source is `2d1276c6b` on `mirza/int01-closeout`
+plus this acceptance record; the activated runtime is
+`3f956e02c-dirty-3a6e2e379bf2` (v0.75.519-dev, canary passed), which differs
+from the source only by documentation commits. The backup branch
+`mirza/int01-wp01-rogue-commit-backup` and the two reviewer sessions are left
+as they are. SP-58-C01/WP-09 is released.
