@@ -320,8 +320,8 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Open a fresh session with only compacted context + copied todos",
     ));
     lines.push(help_entry(
-        "/workspace [status|on|off|add]",
-        "Enable and manage the Niri-style session workspace",
+        "/niri [status|on|off|add]",
+        "Enable and manage Niri-style session rows",
     ));
     lines.push(help_entry(
         "/catchup [next|list]",

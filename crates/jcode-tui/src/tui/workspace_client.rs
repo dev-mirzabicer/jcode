@@ -10,7 +10,8 @@ pub enum WorkspaceSplitTarget {
     Down,
 }
 
-/// Per-client workspace navigation state.
+/// Per-client Niri-style session-row navigation state (`/niri`). Unrelated
+/// to the workspace catalog and its `/workspace` management mode.
 ///
 /// Previously stored in a process-global `Mutex<Option<...>>`; now owned by
 /// [`crate::tui::app::App`] so each client instance carries its own workspace
@@ -51,13 +52,13 @@ impl WorkspaceClientState {
 
     pub(crate) fn status_summary(&self) -> String {
         if !self.enabled {
-            return "Workspace mode: off".to_string();
+            return "Niri mode: off".to_string();
         }
         let rows = self.map.visible_rows(5);
         let populated = self.map.populated_workspaces().len();
         let total_sessions: usize = rows.iter().map(|row| row.sessions.len()).sum();
         format!(
-            "Workspace mode: on\nCurrent workspace: {}\nVisible rows: {}\nPopulated workspaces: {}\nMapped sessions: {}",
+            "Niri mode: on\nCurrent workspace: {}\nVisible rows: {}\nPopulated workspaces: {}\nMapped sessions: {}",
             self.map.current_workspace(),
             rows.len(),
             populated,
@@ -289,6 +290,6 @@ mod tests {
         let mut state = WorkspaceClientState::default();
         state.enable(Some("session_a"), &["session_a".to_string()]);
         let summary = state.status_summary();
-        assert!(summary.contains("Workspace mode: on"));
+        assert!(summary.contains("Niri mode: on"));
     }
 }

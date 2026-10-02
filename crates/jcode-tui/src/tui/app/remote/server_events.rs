@@ -3379,10 +3379,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pending_split_provider_key_override = None;
                 app.pending_split_label = None;
                 app.push_display_message(DisplayMessage::system(format!(
-                    "Added {} to workspace.",
+                    "Added {} to the Niri rows.",
                     new_session_name,
                 )));
-                app.set_status_notice(format!("Workspace + {}", new_session_name));
+                app.set_status_notice(format!("Niri + {}", new_session_name));
                 return false;
             }
             if rendered_split_startup.is_none() && app.pending_split_workflow.is_some() {

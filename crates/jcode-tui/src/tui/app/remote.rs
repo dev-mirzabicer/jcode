@@ -45,7 +45,7 @@ use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{
     persist_replay_display_message, persist_swarm_plan_snapshot, persist_swarm_status_snapshot,
 };
-use workspace::{handle_workspace_command, handle_workspace_navigation_key};
+use workspace::{handle_niri_command, handle_workspace_navigation_key};
 
 // Re-export the remote input dispatch helpers for sibling modules/tests that go
 // through the `remote` facade instead of private submodule paths.
@@ -176,12 +176,12 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 let label = crate::id::extract_session_name(&target_session)
                     .map(|name| name.to_string())
                     .unwrap_or(target_session);
-                app.set_status_notice(format!("Workspace → {}", label));
+                app.set_status_notice(format!("Niri → {}", label));
                 return true;
             }
             Err(err) => {
                 app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch workspace session: {}",
+                    "Failed to switch Niri session: {}",
                     err
                 )));
                 needs_redraw = true;

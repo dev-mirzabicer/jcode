@@ -2080,7 +2080,7 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if handle_workspace_command(app, remote, trimmed).await? {
+                if handle_niri_command(app, remote, trimmed).await? {
                     return Ok(());
                 }
 

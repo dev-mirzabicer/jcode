@@ -26,28 +26,30 @@ pub(super) async fn handle_workspace_navigation_key(
     };
 
     if app.is_processing {
-        app.set_status_notice("Finish current work before moving workspace focus");
+        app.set_status_notice("Finish current work before moving Niri focus");
         return Ok(true);
     }
 
     let Some(target_session_id) = target else {
-        app.set_status_notice("No workspace session in that direction");
+        app.set_status_notice("No Niri session in that direction");
         return Ok(true);
     };
     remote.resume_session(&target_session_id).await?;
     let label = crate::id::extract_session_name(&target_session_id)
         .map(|name| name.to_string())
         .unwrap_or(target_session_id);
-    app.set_status_notice(format!("Workspace → {}", label));
+    app.set_status_notice(format!("Niri → {}", label));
     Ok(true)
 }
 
-pub(super) async fn handle_workspace_command(
+/// Niri-style session rows. Formerly `/workspace`; that name now opens
+/// workspace management, so the two features never share a command.
+pub(super) async fn handle_niri_command(
     app: &mut App,
     remote: &mut RemoteConnection,
     trimmed: &str,
 ) -> Result<bool> {
-    if !trimmed.starts_with("/workspace") {
+    if trimmed != "/niri" && !trimmed.starts_with("/niri ") {
         return Ok(false);
     }
 
@@ -58,36 +60,36 @@ pub(super) async fn handle_workspace_command(
         .or(Some(app.session.id.as_str()));
 
     match trimmed {
-        "/workspace" | "/workspace status" => {
+        "/niri" | "/niri status" => {
             app.push_display_message(DisplayMessage::system(
                 app.workspace_client.status_summary(),
             ));
             return Ok(true);
         }
-        "/workspace on" | "/workspace import" => {
+        "/niri on" | "/niri import" => {
             app.workspace_client
                 .enable(current_session, &app.remote_sessions);
-            app.set_status_notice("Workspace mode enabled");
+            app.set_status_notice("Niri mode enabled");
             app.push_display_message(DisplayMessage::system(
                 app.workspace_client.status_summary(),
             ));
             return Ok(true);
         }
-        "/workspace off" => {
+        "/niri off" => {
             app.workspace_client.disable();
-            app.set_status_notice("Workspace mode disabled");
-            app.push_display_message(DisplayMessage::system("Workspace mode: off".to_string()));
+            app.set_status_notice("Niri mode disabled");
+            app.push_display_message(DisplayMessage::system("Niri mode: off".to_string()));
             return Ok(true);
         }
         _ => {}
     }
 
     let target = match trimmed {
-        "/workspace add" | "/workspace add right" => {
+        "/niri add" | "/niri add right" => {
             Some(crate::tui::workspace_client::WorkspaceSplitTarget::Right)
         }
-        "/workspace add up" => Some(crate::tui::workspace_client::WorkspaceSplitTarget::Up),
-        "/workspace add down" => Some(crate::tui::workspace_client::WorkspaceSplitTarget::Down),
+        "/niri add up" => Some(crate::tui::workspace_client::WorkspaceSplitTarget::Up),
+        "/niri add down" => Some(crate::tui::workspace_client::WorkspaceSplitTarget::Down),
         _ => None,
     };
 
@@ -95,22 +97,22 @@ pub(super) async fn handle_workspace_command(
         app.workspace_client
             .enable(current_session, &app.remote_sessions);
         app.workspace_client.queue_split_target(target);
-        app.pending_split_label = Some("Workspace".to_string());
+        app.pending_split_label = Some("Niri".to_string());
         if app.is_processing {
             app.pending_split_request = true;
             app.push_display_message(DisplayMessage::system(
-                "Workspace add queued - new session will be created when idle.".to_string(),
+                "Niri add queued - new session will be created when idle.".to_string(),
             ));
-            app.set_status_notice("Workspace add queued");
+            app.set_status_notice("Niri add queued");
         } else {
-            begin_remote_split_launch(app, "Workspace");
+            begin_remote_split_launch(app, "Niri");
             remote.split().await?;
         }
         return Ok(true);
     }
 
     app.push_display_message(DisplayMessage::system(
-        "/workspace\n  Show workspace status.\n\n/workspace on\n  Enable/import workspace mode for current remote sessions.\n\n/workspace off\n  Disable workspace mode.\n\n/workspace add\n  Split current session and add it to the right in the current workspace row.\n\n/workspace add up\n  Split current session into the workspace above.\n\n/workspace add down\n  Split current session into the workspace below."
+        "/niri\n  Show Niri session-row status.\n\n/niri on\n  Enable/import Niri mode for current remote sessions.\n\n/niri off\n  Disable Niri mode.\n\n/niri add\n  Split current session and add it to the right in the current row.\n\n/niri add up\n  Split current session into the row above.\n\n/niri add down\n  Split current session into the row below."
             .to_string(),
     ));
     Ok(true)
