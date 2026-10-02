@@ -136,6 +136,11 @@ pub fn plan(socket: &Path, program: &Path, path: &str) -> Result<ServicePlan> {
     environment.insert("JCODE_DEFERRED_AUTH_BOOTSTRAP".to_string(), "1".to_string());
     // Path selectors only: they decide the namespace, durable state, config
     // and credential-store locations exactly as the installing shell does.
+    // TMPDIR is deliberately not carried: launchd gives the agent the user's
+    // standard temporary directory, which is where an ordinary runtime keeps
+    // its daemon lock. An installer with a private TMPDIR (a sandboxed tool
+    // shell) must not move the service onto a different lock and so let it
+    // compete with the runtime it is meant to take over.
     for key in [
         "HOME",
         "JCODE_HOME",
@@ -145,7 +150,6 @@ pub fn plan(socket: &Path, program: &Path, path: &str) -> Result<ServicePlan> {
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
         "XDG_CACHE_HOME",
-        "TMPDIR",
     ] {
         if let Ok(value) = std::env::var(key)
             && !value.is_empty()
@@ -422,7 +426,17 @@ mod tests {
             root.path().display(),
             root.path().display()
         );
-        let first = plan(&socket, &program, &path)?;
+        // A private installer TMPDIR (for example a sandboxed tool shell) must
+        // not move the service onto another daemon-lock directory.
+        let saved_tmpdir = std::env::var_os("TMPDIR");
+        crate::env::set_var("TMPDIR", root.path());
+        let first = plan(&socket, &program, &path);
+        match saved_tmpdir {
+            Some(value) => crate::env::set_var("TMPDIR", value),
+            None => crate::env::remove_var("TMPDIR"),
+        }
+        let first = first?;
+        assert!(!first.environment.contains_key("TMPDIR"));
         let again = plan(&socket, &program, &path)?;
         assert_eq!(first, again);
         assert_eq!(first.environment["PATH"], root.path().display().to_string());

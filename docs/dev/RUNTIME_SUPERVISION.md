@@ -147,10 +147,13 @@ for isolated tests). The plan is deterministic and digest-bound:
 `ProgramArguments` are the stable shared-server launcher plus `serve --socket`;
 the environment carries filtered absolute PATH, the socket, the supervised
 marker, deferred auth bootstrap and the installer's existing path selectors
-(`HOME`, `JCODE_HOME`, `JCODE_RUNTIME_DIR`, `TMPDIR` and the `XDG_*` runtime,
-config, data, state and cache directories), so the service resolves the same
-namespace, durable state, configuration and credential stores as the installing
-shell. No credential is copied. `RunAtLoad`,
+(`HOME`, `JCODE_HOME`, `JCODE_RUNTIME_DIR` and the `XDG_*` runtime, config,
+data, state and cache directories), so the service resolves the same namespace,
+durable state, configuration and credential stores as the installing shell.
+`TMPDIR` is not carried: launchd supplies the user's standard temporary
+directory, where an ordinary runtime keeps its daemon lock, so an installer with
+a private `TMPDIR` cannot point the service at a different lock. No credential is
+copied. `RunAtLoad`,
 `KeepAlive { SuccessfulExit = false }`, `AbandonProcessGroup`, `ExitTimeOut 45`,
 `ThrottleInterval 10`.
 
