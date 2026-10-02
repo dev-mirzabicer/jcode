@@ -10,7 +10,8 @@ acceptance fixture.
 
 ## Exercised boundary
 
-Implementation commits from `f1adfcde9` through `05d4d9c6a` on
+Implementation commits from `f1adfcde9` through `05d4d9c6a`, plus a final
+service-plan wording correction, on
 `mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`. Supervision journeys
 and the WP-08 regression ran against an immutable copy of the `05d4d9c6a` selfdev
 build (SHA-256 `3714e4df518ec7fdfe262c98206d9e1f740b24cfd920014e655d3e3710758a71`).
