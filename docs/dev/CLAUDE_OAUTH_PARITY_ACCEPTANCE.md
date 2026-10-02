@@ -1096,3 +1096,95 @@ Deviations from the WP-06 specification, recorded for the closeout:
 - **Tool-set transition name.** The former `late MCP tool registration`,
   `MCP tool set reload` and `Swarm globally disabled` journal labels are one
   label, `tool set change`; the notice names the tools.
+
+## WP-06 activation and live evidence (2026-10-02, UTC)
+
+**Activation.** A coordinated `selfdev build-reload` built `53917ee82` and the
+shared server reloaded into `53917ee82-dirty-425b5a4414c3` (v0.75.517-dev) at
+2026-10-02T01:36Z. The request came from a short-lived self-dev session that
+the new server did not load (`session_blossom_1790904864188_6417912de5d63b32`;
+never resume it). After the evidence below, the pending activation bound to it
+was completed with `jcode_build_support::complete_pending_activation_for_session`
+(manifest backups in `~/.jcode/scratch/int01-wp06/activation/`). Running,
+current and shared-server channels are equal and the canary is `passed`. The
+dirty suffix comes only from the five protected paths.
+
+**Closeout journeys on Claude** (`closeout_journeys_live`, the production
+top-level provider pinned to Claude OAuth, `JCODE_ANTHROPIC_PREFIX_MISMATCH=error`,
+`JCODE_CLOSEOUT_CHILD_ALIAS=skip`): a batch turn, a skill activation followed
+by a turn carrying a system reminder, a real summary applied through the
+curator, continued work, a reload into a fresh Agent with a reminder-only
+resume, and a final turn.
+
+| Leg | Effort | Session | Requests | Rejections | Binding events | Cache reads, measured requests | Thinking stored / replayed at the end |
+|---|---|---|---|---|---|---|---|
+| Opus 5.5, 01:38Z | `high` (the new default) | `session_bat_1790905093641_b9ef5704f665af43` | 14 | 0 | none | 97.6–99.6% (10 of 10 ≥ 90%) | 8 / 5 |
+| Sonnet 5.5, 01:39Z | model default | `session_t-rex_1790905176777_b0f0831ffd9cfc73` | 14 | 0 | none | 97.6–99.6% (10 of 10 ≥ 90%) | 6 / 3 |
+
+Both legs delivered their turn reminders as operator deliveries, which the
+Anthropic builder sent as `role: "system"` messages; every request was
+accepted under `error`. The first request after the skill activation
+rebuilt the cache, as a static-prompt transition does, and the first after
+the summary apply read 92.0% and 92.1%. The reload was not a transition: the resume request read 99.5%.
+The delegation turn was skipped in both legs (no roster alias reaches a
+usable Claude route, and WP-06 made no OpenAI calls); the full journeys,
+including the GPT leg and probe G6.3, are the closeout's.
+
+**Server restart journey** (the activated shared server, production
+`drop_block`, Opus 5.5 at effort `high`, session
+`session_squid_1790905252920_4fd128fb8877e57a` in a scratch project whose
+`.mcp.json` adds an owned stdio MCP server with one tool, beside the
+configured `node_repl` server; 40 tools frozen at the first request). Each
+restart is the debug `reload` command, a real server process replacement,
+after which the session was resumed from disk by a new client.
+
+| Step | Result |
+|---|---|
+| Turn with two MCP calls and thinking | Tool set persisted with the session; thinking stored with its binding |
+| Restart, unchanged tools, more than an hour later | No tool-set notice, no suppression; the cache had expired with its one-hour TTL |
+| Restart again within a minute, unchanged tools | The first request read 24,820 tokens, exactly the previous request's 24,414 read plus 406 written; no notice, no suppression, no journal record |
+| MCP tool description changed, restart | Exactly one tool-set notice (`Changed mcp__wp06__lookup`); the request carrying it as a system message with a by-value `tool_addition` was accepted; it read 24,885 = 24,820 + 65, and the next read 25,360 = 24,885 + 475; `tools` unchanged, no suppression, all four thinking blocks replayed, the tool called successfully |
+| Background task completion (a turn reminder) | Delivered with operator authority; the woken request was accepted and read exactly the previous entry |
+
+The server log for the session holds no `INV-1` warning, input
+transformation or cache-invalidation record.
+
+**TUI evidence.** An owned tester client (140x48) resuming that session
+rendered the tool-set notice and the background-task reminder as `system`
+messages with their bodies, with no frame anomalies. A client attached while
+a delivery is appended shows it when history is next rendered, as since
+WP-03. Frames, histories, the session inspection and the server log lines
+are in the program evidence directory (`evidence/wp06-2026-10-01/`).
+
+## WP-06 regression
+
+Run at `e2d960e0e`/`53917ee82` (the later commit changes only the OpenAI
+switch default and documentation), one suite at a time:
+
+- Provider and contract crates, all green: session-types 26, message-types 2,
+  context-core 60, protocol 106, config-types 15, provider-core 163,
+  anthropic 70, anthropic-runtime 82 (1 ignored), openai 15, openai-runtime
+  121 (2 ignored), openrouter 32, openrouter-runtime 122 (1 ignored), gemini 5,
+  gemini-runtime 36 plus schema tests 7 and 5, claude-cli 14, cursor 20,
+  copilot 33, doctor 43, tool-core 9, tool-types 10.
+- `jcode-app-core` bounded subset (`agent:: context:: server::context_control
+  server::provider_control client_actions client_lifecycle primary
+  provider_parity live_turn tool::tool_set`): 401 passed, 14 failed. Nine pass
+  alone. Four fail alone exactly as at the base commit (SDK receipt
+  retention, managed scope, Swarm enabling, workflow split). One encoded the
+  former rule that only late MCP tools join a locked set and was rewritten
+  for D15 (`tool_snapshot_is_stable_without_registry_changes`).
+- `jcode-base` without `workspace::`: 1688 passed, 15 failed, all dormant
+  memory, goal and Swarm tests, as before.
+- Root library: 226 passed; the two terminal-launch tests fail as before.
+- `jcode-tui` subset (`context_editor context_ reasoning test_remote_ local_
+  effort model_ sdk_results system_reminder kv_cache`): 477 passed, 24
+  failed. The ones that fail alone (Swarm, judge, review and overnight tests
+  of dormant features, and one remote shift-enter test) fail identically in
+  a build of the base commit `6bd062bd6`; the rest pass alone.
+- Strict Clippy (`--no-deps --all-targets -D warnings`) passes on
+  session-types, message-types, context-core, provider-core,
+  provider-anthropic, the Anthropic runtime, provider-openai, the OpenAI
+  runtime, the doctor, gemini, claude-cli, cursor, base, app-core, TUI and the
+  root crate. `cargo fmt --check` scoped to the changed crates and
+  `git diff --check` are clean.
