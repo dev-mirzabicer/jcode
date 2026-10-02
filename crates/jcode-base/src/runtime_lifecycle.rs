@@ -314,6 +314,10 @@ impl RuntimeStopStore {
             "Runtime is intentionally stopped; explicit Start is required"
         );
         tx.interrupt_unfinished();
+        // A new incarnation owns no operation. Its predecessor's last one (for
+        // example the Stopped receipt of a verified restart) stays inspectable
+        // by ID, but must not fence this incarnation's admission.
+        tx.journal.current = None;
         tx.commit()?;
         Ok(RuntimeStopOwner {
             store: self.clone(),

@@ -332,3 +332,48 @@ fn unexpected_registration_loss_does_not_unfence_still_owned_work() -> Result<()
     drop(permit);
     Ok(())
 }
+
+/// After a verified restart, the replacement incarnation's admission must not
+/// inherit its predecessor's Stopped receipt. A failed (stale) Begin reconciles
+/// admission from durable status; that must leave the runtime Running.
+#[test]
+fn restarted_incarnation_is_not_sealed_by_its_predecessors_receipt() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = RuntimeStopStore::new(root.path(), &root.path().join("fixture.sock"))?;
+    {
+        let old = store.claim()?;
+        let review = old.review(
+            ShutdownOptions {
+                destination: RuntimeDestination::Restart,
+                ..options(StopStrategy::Interrupt)
+            },
+            Vec::new(),
+        )?;
+        let op = old.begin(RequestId::new(), review.id, Vec::new())?;
+        let op = old.complete(op.id, op.revision)?;
+        old.confirm_stopped(op.id)?;
+    }
+    let owner = store.claim()?;
+    assert!(
+        owner.status()?.operation.is_none(),
+        "a new incarnation owns no operation"
+    );
+    let registration = RuntimeAdmission::register(root.path(), owner.identity())?;
+    let gate = registration.admission();
+    let review = gate.review(&owner, options(StopStrategy::FinishCurrent), Vec::new())?;
+    let _turn = gate.independent(
+        RuntimeWorkKind::PrimaryTurn,
+        "new-turn".into(),
+        Some("session".into()),
+    )?;
+    assert!(
+        gate.begin(&owner, RequestId::new(), review.id, Vec::new())
+            .is_err(),
+        "the review no longer covers the admitted turn"
+    );
+    assert!(
+        gate.accepts_input(),
+        "a failed Begin must not seal the restarted runtime"
+    );
+    Ok(())
+}
