@@ -927,14 +927,14 @@ changed the behavior below. The current-behavior reference is
   unlock are gone.
 - **Operator notices** (R23, D17). Deliveries store the authority they ask
   for. Anthropic renders operator deliveries as `role: "system"` messages
-  where the model and the placement allow. OpenAI's `developer` rendering is
-  implemented and tested but off by default until probe G6.3 has run
-  (`JCODE_OPENAI_OPERATOR_MESSAGES=1` enables it); until then OpenAI, like
-  every other runtime, receives the stored user text.
+  where the model and the placement allow, OpenAI Responses as `developer`
+  messages (on by default since probe G6.3 passed, below;
+  `JCODE_OPENAI_OPERATOR_MESSAGES=0` falls back), every other runtime as the
+  stored user text.
 - **Effort intent** (R24). Sessions store `Default` or `Explicit(level)`;
   restore, resume, model switches and fallbacks apply it for the current
-  model. Stored strings from before migrate without changing the effective
-  effort.
+  model. A stored string from before that equals the model's current or
+  former default migrates to `Default`; any other stays `Explicit`.
 - **Defaults** (R25, D18). `claude-opus-5-5` is the default Claude model and
   its default effort is `high`.
 - **Tool names** (R26). A tool the dispatching runtime would reject by name
@@ -990,13 +990,10 @@ Decisions taken from the results:
 - **Billing header.** The API neither caches nor binds that block. The
   binding digest hashes it as fixed text, so a version sync invalidates no
   thinking.
-- **Pending for the closeout.** G6.3 (an OpenAI `developer` item on GPT-5.6
-  Sol over OAuth) was not run in WP-06: no OpenAI live calls were allowed.
-  OpenAI's `developer` rendering is covered by its deterministic tests and
-  stays off by default, so no GPT session's wire form changed without the
-  probe. To run G6.3 and the GPT journey with it, set
-  `JCODE_OPENAI_OPERATOR_MESSAGES=1`; if they pass, set
-  `OPENAI_OPERATOR_MESSAGES_DEFAULT` to `true`.
+- **G6.3, run by the closeout.** WP-06 made no OpenAI live calls and
+  shipped its first activation with the `developer` rendering off. The
+  closeout then ran G6.3 as the GPT leg of the journeys; see
+  [WP-06 review follow-up](#wp-06-review-follow-up-2026-10-02).
 
 ## WP-06 deterministic evidence
 
@@ -1188,3 +1185,37 @@ switch default and documentation), one suite at a time:
   runtime, the doctor, gemini, claude-cli, cursor, base, app-core, TUI and the
   root crate. `cargo fmt --check` scoped to the changed crates and
   `git diff --check` are clean.
+
+## WP-06 review follow-up (2026-10-02)
+
+The closeout reviewed the candidate at `318474b54` and asked for two changes.
+
+**OpenAI developer rendering on (G6.3 passed).** The closeout ran
+`JCODE_OPENAI_OPERATOR_MESSAGES=1 JCODE_CLOSEOUT_LIVE_ROUTE=openai:gpt-5.6-sol
+cargo test -p jcode --lib closeout_journeys_live -- --ignored --nocapture` at
+2026-10-02T05:28Z: OpenAI OAuth, `gpt-5.6-sol`, effort `xhigh`, session
+`session_boar_1790918888358_86c23e8b599e2d85`. Seventeen requests, no errors.
+Both turn reminders were stored with operator authority and sent as
+`developer` items in place; 13 reasoning items were stored; a real `subagent`
+delegation on `fast-worker` succeeded; the cached share was 87–97% on every
+request outside the two declared transitions (skill activation, summary
+apply). `OPENAI_OPERATOR_MESSAGES_DEFAULT` is therefore `true` (Mirza's
+decision D17: keep the rendering where supported); the environment switch
+remains as the way to turn it off. The log is in the program evidence
+directory (`evidence/wp06-2026-10-01/journeys/gpt-5.6-sol-developer.log`).
+
+**Effort migration follows a changed default.** D18 makes `high` the default
+on Opus 5.5 because that model should run at `high` unless someone chooses
+otherwise. Sessions stored before effort intents kept the resolved default as
+a string, so a stored `medium` on Opus 5.5 is almost certainly the former
+default, not a choice. The migration now treats a stored value equal to
+either the model's current default or its former one
+(`anthropic_superseded_default_reasoning_effort`,
+`Provider::superseded_default_reasoning_effort`) as `Default`; any other
+stored value stays `Explicit`. An Opus 5.5 session that stored `medium`
+therefore runs at `high` after the update; one that stored `low` or `xhigh`
+keeps it. Tests: `jcode-session-types`
+`an_old_stored_effort_equal_to_a_default_migrates_to_default`,
+`jcode-provider-core` `only_opus_5_5_has_a_superseded_default_effort`, the
+runtime's `the_runtime_reports_the_superseded_default_of_its_model`, and
+app-core `a_session_stored_before_intents_migrates_by_the_models_defaults`.

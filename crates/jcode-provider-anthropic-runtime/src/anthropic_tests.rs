@@ -2866,3 +2866,17 @@ fn the_default_claude_model_is_opus_5_5_at_high_effort() {
     );
     assert!(jcode_provider_core::ALL_CLAUDE_MODELS.contains(&"claude-opus-5"));
 }
+
+/// INT-01/WP-06 R24: the runtime names the default Opus 5.5 had before D18, so
+/// a session that stored it migrates to `Default` and runs at `high`.
+#[test]
+fn the_runtime_reports_the_superseded_default_of_its_model() {
+    let provider = AnthropicProvider::new();
+    use_model(&provider, "claude-opus-5-5");
+    assert_eq!(
+        provider.superseded_default_reasoning_effort().as_deref(),
+        Some("medium")
+    );
+    use_model(&provider, "claude-opus-5");
+    assert_eq!(provider.superseded_default_reasoning_effort(), None);
+}

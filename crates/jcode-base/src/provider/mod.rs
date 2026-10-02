@@ -2341,6 +2341,11 @@ impl Provider for MultiProvider {
             .client_identity_text()
     }
 
+    fn superseded_default_reasoning_effort(&self) -> Option<String> {
+        self.runtime_for(self.active_provider())?
+            .superseded_default_reasoning_effort()
+    }
+
     fn replayed_reasoning_block_id(&self, block: &crate::message::ContentBlock) -> Option<String> {
         self.runtime_for(self.active_provider())?
             .replayed_reasoning_block_id(block)

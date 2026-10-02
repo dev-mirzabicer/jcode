@@ -31,7 +31,8 @@ pub use anthropic::{
     anthropic_default_reasoning_effort, anthropic_effectively_1m, anthropic_is_1m_model,
     anthropic_oauth_beta_headers, anthropic_reasoning_binding, anthropic_reasoning_caps,
     anthropic_stainless_arch, anthropic_stainless_os, anthropic_strip_1m_suffix,
-    anthropic_thinking_off, anthropic_tool_name_is_valid,
+    anthropic_superseded_default_reasoning_effort, anthropic_thinking_off,
+    anthropic_tool_name_is_valid,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -540,6 +541,14 @@ pub trait Provider: Send + Sync {
     /// is restored this way, never with a stored level.
     fn reset_reasoning_effort(&self) -> Result<()> {
         self.set_reasoning_effort("")
+    }
+
+    /// A default effort the current model had under an earlier jcode, when
+    /// it differs from today's. Sessions stored before effort intents kept
+    /// the resolved default as a string; this lets their migration recognize
+    /// the old default as a default, not a choice (INT-01/WP-06 R24).
+    fn superseded_default_reasoning_effort(&self) -> Option<String> {
+        None
     }
 
     /// Get ordered list of available reasoning effort levels.

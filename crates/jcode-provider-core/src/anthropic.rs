@@ -466,6 +466,16 @@ pub fn anthropic_default_reasoning_effort(model: &str) -> Option<&'static str> {
     }
 }
 
+/// The default effort `model` had before [`anthropic_default_reasoning_effort`]
+/// changed it, when it did. Only Opus 5.5: `medium` until Mirza's decision
+/// D18 (INT-01/WP-06) made it `high`. Used to migrate sessions that stored
+/// the old resolved default.
+pub fn anthropic_superseded_default_reasoning_effort(model: &str) -> Option<&'static str> {
+    let base = normalized_claude_caps_key(model);
+    let (family, version) = parse_claude_family_version(&base);
+    matches!((family, version), (Some("opus"), Some((5, 5)))).then_some("medium")
+}
+
 /// Whether a Claude model binds signed thinking to its conversation prefix.
 ///
 /// Each known entry cites its evidence. INT-01 Gate 0 (2026-09-29, Claude
@@ -720,6 +730,29 @@ mod tests {
             );
         }
         assert_eq!(ALL_CLAUDE_MODELS[0], crate::DEFAULT_CLAUDE_MODEL);
+    }
+
+    #[test]
+    fn only_opus_5_5_has_a_superseded_default_effort() {
+        // D18 raised Opus 5.5 from `medium` to `high` (INT-01/WP-06).
+        for model in ["claude-opus-5-5", "claude-opus-5-5[1m]"] {
+            assert_eq!(
+                anthropic_superseded_default_reasoning_effort(model),
+                Some("medium")
+            );
+            assert_ne!(
+                anthropic_default_reasoning_effort(model),
+                anthropic_superseded_default_reasoning_effort(model)
+            );
+        }
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-1",
+            "gpt-5.6-sol",
+        ] {
+            assert_eq!(anthropic_superseded_default_reasoning_effort(model), None);
+        }
     }
 
     #[test]

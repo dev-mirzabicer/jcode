@@ -34,16 +34,26 @@ impl StoredReasoningEffortIntent {
     }
 
     /// The intent of a session stored before intents existed, from the
-    /// effort string it kept and the runtime's default for its current
-    /// model. A stored value equal to that default was most likely the
-    /// resolved default, so it becomes `Default`; any other value was chosen
-    /// and stays `Explicit`. Either way the session's effective effort is
-    /// the one it had.
-    pub fn migrated(stored: Option<&str>, runtime_default: Option<&str>) -> Self {
+    /// effort string it kept. Such a session stored the resolved default as
+    /// if it were a choice, so a stored value equal to the runtime's default
+    /// for the session's model was almost certainly that default, and it
+    /// becomes `Default`. The same holds for a value equal to a default the
+    /// model had before (`superseded_default`): when a model's default
+    /// changes, sessions that merely ran at the old default follow the new
+    /// one. Any other value was chosen and stays `Explicit`.
+    pub fn migrated(
+        stored: Option<&str>,
+        runtime_default: Option<&str>,
+        superseded_default: Option<&str>,
+    ) -> Self {
         match stored {
-            Some(stored) if Some(stored) != runtime_default => Self::Explicit {
-                level: stored.to_string(),
-            },
+            Some(stored)
+                if Some(stored) != runtime_default && Some(stored) != superseded_default =>
+            {
+                Self::Explicit {
+                    level: stored.to_string(),
+                }
+            }
             _ => Self::Default,
         }
     }
@@ -73,21 +83,29 @@ mod tests {
     }
 
     #[test]
-    fn an_old_stored_effort_migrates_without_changing_the_effective_value() {
-        assert_eq!(Intent::migrated(None, Some("low")), Intent::Default);
-        assert_eq!(Intent::migrated(Some("low"), Some("low")), Intent::Default);
+    fn an_old_stored_effort_equal_to_a_default_migrates_to_default() {
+        assert_eq!(Intent::migrated(None, Some("low"), None), Intent::Default);
         assert_eq!(
-            Intent::migrated(Some("low"), Some("high")),
-            Intent::Explicit {
-                level: "low".to_string()
-            }
+            Intent::migrated(Some("low"), Some("low"), None),
+            Intent::Default
         );
+        // The model's default changed since the session stored it.
         assert_eq!(
-            Intent::migrated(Some("high"), None),
-            Intent::Explicit {
-                level: "high".to_string()
-            }
+            Intent::migrated(Some("medium"), Some("high"), Some("medium")),
+            Intent::Default
         );
+        for (stored, current, superseded) in [
+            ("low", Some("high"), None),
+            ("low", Some("high"), Some("medium")),
+            ("high", None, None),
+        ] {
+            assert_eq!(
+                Intent::migrated(Some(stored), current, superseded),
+                Intent::Explicit {
+                    level: stored.to_string()
+                }
+            );
+        }
     }
 
     #[test]

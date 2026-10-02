@@ -69,12 +69,10 @@ renders it natively:
   after an assistant message, for example), and on every other model, the
   notice is the stored user-role text, exactly as before. Adjacent notices
   are adjacent system messages.
-- **OpenAI Responses.** A `developer` message in place, once enabled. The
-  rendering is implemented and off by default
-  (`OPENAI_OPERATOR_MESSAGES_DEFAULT` in `jcode-provider-openai`) until the
-  live probe on the ChatGPT OAuth backend has run;
-  `JCODE_OPENAI_OPERATOR_MESSAGES=1` turns it on for a process. While it is
-  off, OpenAI receives the stored user-role text.
+- **OpenAI Responses.** A `developer` message in place. The ChatGPT OAuth
+  backend accepts it and keeps its prompt cache (measured 2026-10-02 on
+  GPT-5.6 Sol). `JCODE_OPENAI_OPERATOR_MESSAGES=0` falls back to the stored
+  user-role text for a process.
 - **Every other runtime.** The stored user-role `<system-reminder>` text.
 
 The rendering is a pure function of the stored history and the model's
@@ -227,9 +225,12 @@ is resolved for the current model on every request.
 - Restore, resume, a model switch and a runtime model fallback all apply the
   intent. Remote clients receive the effective value in the model-changed and
   effort-changed events.
-- Sessions stored before intents existed keep the effort they ran with: a
-  stored value equal to the runtime default for the session's model becomes
-  `Default`; any other stored value becomes `Explicit`.
+- Sessions stored before intents existed kept the resolved default as a
+  string, as if it had been chosen. A stored value equal to the runtime
+  default for the session's model, or to the default that model had before
+  (`medium` on Opus 5.5, whose default is now `high`), was almost certainly
+  that default and becomes `Default`; such a session follows today's
+  default. Any other stored value becomes `Explicit` and is kept.
 
 Per-model data in `jcode-provider-core` (`anthropic_reasoning_caps`):
 

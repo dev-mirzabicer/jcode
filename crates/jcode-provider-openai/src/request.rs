@@ -99,16 +99,16 @@ fn orphan_tool_output_to_user_message(item: &Value, missing_output: &str) -> Opt
 }
 
 /// Whether jcode sends operator notices to OpenAI Responses routes as
-/// `developer` messages when nothing overrides it. The Responses API
-/// documents the role, but acceptance and caching on the ChatGPT OAuth
-/// (Codex) backend are decided by live probe G6.3 (INT-01/WP-06), which has
-/// not run yet. Until it has, the default is the stored user-role delivery
-/// text, exactly as before WP-06; set this to `true` once G6.3 passes.
-pub const OPENAI_OPERATOR_MESSAGES_DEFAULT: bool = false;
+/// `developer` messages when nothing overrides it. Live probe G6.3
+/// (INT-01 closeout, 2026-10-02, GPT-5.6 Sol over ChatGPT OAuth) showed the
+/// Codex backend accepts them in place and keeps its prompt cache, so the
+/// rendering is on (Mirza's decision D17).
+pub const OPENAI_OPERATOR_MESSAGES_DEFAULT: bool = true;
 
 /// The process switch for [`OPENAI_OPERATOR_MESSAGES_DEFAULT`]:
-/// `JCODE_OPENAI_OPERATOR_MESSAGES=1` turns the `developer` rendering on (for
-/// the probe and acceptance runs), `0` turns it off.
+/// `JCODE_OPENAI_OPERATOR_MESSAGES=0` sends every notice as the stored
+/// user-role delivery text instead, as before WP-06 (a fallback if a backend
+/// stops accepting the role); `1` turns the `developer` rendering on.
 pub const OPENAI_OPERATOR_MESSAGES_ENV: &str = "JCODE_OPENAI_OPERATOR_MESSAGES";
 
 /// Whether operator notices go to OpenAI Responses routes as `developer`

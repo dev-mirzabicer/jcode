@@ -1366,6 +1366,11 @@ impl Provider for AnthropicProvider {
         self.effort_for_model(&model)
     }
 
+    fn superseded_default_reasoning_effort(&self) -> Option<String> {
+        jcode_provider_core::anthropic_superseded_default_reasoning_effort(&self.model())
+            .map(str::to_string)
+    }
+
     fn reset_reasoning_effort(&self) -> Result<()> {
         let configured = Self::configured_reasoning_effort(&self.model());
         match self.reasoning_effort.write() {

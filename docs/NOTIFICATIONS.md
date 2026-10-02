@@ -40,7 +40,7 @@ The stored delivery never changes. On the request path only, a delivery that ask
 |---|---|
 | Anthropic, model with mid-conversation system messages (Opus 5.5, Sonnet 5.5, Opus 5, Opus 4.8, Fable 5/5.1, Mythos 5/5.1) | A `role: "system"` message with the body, without the wrapper, when it follows a user message and is last or followed by an assistant message. Otherwise the stored user text. |
 | Anthropic, other models (Sonnet 5 and older) | The stored user text. |
-| OpenAI Responses | A `developer` message in place when enabled (`JCODE_OPENAI_OPERATOR_MESSAGES=1`; off by default until the live probe on the ChatGPT OAuth backend has run). Otherwise the stored user text. |
+| OpenAI Responses | A `developer` message in place. `JCODE_OPENAI_OPERATOR_MESSAGES=0` falls back to the stored user text for a process. |
 | Every other runtime | The stored user text. |
 
 The choice is a pure function of the stored history, so it does not change from one request to the next. The single exception is a notice whose request failed before any reply and that a new user message then follows: it becomes user text, which invalidates nothing because no reply came after it. Deliveries stored before authority was recorded keep the user form. Notices are identified by their stored origin, never by their prose. The capability data is `anthropic_conversation_caps` in `jcode-provider-core`; see [Claude provider parity](CLAUDE_PROVIDER_PARITY.md#operator-notices).

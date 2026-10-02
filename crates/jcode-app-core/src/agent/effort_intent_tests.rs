@@ -97,6 +97,11 @@ impl Provider for ModelDefaultsProvider {
         Ok(())
     }
 
+    /// Model B's default was `medium` under an earlier build.
+    fn superseded_default_reasoning_effort(&self) -> Option<String> {
+        (self.model() == MODEL_B).then(|| "medium".to_string())
+    }
+
     fn available_efforts(&self) -> Vec<&'static str> {
         if self.model() == MODEL_A {
             vec!["none", "low", "medium", "high"]
@@ -232,22 +237,35 @@ async fn a_chosen_effort_is_kept_across_switches_and_resumes() -> Result<()> {
     Ok(())
 }
 
-/// Sessions stored before intents existed keep the effort they ran with: a
-/// stored value equal to the model's default becomes `Default`, any other
-/// stays chosen.
+/// Sessions stored before intents existed kept the resolved default as a
+/// string. A stored value equal to the model's default, today's or the one
+/// it had before, becomes `Default` and follows today's default; any other
+/// value stays chosen.
 #[tokio::test]
-async fn a_session_stored_before_intents_keeps_its_effective_effort() -> Result<()> {
+async fn a_session_stored_before_intents_migrates_by_the_models_defaults() -> Result<()> {
     let _fixture = fixture()?;
-    for (model, stored, intent) in [
-        (MODEL_A, Some("low"), Intent::Default),
-        (MODEL_B, Some("high"), Intent::Default),
-        (MODEL_B, None, Intent::Default),
+    for (model, stored, intent, effective) in [
+        (MODEL_A, Some("low"), Intent::Default, "low"),
+        (MODEL_B, Some("high"), Intent::Default, "high"),
+        (MODEL_B, None, Intent::Default, "high"),
+        // Model B's former default: the session follows the new one.
+        (MODEL_B, Some("medium"), Intent::Default, "high"),
+        // Model A never had `medium` as a default: it was chosen.
+        (
+            MODEL_A,
+            Some("medium"),
+            Intent::Explicit {
+                level: "medium".to_string(),
+            },
+            "medium",
+        ),
         (
             MODEL_B,
             Some("low"),
             Intent::Explicit {
                 level: "low".to_string(),
             },
+            "low",
         ),
     ] {
         let mut session = crate::session::Session::create(None, None);
@@ -255,9 +273,8 @@ async fn a_session_stored_before_intents_keeps_its_effective_effort() -> Result<
         session.reasoning_effort = stored.map(str::to_string);
         session.save()?;
         let (provider, agent) = resume(&session.id).await?;
-        let expected = stored.unwrap_or("high");
-        assert_eq!(provider.reasoning_effort().as_deref(), Some(expected));
-        assert_eq!(agent.session.reasoning_effort.as_deref(), Some(expected));
+        assert_eq!(provider.reasoning_effort().as_deref(), Some(effective));
+        assert_eq!(agent.session.reasoning_effort.as_deref(), Some(effective));
         assert_eq!(agent.session.reasoning_effort_intent, Some(intent));
     }
     Ok(())

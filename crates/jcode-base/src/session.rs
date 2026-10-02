@@ -949,8 +949,8 @@ impl Session {
     /// restore and after every model switch.
     ///
     /// The runtime is first reset to its own default for the model. A session
-    /// stored before intents existed is classified against that default
-    /// (`StoredReasoningEffortIntent::migrated`). An explicit level the
+    /// stored before intents existed is classified against that default and
+    /// the default the model had before (`StoredReasoningEffortIntent::migrated`). An explicit level the
     /// current model does not offer leaves the default in force while that
     /// model is current; the intent keeps the level.
     pub fn apply_reasoning_effort_intent(&mut self, provider: &dyn crate::provider::Provider) {
@@ -965,7 +965,11 @@ impl Session {
         }
         let runtime_default = provider.reasoning_effort();
         let intent = self.reasoning_effort_intent.clone().unwrap_or_else(|| {
-            Intent::migrated(self.reasoning_effort.as_deref(), runtime_default.as_deref())
+            Intent::migrated(
+                self.reasoning_effort.as_deref(),
+                runtime_default.as_deref(),
+                provider.superseded_default_reasoning_effort().as_deref(),
+            )
         });
         if let Intent::Explicit { level } = &intent
             && let Err(error) = provider.set_reasoning_effort(level)
