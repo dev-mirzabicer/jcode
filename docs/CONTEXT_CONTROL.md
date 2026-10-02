@@ -365,11 +365,17 @@ prompt or tool set can leave later blocks bound to a prefix the next request no 
 The provider would reject such a block or drop it silently.
 
 jcode keeps every such block in one managed reasoning-invalidation transaction, grouped by
-cause. It recomputes the complete set from the blocks' recorded bindings:
+cause. On a route that binds reasoning it recomputes the complete set from the blocks'
+recorded bindings:
 
 - in every apply, revert and reapply, including authorized emergency transactions, inside
   the same revision as the change;
 - before every provider request, after the request's system prompt and tools are known.
+
+Validity is decided on the request exactly as the provider's formatter builds it: a message
+whose only block is suppressed disappears and its neighbours merge, and the blocks after it
+are judged against that shape. The request is validated once more just before it is sent,
+and a block jcode's own analysis finds invalid is never sent.
 
 When the set changes, the previous managed transaction is superseded and the new one applied
 at the same revision. Recomputing the whole set keeps revert and reapply exact: reverting a
@@ -383,7 +389,8 @@ Each suppressed block records its cause:
 | Cause | Meaning |
 |---|---|
 | Context transition | The apply, revert or reapply of the named transaction changed the history before the block. |
-| Request prefix changed | The system prompt, tool set or credential route differs from the request that produced the block. The recorded harness transitions since the previous request (skill activation, late MCP tool registration, MCP tool set reload, model switch, agent replacement) are listed when known. |
+| Request prefix changed | The system prompt, tool set or credential route differs from the request that produced the block. The recorded harness transitions since the previous request (skill activation, tool set change, provider model switch or fallback, agent replacement, OAuth client identity sync) are listed when known. |
+| Provider reported | The provider dropped the block for a changed prefix, or rejected the request naming it, although jcode's bindings found it valid. The block and every later replayable block are held. This cause is not derived from bindings, so it stays until the session is cleared. |
 
 What people see:
 
@@ -400,18 +407,34 @@ What people see:
   failure blocks the request and preserves input), shown as a status notice and recorded in
   the cache-invalidation journal.
 
-A context transition changes history, not tools. The next request keeps the session's locked
-tool set, so a registry change since the lock (an MCP server that connected, for example) is
-not picked up by the edit and invalidates nothing; the tool set changes only at a recorded
-tool-set transition ([tool-set lifetime](CLAUDE_PROVIDER_PARITY.md#tool-set-lifetime)).
+A context transition changes history, not tools. The session's tool set is frozen and
+persisted, so an edit never changes the tools a request carries. A registry change is
+announced by an appended notice at the next request, and only where the provider's `tools`
+array must carry it is that a recorded `tool set change` transition that invalidates earlier
+bound reasoning ([tool set](CLAUDE_PROVIDER_PARITY.md#tool-set)). A summary may cover a
+tool-set notice like any other message; a provider that applies tool changes from the notice
+then gets the change announced again at the next request.
 
 A person's own `R` selection is recorded even for blocks jcode currently suppresses, so a
-later restore cannot undo it. Routes and models that do not bind reasoning (OpenAI, Opus 5,
-Sonnet 5 and every non-Anthropic route) stage nothing, and switching to one lifts the managed
-set at the next request. Managed sets never block a provider or model switch. The rule reads
-the per-model `reasoning_binding` capability, so a provider change of binding policy is a
-capability entry, not new code. The Anthropic request-time `drop_block` safety net remains
-for anything jcode could not detect, and any drop it reports is logged as a defect.
+later restore cannot undo it; a block a person's active suppression already holds is left to
+that transaction.
+
+**Across model and provider switches.** Routes and models that do not bind reasoning
+(OpenAI, Opus 5, Sonnet 5 and every non-Anthropic route) stage nothing for a context change.
+Switching to one changes nothing in the managed set: nothing is lifted and nothing is added,
+so switching back to a binding model finds the same set. A suppressed block returns only
+through the recompute on a binding route, when its recorded binding proves it valid again;
+that recompute suppresses every block produced while it was absent. jcode never strips
+reasoning for a switch: every Claude model receives the same transcript, and the API leaves
+out blocks the current model cannot read without invalidating anything. Those routing drops
+are not recorded as suppressions. Managed sets never block a provider or model switch.
+
+The rule reads the per-model `reasoning_binding` capability, so a provider change of binding
+policy is a capability entry, not new code
+([maintainer procedure](CLAUDE_PROVIDER_PARITY.md#adding-or-updating-a-claude-model)). The
+Anthropic request-time `drop_block` safety net remains for anything jcode could not detect.
+A drop it reports for a changed prefix is logged as a defect and fed back into the managed
+set under the cause "provider reported", so the next request no longer sends that block.
 
 ## File evidence and summary provenance
 
@@ -774,7 +797,7 @@ The subsystem intentionally has one implementation per concern:
 | `jcode-protocol/src/context.rs` | Bounded typed local/remote DTOs and correlation identities. |
 | `jcode-tui::context_editor` | Presentation state machine, stable selection, review/history/provenance, keyboard/mouse handling, and responsive rendering. |
 | `context_editor/curator_workspace.rs` | Per-run route/instruction control, exact-call disclosure, default save/restore, progress, outcomes, and atomic retry presentation. |
-| `jcode-app-core/src/context/reasoning_invalidation.rs` | The only writer of managed reasoning invalidations: recomputes the set for transitions, reviews and requests from the runtime's `Provider::replayed_reasoning_invalidations`. |
+| `jcode-app-core/src/context/reasoning_invalidation.rs` | The only writer of managed reasoning invalidations: recomputes the set for transitions, reviews and requests from the runtime's `Provider::replayed_reasoning_invalidations`, and adds the blocks a provider reported. |
 | `agent/emergency.rs` and scheduler integration | Explicitly authorized unattended planning, protection, one transaction, one retry, and audit. |
 
 Do not duplicate projection, validation, transaction, or evidence semantics in the TUI.

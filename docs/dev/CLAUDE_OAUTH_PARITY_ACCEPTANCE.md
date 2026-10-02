@@ -3,8 +3,8 @@
 This ledger records the evidence for the INT-01 intervention, which makes a
 Claude model driven over Claude OAuth see the same system prompt, tools,
 transcript and dynamic context as a GPT model over OpenAI OAuth. Each work
-package appends its section. Requirement identifiers (R01–R16) and decisions
-(D1–D13) come from the downstream program dossier
+package appends its section. Requirement identifiers (R01–R28) and decisions
+(D1–D18) come from the downstream program dossier
 (`jcode_program/interventions/INT-01-claude-oauth-parity/`).
 
 ## Current behavior after WP-01
@@ -880,3 +880,214 @@ equal, canary passed); later commits are documentation only. R12–R15 are
 closed; R16 is complete for WP-05 and is reconciled at the INT-01 closeout,
 together with the one-release legacy tool-name removal and the pricing
 cache-write rate under the one-hour TTL.
+
+## Current behavior after WP-06
+
+WP-06 (boundary hardening, added after the closeout's two independent reviews)
+changed the behavior below. The current-behavior reference is
+[`CLAUDE_PROVIDER_PARITY.md`](../CLAUDE_PROVIDER_PARITY.md), with
+[`NOTIFICATIONS.md`](../NOTIFICATIONS.md#operator-rendering) and
+[`CONTEXT_CONTROL.md`](../CONTEXT_CONTROL.md#replayed-reasoning-bound-to-its-prefix).
+
+- **Lossless stream** (R17). The response body is framed as bytes
+  (`sse_decoder.rs`): strict UTF-8 per complete line, LF, CR and CRLF line
+  endings, joined `data:` lines. A turn completes only on `message_stop` with
+  every content block closed; anything else is an incomplete response, a
+  retryable transport fault that is never stored as a completed turn. A
+  malformed known event is a fault. Cancellation stays distinct.
+- **Exact suppression planning** (R18). `binding::plan_suppressions` decides
+  every replayed block on the request as the formatter builds it after the
+  earlier removals (empty-message drop, role merge, tool results first). The
+  runtime validates the exact request before sending and hands back a request
+  that still holds an invalid block instead of sending it.
+- **Provider feedback** (R19). Drops reported in `input_transformations` and a
+  rejection that names a block are mapped through the request to stored
+  blocks. The block and the replayable run after it join the managed set with
+  cause `ProviderReported`, held until the session is cleared. Routing drops
+  (`model_binding_mismatch`, `organization_binding_mismatch`) are not
+  persisted; see the deviation below. A rejected request is planned again
+  once. The "thinking blocks cannot be modified" rejection takes the same
+  path.
+- **One request plan** (R20). Route, model and model-dependent parameters are
+  resolved once per request. A credential-mode change resets the route
+  observation. A model fallback is persisted and handed back to the agent as
+  a `provider model fallback` transition and a new plan
+  (`ProviderRequestReplan`), or rebuilt completely for callers that cannot
+  plan again. The reasoning self-heal keeps `block_binding`.
+- **Retention across switches** (R21, D16). A route or model that does not
+  bind changes nothing in the managed set. On a binding route the set is
+  recomputed from bindings as before; provider-reported blocks stack with it.
+  Nothing is stripped or restored because of a switch.
+- **Durable tool set** (R22, D15). `Session::tool_set` holds the definitions
+  the first request advertised and every change announced since. Changes are
+  announced once by an appended `ToolSet` delivery; Anthropic models with
+  in-message tool changes keep the frozen `tools` array, other runtimes take
+  additions and schema changes into the array at a recorded `tool set change`
+  transition. `ToolSetLock`, the one-shot late-MCP rebuild and the `mcp`
+  unlock are gone.
+- **Operator notices** (R23, D17). Deliveries store the authority they ask
+  for. Anthropic renders operator deliveries as `role: "system"` messages
+  where the model and the placement allow, OpenAI as `developer` messages,
+  every other runtime as the stored user text.
+- **Effort intent** (R24). Sessions store `Default` or `Explicit(level)`;
+  restore, resume, model switches and fallbacks apply it for the current
+  model. Stored strings from before migrate without changing the effective
+  effort.
+- **Defaults** (R25, D18). `claude-opus-5-5` is the default Claude model and
+  its default effort is `high`.
+- **Tool names** (R26). A tool the dispatching runtime would reject by name
+  is not advertised there, with a status notice.
+- **Identity and display** (R27). Every thinking configuration asks for
+  `display: "summarized"`. A changed billing header between two requests of
+  a session is journaled as `OAuth client identity sync`.
+
+## WP-06 boundary probes (2026-10-01)
+
+`jcode provider-doctor claude --contract claude-oauth-boundaries --model <id>`
+(`crates/jcode-provider-doctor/src/claude_boundaries.rs`) sends the probes
+below with the runtime's production request builder, token resolution and
+attribution headers, and writes a redacted report. Route Claude OAuth, native
+Anthropic runtime; effort `low` for G6.1a–e and `high` for the thinking
+chain; `display: "summarized"`; run 2026-10-01 from 13:46Z. Reports: program
+evidence `evidence/wp06-2026-10-01/probes/`.
+
+| Probe | Opus 5.5 | Sonnet 5.5 | Opus 5 | Sonnet 5 |
+|---|---|---|---|---|
+| G6.1a `role: "system"` message after a user message | 200, followed | 200 | 200 | 200 (documentation says unsupported) |
+| G6.1b two adjacent system messages | 200 | 200 | 200 | 200 |
+| G6.1c `cache_control` on a system message | 200, cached | 200 | 200 | 200 |
+| G6.1d system message after a `tool_result` with thinking, under `error`, then the next request | 200, 200 | 200, 200 | 200, 200 (no binding check) | 200, 200 (no binding check) |
+| G6.1e system message text inside the `<system-reminder>` wrapper | 200 | 200 | 200 | 200 |
+| G6.2a `tool_addition` by value, new tool (`inline-tools-2026-09-15`), under `error` | 200, cache read kept; next 200 | same | same | 400 "tool_addition/tool_removal is not supported on this model" |
+| G6.2b `tool_addition` by value replacing a same-name tool | 200, cache read kept; next 200 | same | same | 400 |
+| G6.2c `tool_removal` by name | 200, cache read kept; next 200 | same | same | 400 |
+| G6.2d by-reference addition of a deferred tool appended to `tools` | 200, but cache read 0 | same | same | 400 |
+| G6.4 U+FFFD in the latest assistant message's summarized thinking, `drop_block` | 200, `[]` | 200, `[]` | 200 | 200 |
+| G6.5 Opus 5.5 thinking, two turns on Sonnet 5.5, back on Opus 5.5, under `error` | Sonnet legs report `model_binding_mismatch` for the Opus block; back on Opus 5.5 `[]` on both requests | — | — | — |
+| G6.6 billing header version bumped, under `error` | 200, `[]`, cache read unchanged | 200, `[]` | 200 | 200 |
+
+Decisions taken from the results:
+
+- **System messages and tool changes.** Opus 5.5, Sonnet 5.5 and Opus 5 get
+  `role: "system"` rendering and in-message tool changes. The by-value inline
+  form is used: the by-reference form needs the tool appended to `tools`,
+  which breaks the cache. Sonnet 5 accepted a system message although the
+  documentation lists it as unsupported; jcode follows the documentation and
+  keeps the user form there (the form it always sent), and it rejects tool
+  changes, so its array carries them.
+- **Wrapper.** The operator form carries the body without the
+  `<system-reminder>` wrapper; the wrapper marks harness text inside user
+  content and both forms were accepted.
+- **Modified thinking.** A changed character in summarized thinking was not
+  rejected and nothing was dropped on this account: summary text is not
+  verified, so a damaged summary cannot wedge a session. The recovery for
+  the documented rejection is implemented and tested against the documented
+  error text.
+- **Switch and back.** A round trip through a model that cannot read a block
+  loses nothing, so routing drops are not persisted as suppressions.
+- **Billing header.** The API neither caches nor binds that block. The
+  binding digest hashes it as fixed text, so a version sync invalidates no
+  thinking.
+- **Pending for the closeout.** G6.3 (an OpenAI `developer` item on GPT-5.6
+  Sol over OAuth) was not run in WP-06: no OpenAI live calls were allowed.
+  OpenAI's `developer` rendering is selected by its deterministic tests.
+
+## WP-06 deterministic evidence
+
+- **R17.** `jcode-provider-anthropic-runtime` `sse_decoder::tests` (every
+  byte split of multi-byte text; LF, CR and CRLF; joined `data:` lines; cut
+  bodies; invalid UTF-8 is a fault) and `boundary_tests` through a local HTTP
+  server and the production `complete` path:
+  `multibyte_text_survives_any_chunking_and_both_line_endings_over_http`
+  (splits inside text, thinking, signatures and `input_json`),
+  `a_body_that_ends_before_the_response_completes_is_a_transport_fault` (EOF
+  after every event and inside a block),
+  `an_incomplete_response_is_retried_and_partial_output_is_rolled_back`,
+  `a_consumer_that_stops_listening_is_a_cancellation_not_a_fault`. With the
+  former per-chunk lossy decoding the first test fails.
+- **R18.** `jcode-provider-anthropic` `binding::tests`: thinking-only and
+  redacted-only turns, `suppressing_a_thinking_only_turn_invalidates_the_thinking_after_it`,
+  `thinking_produced_after_a_suppressed_thinking_only_turn_stays_valid`,
+  `restoring_a_thinking_only_turn_invalidates_what_was_produced_without_it`,
+  `a_turn_cut_off_after_a_closed_thinking_block_replays_it` (the two reviewer
+  counterexamples among them); each asserts that no invalid block is sent and
+  no valid block is suppressed. Runtime:
+  `a_request_whose_plan_resolved_differently_is_handed_back_not_sent`.
+- **R19.** Runtime `provider_reported_drops_name_the_block_and_the_run_after_it`
+  (in `message_start` and `message_delta`),
+  `unknown_drops_are_fed_back_and_routing_drops_are_kept`,
+  `a_rejection_of_replayed_thinking_asks_the_caller_to_replan_without_the_named_run`;
+  `jcode-app-core` `agent::request_replan_tests`
+  (`a_provider_reported_drop_is_persisted_and_not_sent_again`,
+  `rejected_reasoning_is_suppressed_and_the_request_is_sent_once_more`) and
+  `context::reasoning_invalidation_tests::provider_reported_blocks_join_the_managed_set_with_their_cause`.
+- **R20.** Runtime `a_credential_mode_change_decides_the_next_request_route`
+  (both directions, through the public setter),
+  `a_model_fallback_is_a_complete_new_plan`,
+  `the_reasoning_self_heal_keeps_the_binding_control`; app-core
+  `a_model_fallback_is_adopted_recorded_and_planned_again`,
+  `a_request_handed_back_without_end_fails_instead_of_looping`.
+- **R21.** `context::reasoning_invalidation_tests`:
+  `switching_to_an_unbound_model_and_back_restores_and_strips_nothing`,
+  `an_unbound_model_stages_and_reports_nothing`, and the unchanged WP-04
+  revert and reapply cases.
+- **R22.** `jcode-session-types` `tool_set::tests`; app-core
+  `tool::tool_set::tests`; `agent::tool_set_tests`: a session restarted into
+  a fresh Agent and registry keeps its tool bytes on the Anthropic and OpenAI
+  builders with an unchanged registry and across two restarts; a delayed MCP
+  reconnect, a description change, a schema change, an addition and a
+  removal each produce exactly one notice and the documented array behavior,
+  for a provider whose array carries changes and for one with in-message
+  changes; calls to a reconnecting and to a removed tool are refused with
+  their reason; a rewound notice is announced again.
+  `agent::reasoning_invalidation_tests`: a context transition keeps tools and
+  thinking; an array change is a recorded, attributed transition; an
+  in-message change keeps the array and every earlier thinking block valid.
+  `jcode-provider-anthropic` `operator_messages_tests`: changes by value and
+  by name, moved when the notice is user text, a repeated change rendered
+  once. `jcode-tui`:
+  `local_requests_keep_the_frozen_tool_set_and_announce_a_change_once`.
+- **R23.** `jcode-provider-anthropic` `operator_messages_tests` (placement
+  rules, the unanswered-notice flip, thinking bound across a system message,
+  cache placement); runtime `operator_notices_follow_each_models_capability`
+  (Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Opus 4.7); `jcode-provider-openai`
+  developer-item tests; app-core
+  `agent::context_delivery_tests::scripted_session_is_append_only_on_both_production_builders`,
+  extended to the Anthropic builder with and without system messages and the
+  OpenAI developer form, with a failed request after a delivery and a reload.
+  Removing the allowance for the unanswered suffix makes it fail at exactly
+  that block.
+- **R24.** `jcode-session-types` `effort::tests`; app-core
+  `agent::effort_intent_tests` (default follows the model across a switch and
+  two resumes; a chosen level across switches and resumes; migration of
+  stored strings; no inheritance between sessions on one runtime);
+  `server::provider_control::tests::a_remote_default_effort_follows_the_model_and_survives_a_restart`
+  through the handlers a remote client drives; runtime
+  `resetting_the_effort_returns_to_the_runtime_default_for_the_model`.
+- **R25.** `jcode-provider-core` `default_effort_is_an_explicit_per_model_table`,
+  `quality_first_defaults_are_first_in_curated_model_orders`; runtime
+  `the_default_claude_model_is_opus_5_5_at_high_effort`.
+- **R26.** `jcode-provider-core` `tool_name_policy::rule_tests`; app-core
+  `agent::tool_set_tests::tools_a_provider_would_reject_by_name_are_withheld_with_a_notice`
+  (invalid characters, a 100-character and an overlong name, under the
+  Anthropic and the OpenAI rule, checked on both production builders).
+- **R27.** Runtime tests that every thinking configuration carries
+  `display: "summarized"`; `binding::tests` for the fixed billing text in the
+  digest; app-core
+  `agent::tool_set_tests::a_client_identity_sync_is_a_recorded_transition`.
+
+Deviations from the WP-06 specification, recorded for the closeout:
+
+- **R19, routing drops.** The specification feeds every reported drop back
+  into the managed set. `model_binding_mismatch` and
+  `organization_binding_mismatch` are left out: they are routing drops that
+  the documentation and probe G6.5 show to lose nothing on the way back, and
+  persisting them would strip thinking for a switch, which D16 forbids. Every
+  other type and reason, unknown ones included, is fed back.
+- **R27, identity syncs.** The sync is journaled and kept as a cause label,
+  but it invalidates no thinking: the digest treats the billing block as
+  fixed text because G6.6 measured that the API does not bind it.
+- **Tool-set transition name.** The former `late MCP tool registration`,
+  `MCP tool set reload` and `Swarm globally disabled` journal labels are one
+  label, `tool set change`; the notice names the tools.
+

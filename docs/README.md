@@ -30,7 +30,7 @@ Reference documentation for the jcode codebase.
 - Session inspection: [snapshots, activity, archival and reviewed cleanup](SESSION_INSPECTION.md), [persistence and ownership](dev/SESSION_INSPECTION.md), [acceptance evidence and limits](dev/SESSION_INSPECTION_ACCEPTANCE.md)
 - Startup Context: `STARTUP_CONTEXT.md`, `dev/STARTUP_CONTEXT_ACCEPTANCE.md`
 - Context control: `CONTEXT_CONTROL.md`, `dev/CONTEXT_CONTROL_ACCEPTANCE.md`
-- Claude provider parity (INT-01): [what a Claude request contains, thinking replay, tool-set lifetime, cache placement and per-model parameters](CLAUDE_PROVIDER_PARITY.md); [acceptance ledger, live provider contract and `provider-doctor --contract claude-oauth`](dev/CLAUDE_OAUTH_PARITY_ACCEPTANCE.md)
+- Claude provider parity (INT-01): [what a Claude request contains, operator notices, the durable tool set, thinking replay, effort intent, cache placement, per-model parameters and the procedure for adding a Claude model](CLAUDE_PROVIDER_PARITY.md); [acceptance ledger, live provider contract and `provider-doctor --contract claude-oauth`](dev/CLAUDE_OAUTH_PARITY_ACCEPTANCE.md)
 - Refactoring and quality: `REFACTORING.md`, `plans/CODE_QUALITY_10_10_PLAN.md`
 - Desktop app: `DESKTOP_APP_ARCHITECTURE.md`, `DESKTOP_CODEBASE_ARCHITECTURE.md`
 - Providers: `PROVIDER_DOCTOR.md`, `AWS_BEDROCK_PROVIDER.md`

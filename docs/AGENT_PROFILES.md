@@ -120,7 +120,7 @@ A successful replacement atomically persists:
 - Cleared stored provider-native continuation
 - A short managed system-display audit message
 
-After persistence Jcode resets in-memory provider continuation and prompt-cache tracking, records the intentional invalidation cause, and reseeds context accounting. Tool-definition locking remains independent and is not unlocked by replacement. No provider call occurs until a later user turn.
+After persistence Jcode resets in-memory provider continuation and prompt-cache tracking, records the intentional invalidation cause, and reseeds context accounting. The session's persisted tool set remains independent and is not changed by replacement. No provider call occurs until a later user turn.
 
 Same-agent replacement is allowed. It is the explicit way to load current source into the true system prompt.
 
