@@ -109,7 +109,6 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
         &crate::server::startup_context::test_coordinator(),
         &provider,
         &crate::instruction::InstructionRepositoryService::new(),
-        None,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

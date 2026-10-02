@@ -222,6 +222,39 @@ pub(super) fn peek_for_session(session_id: &str) -> Result<Option<ReloadRecovery
     crate::storage::read_json(&path).map(Some)
 }
 
+/// Every pending intent, oldest first. A damaged record is reported and left
+/// in place for inspection; it cannot block other sessions' continuations.
+pub(super) fn pending_records() -> Result<Vec<ReloadRecoveryRecord>> {
+    let dir = recovery_dir()?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        match crate::storage::read_json::<ReloadRecoveryRecord>(&path) {
+            Ok(record) if record.status == ReloadRecoveryStatus::Pending => records.push(record),
+            Ok(_) => {}
+            Err(error) => crate::logging::error(&format!(
+                "reload recovery store: damaged intent {} retained for inspection: {error:#}",
+                path.display()
+            )),
+        }
+    }
+    records.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(records)
+}
+
+/// Retire a planned continuation that an unexpected exit superseded.
+pub(super) fn discard_for_session(session_id: &str) -> Result<()> {
+    remove_record_files(&path_for_session(session_id)?)
+}
+
 #[cfg(test)]
 pub(super) fn has_pending_for_session(session_id: &str) -> bool {
     peek_for_session(session_id)

@@ -186,7 +186,7 @@ fn lifecycle_case(independent: IndependentTasks) -> Result<()> {
             tokio::time::timeout(Duration::from_secs(15), async {
                 while !work.path().join("ready").exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
             }).await?;
-            let RuntimeResponse::Review(review) = lifecycle.request(RuntimeRequest::Review { options: ShutdownOptions { strategy: StopStrategy::Interrupt, independent, quiescence_timeout_seconds: 10 } }).await? else { anyhow::bail!("Unexpected runtime reply") };
+            let RuntimeResponse::Review(review) = lifecycle.request(RuntimeRequest::Review { options: ShutdownOptions { strategy: StopStrategy::Interrupt, independent, quiescence_timeout_seconds: 10, destination: Default::default() } }).await? else { anyhow::bail!("Unexpected runtime reply") };
             let mut stopped = lifecycle.stopped();
             lifecycle.request(RuntimeRequest::Begin { request: RequestId::new(), review: review.id }).await?;
             let settled = tokio::time::timeout(Duration::from_secs(15), async {

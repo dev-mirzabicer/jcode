@@ -35,6 +35,7 @@ fn stopped_runtime_and_changed_socket_paths_are_not_silently_recreated_or_remove
                 strategy: StopStrategy::Interrupt,
                 independent: IndependentTasks::Stop,
                 quiescence_timeout_seconds: 1,
+                destination: Default::default(),
             },
             Vec::new(),
         )?;
@@ -96,7 +97,8 @@ fn reviewed_runtime_stop_exits_actual_server_without_a_provisional_session() -> 
             exchange(&mut read, &mut write, Request::RuntimeProbe { id: 1 }).await?,
             ServerEvent::RuntimeCapabilities {
                 id: 1,
-                version: Some(1)
+                version: Some(1),
+                supervision: Some(1)
             }
         ));
         let event = exchange(
@@ -109,6 +111,7 @@ fn reviewed_runtime_stop_exits_actual_server_without_a_provisional_session() -> 
                         strategy: StopStrategy::FinishCurrent,
                         independent: IndependentTasks::Stop,
                         quiescence_timeout_seconds: 5,
+                        destination: Default::default(),
                     },
                 }),
             },

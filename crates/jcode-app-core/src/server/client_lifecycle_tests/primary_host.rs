@@ -50,6 +50,7 @@ fn cold_primary_input_is_durable_while_fenced_and_restored_once_after_cancel() -
                     strategy: StopStrategy::FinishCurrent,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 5,
+                    destination: Default::default(),
                 },
             })
             .await?
@@ -307,6 +308,7 @@ fn runtime_shutdown_fence_retains_input_and_allows_only_admitted_work() -> Resul
                     strategy: StopStrategy::FinishCurrent,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 10,
+                    destination: Default::default(),
                 },
             })
             .await?
@@ -703,7 +705,7 @@ fn busy_snapshot_replays_prefix_once_then_continues_after_its_cursor() -> Result
         let (stream,mut reader)=crate::transport::stream_pair()?;
         let (_,writer)=stream.into_split();
         let writer=Arc::new(Mutex::new(writer));
-        crate::server::client_state::handle_get_history(41,&session,true,&agent,&crate::server::startup_context::test_coordinator(),&provider,&host,&Arc::new(RwLock::new(HashMap::new())),&Arc::new(RwLock::new(1)),&writer,"fixture","",None,Some(&observer)).await?;
+        crate::server::client_state::handle_get_history(41,&session,true,&agent,&crate::server::startup_context::test_coordinator(),&provider,&host,&Arc::new(RwLock::new(HashMap::new())),&Arc::new(RwLock::new(1)),&writer,"fixture","",Some(&observer)).await?;
         assert!(!prefix.is_current(),"queued prefix is already represented by the snapshot replay");
         drop(writer);
         let mut bytes=Vec::new();
@@ -791,7 +793,7 @@ fn slow_client_overflow_does_not_stop_the_primary() -> Result<()> {
         let startup=crate::server::startup_context::test_coordinator();
         let connections=Arc::new(RwLock::new(HashMap::new()));
         let count=Arc::new(RwLock::new(1));
-        let snapshot=crate::server::client_state::handle_get_history(77,&session,true,&agent,&startup,&provider,&host,&connections,&count,&writer,"fixture","",None,Some(&observer));
+        let snapshot=crate::server::client_state::handle_get_history(77,&session,true,&agent,&startup,&provider,&host,&connections,&count,&writer,"fixture","",Some(&observer));
         tokio::pin!(snapshot);
         assert!(tokio::time::timeout(Duration::from_millis(10),snapshot.as_mut()).await.is_err());
         for id in 0..1024 { if observer.send(ServerEvent::Done{id}).is_err() { break; } }
@@ -1355,6 +1357,305 @@ fn primary_stop_waits_for_owned_foreground_terminal_publication() -> Result<()> 
         let record = store.inspect(&run)?.unwrap();
         assert_eq!(record.state, crate::execution::RunState::Cancelled);
         assert!(record.result_path.is_some());
+        host.shutdown().await
+    })
+}
+
+/// Journals of a runtime incarnation bound to `host`, plus one unresolved
+/// unexpected-exit recovery item for `session` from a previous incarnation.
+fn bind_recovery_fixture(
+    host: &crate::primary::PrimaryHost,
+    session: &str,
+) -> Result<(
+    crate::runtime_lifecycle::RuntimeStopOwner,
+    crate::workspace::runtime::RecoveryItem,
+)> {
+    let store = crate::runtime_lifecycle::RuntimeStopStore::new(
+        &crate::storage::durable_state_dir(),
+        &crate::server::socket_path(),
+    )?;
+    let owner = store.claim()?;
+    host.bind_runtime_journals(crate::primary::RuntimeJournals {
+        turns: owner.turns(),
+        recovery: owner.recovery(),
+    })?;
+    let record = crate::runtime_lifecycle::turns::TurnRecord {
+        schema: 1,
+        session: session.into(),
+        turn: "previous-turn".into(),
+        runtime: "previous-incarnation".into(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let item = owner
+        .recovery()
+        .adopt(&[record], |_| {
+            crate::workspace::runtime::RecoveryCause::UnexpectedExit
+        })?
+        .remove(0);
+    Ok((owner, item))
+}
+
+async fn wait_committed(
+    session: &str,
+    input: crate::workspace::RequestId,
+    host: &crate::primary::PrimaryHost,
+) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let receipt =
+                crate::primary_input::PrimaryInputStore::current().inspect(session, input)?;
+            anyhow::ensure!(
+                receipt.state != jcode_session_types::PrimaryInputState::Failed,
+                "delivery failed: {receipt:?}"
+            );
+            if receipt.state == jcode_session_types::PrimaryInputState::Committed
+                && host.processing(session).is_none()
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?
+}
+
+#[test]
+fn unresolved_crash_recovery_defers_automatic_wakes_until_human_input_supersedes() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let recorder = Arc::new(DurableInputProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        agent.lock().await.startup_context_session_mut().save()?;
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let (owner, item) = bind_recovery_fixture(&host, &session)?;
+        let status = status_fixture(&session);
+        let mut wake = jcode_session_types::PrimaryInputEnvelope::new(
+            session.clone(),
+            "background task finished".into(),
+            jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+        );
+        wake.display_role = Some(jcode_session_types::StoredDisplayRole::BackgroundTask);
+        crate::server::live_turn::submit_primary_input(&host, wake.clone(), status.clone()).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            crate::primary_input::PrimaryInputStore::current()
+                .inspect(&session, wake.id)?
+                .state,
+            jcode_session_types::PrimaryInputState::Accepted,
+            "an automatic wake must not bypass the pending recovery decision"
+        );
+        assert!(
+            recorder.snapshots.lock().unwrap().is_empty(),
+            "no inference before a decision"
+        );
+
+        let mut human = jcode_session_types::PrimaryInputEnvelope::new(
+            session.clone(),
+            "human follow-up".into(),
+            jcode_session_types::PrimaryInputDelivery::NextTurn,
+        );
+        human.origin = Some(jcode_session_types::StoredMessageOrigin::Human);
+        crate::server::live_turn::submit_primary_input(&host, human.clone(), status.clone())
+            .await?;
+        wait_committed(&session, human.id, &host).await?;
+        wait_committed(&session, wake.id, &host).await?;
+        let resolved = owner.recovery().inspect(item.id)?;
+        assert_eq!(
+            resolved.resolved.map(|resolved| resolved.resolution),
+            Some(
+                crate::workspace::runtime::RecoveryResolution::SupersededByInput {
+                    input: human.id
+                }
+            )
+        );
+        // The human message went first; the deferred wake followed it, either
+        // at that turn's safe boundary or as its own next turn.
+        let calls = recorder.snapshots.lock().unwrap().clone();
+        assert!((1..=2).contains(&calls.len()));
+        let text = |messages: &Vec<Message>| {
+            messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            text(&calls[0]).contains("human follow-up")
+                && !text(&calls[0]).contains("background task finished")
+        );
+        // A trusted decision after supersession cannot inject a stale continuation.
+        assert!(
+            crate::server::supervision::decide(
+                &host,
+                item.id,
+                item.revision,
+                crate::workspace::RequestId::new(),
+                crate::workspace::runtime::RecoveryDecision::Continue,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), calls.len());
+        host.shutdown().await
+    })
+}
+
+#[test]
+fn selected_continue_delivers_one_turn_and_replays_only_by_request() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let recorder = Arc::new(DurableInputProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        agent.lock().await.startup_context_session_mut().save()?;
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let (owner, item) = bind_recovery_fixture(&host, &session)?;
+        host.configure_input_delivery(status_fixture(&session));
+        let request = crate::workspace::RequestId::new();
+        let decide = |request| {
+            crate::server::supervision::decide(
+                &host,
+                item.id,
+                item.revision,
+                request,
+                crate::workspace::runtime::RecoveryDecision::Continue,
+            )
+        };
+        let first = decide(request).await?;
+        let Some(crate::workspace::runtime::RecoveryResolution::Continued { input }) = first
+            .resolved
+            .as_ref()
+            .map(|resolved| resolved.resolution.clone())
+        else {
+            panic!("continue was not recorded: {first:?}");
+        };
+        wait_committed(&session, input, &host).await?;
+        // Two clients, or one retrying an uncertain reply: same request replays
+        // the decision; another request cannot decide again.
+        assert_eq!(decide(request).await?, first);
+        assert!(decide(crate::workspace::RequestId::new()).await.is_err());
+        let calls = recorder.snapshots.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "exactly one continuation turn");
+        let saved = Session::load(&session)?;
+        assert_eq!(saved.primary_inputs.len(), 1);
+        assert!(owner.recovery().unresolved(&session)?.is_empty());
+        host.shutdown().await
+    })
+}
+
+#[test]
+fn leave_stopped_needs_no_inference_and_releases_deferred_wakes() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let recorder = Arc::new(DurableInputProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        agent.lock().await.startup_context_session_mut().save()?;
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let (_owner, item) = bind_recovery_fixture(&host, &session)?;
+        let status = status_fixture(&session);
+        let mut wake = jcode_session_types::PrimaryInputEnvelope::new(
+            session.clone(),
+            "scheduled wake".into(),
+            jcode_session_types::PrimaryInputDelivery::SafeBoundary,
+        );
+        wake.display_role = Some(jcode_session_types::StoredDisplayRole::BackgroundTask);
+        crate::server::live_turn::submit_primary_input(&host, wake.clone(), status.clone()).await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(recorder.snapshots.lock().unwrap().is_empty());
+        let left = crate::server::supervision::decide(
+            &host,
+            item.id,
+            item.revision,
+            crate::workspace::RequestId::new(),
+            crate::workspace::runtime::RecoveryDecision::LeaveStopped,
+        )
+        .await?;
+        assert_eq!(
+            left.resolved.map(|resolved| resolved.resolution),
+            Some(crate::workspace::runtime::RecoveryResolution::LeftStopped {})
+        );
+        // The interrupted turn is not continued; ordinary deferred input resumes.
+        wait_committed(&session, wake.id, &host).await?;
+        assert_eq!(recorder.snapshots.lock().unwrap().len(), 1);
+        host.shutdown().await
+    })
+}
+
+#[test]
+fn only_planned_transitions_retain_interrupted_turn_records() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(DurableInputProvider::default());
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        agent.lock().await.startup_context_session_mut().save()?;
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let (owner, _item) = bind_recovery_fixture(&host, &session)?;
+        let pending = || async {
+            let admission = host.admit(&session, 7, agent.clone())?;
+            host.start(
+                admission,
+                |_| std::future::pending::<Result<Option<String>>>(),
+                |_| async {},
+            );
+            anyhow::ensure!(
+                owner.turns().own_records()?.len() == 1,
+                "admission is durable before work"
+            );
+            Ok::<_, anyhow::Error>(())
+        };
+        // A natural or human-stopped turn settles its record.
+        pending().await?;
+        host.stop(&session).await?;
+        assert!(
+            owner.turns().own_records()?.is_empty(),
+            "human Stop is not crash evidence"
+        );
+        // A planned transition leaves the exact record for the next incarnation.
+        host.retain_interrupted_turns(true);
+        pending().await?;
+        host.interrupt_runtime_with_cause(jcode_tool_types::StopCause::ReloadQuiescence)
+            .await?;
+        let retained = host.retained_turn_records()?;
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].session, session);
+        // If the transition fails, this incarnation takes the records back.
+        host.retain_interrupted_turns(false);
+        assert_eq!(host.settle_retained_turn_records()?, vec![session.clone()]);
+        assert!(owner.turns().own_records()?.is_empty());
         host.shutdown().await
     })
 }

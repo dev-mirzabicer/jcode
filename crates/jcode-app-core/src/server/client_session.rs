@@ -947,7 +947,6 @@ pub(super) async fn handle_resume_session(
     startup_context: &Arc<super::startup_context::StartupContextCoordinator>,
     provider: &Arc<dyn Provider>,
     instruction_repositories: &crate::instruction::InstructionRepositoryService,
-    prepared_restore_status: Option<crate::session::SessionStatus>,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -996,11 +995,11 @@ pub(super) async fn handle_resume_session(
             ("allow_takeover", allow_session_takeover.to_string()),
         ],
     );
-    let restored_status = match sessions
+    match sessions
         .restore(&session_id, provider, mcp_pool, instruction_repositories)
         .await
     {
-        Ok(status) => status.or(prepared_restore_status),
+        Ok(_) => {}
         Err(error) => {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
@@ -1163,12 +1162,6 @@ pub(super) async fn handle_resume_session(
             )
             .await;
         }
-        let was_interrupted = restored_status.as_ref().and_then(|status| {
-            live_target_agent
-                .try_lock()
-                .ok()
-                .map(|agent| restored_session_was_interrupted(&session_id, status, &agent))
-        });
         register_session_event_sender(
             swarm_members,
             &session_id,
@@ -1210,7 +1203,6 @@ pub(super) async fn handle_resume_session(
             writer,
             server_name,
             server_icon,
-            was_interrupted,
             Some(client_event_tx),
         )
         .await?;

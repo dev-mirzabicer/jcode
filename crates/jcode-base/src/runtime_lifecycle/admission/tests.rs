@@ -151,6 +151,7 @@ fn options(strategy: StopStrategy) -> ShutdownOptions {
         strategy,
         independent: IndependentTasks::Stop,
         quiescence_timeout_seconds: 5,
+        destination: Default::default(),
     }
 }
 

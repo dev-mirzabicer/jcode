@@ -1,5 +1,4 @@
 use super::*;
-use crate::tool::selfdev::ReloadContext;
 use crate::tui::TuiState;
 use crate::tui::app as app_mod;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
@@ -2103,6 +2102,7 @@ pub(in crate::tui::app) fn handle_server_event(
             server_has_update,
             was_interrupted,
             reload_recovery,
+            runtime_recovery,
             connection_type,
             status_detail,
             upstream_provider,
@@ -2621,9 +2621,21 @@ pub(in crate::tui::app) fn handle_server_event(
                 None
             };
 
-            let reload_recovery = reload_recovery.or_else(|| {
-                ReloadContext::recovery_directive(None, was_interrupted == Some(true), "", None)
-            });
+            // Continuation after a planned reload or restart is server-owned
+            // durable input. A client never infers one from transcript shape;
+            // it honors only an explicit directive from an older server.
+            if let Some(item) = runtime_recovery.as_ref() {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "This session's last turn was interrupted when the runtime stopped unexpectedly ({}). It was not continued automatically. Continue it with `jcode runtime recover continue {}`, leave it stopped with `jcode runtime recover leave {}`, or send a new message.",
+                    match item.cause {
+                        crate::workspace::runtime::RecoveryCause::UnexpectedExit => "unexpected exit",
+                        crate::workspace::runtime::RecoveryCause::ForcedExit => "forced exit",
+                        crate::workspace::runtime::RecoveryCause::ExternalSignal => "external termination",
+                    },
+                    item.id,
+                    item.id
+                )));
+            }
             if let Some(reload_recovery) = reload_recovery
                 && !app.display_messages.is_empty()
             {
@@ -2666,9 +2678,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     Some(true) => {
                         "Reload complete - no continuation queued because no recovery directive was available for the interrupted turn."
                     }
-                    None => {
-                        "Reload complete - no continuation needed because the server did not report an interrupted turn."
-                    }
+                    None => "Reload complete. The runtime continues any turn it interrupted.",
                 };
                 crate::logging::info(&format!(
                     "History payload completed reload reconnect without continuation: session={} was_interrupted={:?}",

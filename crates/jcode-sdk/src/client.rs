@@ -700,14 +700,29 @@ impl JcodeClient {
         request: jcode_harness_api::RuntimeRequest,
     ) -> Result<jcode_harness_api::RuntimeResponse> {
         self.require_capability(jcode_harness_api::RUNTIME_LIFECYCLE_CAPABILITY)?;
-        if !matches!(
-            self.request_ok(ApiRequest::RuntimeProbe)?.event,
-            ApiEvent::RuntimeCapabilities { version: Some(1) }
-        ) {
-            return Err(Error::new(
-                ErrorKind::UnsupportedCapability,
-                "Native reviewed runtime control v1 is unavailable",
-            ));
+        let supervision = request.requires_supervision();
+        if supervision {
+            self.require_capability(jcode_harness_api::RUNTIME_SUPERVISION_CAPABILITY)?;
+        }
+        match self.request_ok(ApiRequest::RuntimeProbe)?.event {
+            ApiEvent::RuntimeCapabilities {
+                version: Some(1),
+                supervision: native,
+            } if !supervision || native == Some(1) => {}
+            ApiEvent::RuntimeCapabilities {
+                version: Some(1), ..
+            } => {
+                return Err(Error::new(
+                    ErrorKind::UnsupportedCapability,
+                    "Runtime supervision v1 (restart, recovery decisions) is unavailable; upgrade the runtime",
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::UnsupportedCapability,
+                    "Native reviewed runtime control v1 is unavailable",
+                ));
+            }
         }
         let expected = request.clone();
         match self

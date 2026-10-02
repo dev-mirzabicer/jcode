@@ -549,6 +549,7 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         all_sessions: vec![],
         client_count: None,
         is_canary: None,
+        runtime_recovery: None,
         reload_recovery: None,
         server_version: None,
         server_name: None,

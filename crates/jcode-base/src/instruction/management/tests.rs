@@ -25,6 +25,7 @@ fn runtime_shutdown_fences_new_management_work_but_keeps_receipts_and_close() {
                     strategy: StopStrategy::Interrupt,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 3,
+                    destination: Default::default(),
                 },
                 Vec::new(),
             )

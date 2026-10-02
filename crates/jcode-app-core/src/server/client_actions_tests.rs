@@ -65,7 +65,7 @@ fn runtime_shutdown_rejects_scoped_split_and_transfer_with_correlated_source() -
         let session = agent.lock().await.session_id().to_owned();
         let owner = RuntimeStopStore::new(&crate::storage::durable_state_dir(), &home.root().join("scoped.sock"))?.claim()?;
         let registration = RuntimeAdmission::register(home.root(), owner.identity())?;
-        let review = registration.admission().review(&owner, ShutdownOptions { strategy: StopStrategy::Interrupt, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 3 }, Vec::new())?;
+        let review = registration.admission().review(&owner, ShutdownOptions { strategy: StopStrategy::Interrupt, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 3, destination: Default::default() }, Vec::new())?;
         registration.admission().begin(&owner, RequestId::new(), review.id, Vec::new())?;
         let (send, mut receive) = mpsc::unbounded_channel();
         let send = send.into();
@@ -169,6 +169,7 @@ fn runtime_interrupt_cancels_transfer_provider_and_preserves_source() -> Result<
                 strategy: StopStrategy::Interrupt,
                 independent: IndependentTasks::Stop,
                 quiescence_timeout_seconds: 3,
+                destination: Default::default(),
             },
             Vec::new(),
         )?;

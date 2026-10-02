@@ -9,6 +9,9 @@ pub enum ApiEvent {
     RuntimeCapabilities {
         #[serde(default)]
         version: Option<u32>,
+        /// Present when the runtime supports `runtime_supervision_v1`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervision: Option<u32>,
     },
     RuntimeControl {
         response: Box<crate::RuntimeResponse>,

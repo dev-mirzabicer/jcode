@@ -675,6 +675,50 @@ pub(crate) struct RuntimeStopOptions {
     pub json: bool,
 }
 
+#[derive(Subcommand, Debug)]
+pub(crate) enum RuntimeRecoverCommand {
+    /// Continue the interrupted turn once, through ordinary durable input.
+    Continue(RuntimeRecoverDecision),
+    /// Leave the interrupted turn stopped. Later messages work normally.
+    Leave(RuntimeRecoverDecision),
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct RuntimeRecoverDecision {
+    pub item: crate::workspace::runtime::RecoveryId,
+    /// Exact revision; defaults to the item's current unresolved revision.
+    #[arg(long)]
+    pub revision: Option<u64>,
+    /// Retain and reuse to retry an uncertain reply without a second decision.
+    #[arg(long)]
+    pub request: Option<crate::workspace::RequestId>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum RuntimeServiceCommand {
+    /// Registration, launchd state and the installed definition.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Without --confirm, print the exact reviewed plan and its digest. With
+    /// the digest, write and load that plan. Never stops a running runtime.
+    Install {
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Unload and remove the definition. Refused while the supervised runtime
+    /// is running; stop it first with a reviewed `runtime stop`.
+    Uninstall {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(clap::Args, Debug)]
 pub(crate) struct RuntimeRevision {
     pub operation: crate::workspace::OperationId,
@@ -698,6 +742,21 @@ pub(crate) enum RuntimeCommand {
     },
     /// Create a shutdown review. This does not begin shutdown.
     Stop(RuntimeStopOptions),
+    /// Create a restart review: the same reviewed quiescence, then a fresh
+    /// runtime. Turns it interrupts continue automatically in the new runtime.
+    Restart(RuntimeStopOptions),
+    /// List or decide turns interrupted by an unexpected runtime exit.
+    Recover {
+        #[command(subcommand)]
+        action: Option<RuntimeRecoverCommand>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect, install or remove the macOS login service for this runtime.
+    Service {
+        #[command(subcommand)]
+        action: RuntimeServiceCommand,
+    },
     /// Review different options for an exact waiting or blocked operation revision.
     Change {
         operation: crate::workspace::OperationId,

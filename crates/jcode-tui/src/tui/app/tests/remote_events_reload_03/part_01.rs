@@ -123,7 +123,10 @@ fn test_reload_handoff_active_when_socket_ready_marker_present() {
 }
 
 #[test]
-fn test_handle_server_event_history_with_interruption_queues_continuation() {
+fn test_handle_server_event_history_with_interruption_does_not_infer_continuation() {
+    // WP-09 / R33: clients never synthesize a continuation from an
+    // interruption hint. Planned reloads are continued by the runtime; an
+    // unexpected exit waits for an explicit recovery decision.
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -159,6 +162,7 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: Some(true),
+            runtime_recovery: None,
             reload_recovery: None,
             connection_type: Some("websocket".to_string()),
             status_detail: None,
@@ -174,27 +178,88 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
         &mut remote,
     );
 
-    assert!(app.display_messages().len() >= 2);
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
-    let system_msg = app
-        .display_messages()
-        .iter()
-        .find(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
-        .expect("should have a short reload continuation message");
-    assert!(
-        system_msg
-            .content
-            .starts_with("Reload complete - continuing")
-    );
-
     assert!(app.queued_messages().is_empty());
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert!(app.hidden_queued_system_messages[0].contains("interrupted by a server reload"));
+    assert!(app.hidden_queued_system_messages.is_empty());
     assert!(
-        app.display_messages()
+        !app.display_messages()
             .iter()
             .any(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
     );
+}
+
+#[test]
+fn test_handle_server_event_history_reports_unresolved_runtime_recovery_without_queueing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "ses_test_123".to_string(),
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "assistant".to_string(),
+                content: "I was working on something".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            images: vec![],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            token_usage_totals: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            runtime_recovery: Some(Box::new(crate::workspace::runtime::RecoveryItem {
+                id: "12a99e11-e967-4a1e-a47c-0000000000a1".parse().unwrap(),
+                session: "ses_test_123".into(),
+                turn: "turn".into(),
+                runtime: "previous".into(),
+                cause: crate::workspace::runtime::RecoveryCause::ExternalSignal,
+                detected_at: "2026-10-02T00:00:00Z".into(),
+                revision: 1,
+                resolved: None,
+                executions: Vec::new(),
+            })),
+            reload_recovery: None,
+            connection_type: Some("websocket".to_string()),
+            status_detail: None,
+            upstream_provider: None,
+            resolved_credential: None,
+            reasoning_effort: None,
+            service_tier: None,
+            context_revision: 0,
+            activity: None,
+            side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            startup_context: None,
+        },
+        &mut remote,
+    );
+
+    let notice = app
+        .display_messages()
+        .iter()
+        .find(|m| m.role == "system" && m.content.contains("jcode runtime recover continue 12a99e11-e967-4a1e-a47c-0000000000a1"))
+        .expect("the pending recovery decision is shown");
+    assert!(notice.content.contains("external termination"));
+    assert!(notice.content.contains("jcode runtime recover leave 12a99e11-e967-4a1e-a47c-0000000000a1"));
+    assert!(app.queued_messages().is_empty());
+    assert!(app.hidden_queued_system_messages.is_empty());
 }
 
 #[test]
@@ -233,6 +298,7 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         server_icon: None,
         server_has_update: None,
         was_interrupted: None,
+        runtime_recovery: None,
         reload_recovery: Some(crate::protocol::ReloadRecoverySnapshot {
             reconnect_notice: Some("Reloaded with build srv1234".to_string()),
             continuation_message: "Server-owned reload continuation".to_string(),
@@ -315,6 +381,7 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            runtime_recovery: None,
             reload_recovery: None,
             connection_type: Some("https/sse".to_string()),
             status_detail: None,
@@ -379,6 +446,7 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             server_icon: None,
             server_has_update: None,
             was_interrupted: Some(false),
+            runtime_recovery: None,
             reload_recovery: None,
             connection_type: Some("websocket".to_string()),
             status_detail: None,
@@ -681,6 +749,7 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            runtime_recovery: None,
             reload_recovery: None,
             connection_type: Some("websocket".to_string()),
             status_detail: None,
@@ -739,6 +808,7 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            runtime_recovery: None,
             reload_recovery: None,
             connection_type: Some("websocket".to_string()),
             status_detail: None,

@@ -35,6 +35,7 @@ fn runtime_native_sdk_fixture() -> Result<(), Box<dyn std::error::Error>> {
                     strategy: StopStrategy::FinishCurrent,
                     independent: IndependentTasks::KeepSupported,
                     quiescence_timeout_seconds: 10,
+                    destination: Default::default(),
                 },
             })?;
             let status = client.runtime_control(RuntimeRequest::Status {})?;

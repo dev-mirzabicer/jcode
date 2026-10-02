@@ -1610,6 +1610,7 @@ async fn repeated_harness_creation_is_fresh_and_failure_preserves_the_attached_s
                 strategy: StopStrategy::FinishCurrent,
                 independent: IndependentTasks::Stop,
                 quiescence_timeout_seconds: 5,
+                destination: Default::default(),
             },
             Vec::new(),
         )

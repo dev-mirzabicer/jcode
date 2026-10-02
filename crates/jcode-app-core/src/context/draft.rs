@@ -5793,6 +5793,7 @@ mod orchestration_tests {
                         strategy: StopStrategy::Interrupt,
                         independent: IndependentTasks::Stop,
                         quiescence_timeout_seconds: 3,
+                        destination: Default::default(),
                     },
                     Vec::new(),
                 )?;
@@ -5853,6 +5854,7 @@ mod orchestration_tests {
                         strategy: StopStrategy::FinishCurrent,
                         independent: IndependentTasks::Stop,
                         quiescence_timeout_seconds: 5,
+                        destination: Default::default(),
                     },
                     Vec::new(),
                 )?;

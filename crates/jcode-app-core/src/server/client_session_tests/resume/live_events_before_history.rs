@@ -132,7 +132,6 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 &crate::server::startup_context::test_coordinator(),
                 &provider,
                 &crate::instruction::InstructionRepositoryService::new(),
-        None,
                 &sessions,
                 &shutdown_signals,
                 &soft_interrupt_queues,

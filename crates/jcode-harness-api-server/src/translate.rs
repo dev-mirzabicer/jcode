@@ -1517,11 +1517,19 @@ impl BridgeState {
                 let Some(api_id) = self.take_simple(id, SimpleKind::RuntimeProbe) else {
                     return vec![];
                 };
+                let supervision = event
+                    .get("supervision")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok());
                 let reply = match event.get("version") {
-                    None | Some(Value::Null) => ApiEvent::RuntimeCapabilities { version: None },
+                    None | Some(Value::Null) => ApiEvent::RuntimeCapabilities {
+                        version: None,
+                        supervision: None,
+                    },
                     Some(value) => match value.as_u64().and_then(|v| u32::try_from(v).ok()) {
                         Some(version) => ApiEvent::RuntimeCapabilities {
                             version: Some(version),
+                            supervision,
                         },
                         None => ApiEvent::Error {
                             code: ErrorCode::Internal,

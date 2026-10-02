@@ -129,7 +129,7 @@ fn pending_publication(background: bool, failed: bool) -> Result<()> {
                 options: ShutdownOptions {
                     strategy: StopStrategy::FinishCurrent,
                     independent: IndependentTasks::KeepSupported,
-                    quiescence_timeout_seconds: 2,
+                    quiescence_timeout_seconds: 2, destination: Default::default(),
                 },
             })
             .await?
@@ -202,7 +202,7 @@ fn pending_publication(background: bool, failed: bool) -> Result<()> {
                     options: ShutdownOptions {
                         strategy: StopStrategy::Interrupt,
                         independent: IndependentTasks::Stop,
-                        quiescence_timeout_seconds: 5,
+                        quiescence_timeout_seconds: 5, destination: Default::default(),
                     },
                 })
                 .await?
@@ -272,6 +272,7 @@ async fn finish_review(lifecycle: &RuntimeLifecycle) -> Result<ShutdownOperation
                 strategy: StopStrategy::FinishCurrent,
                 independent: IndependentTasks::Stop,
                 quiescence_timeout_seconds: 2,
+                destination: Default::default(),
             },
         })
         .await?
@@ -477,6 +478,7 @@ fn an_earlier_driver_failure_cannot_overwrite_a_new_retry() -> Result<()> {
                     strategy: StopStrategy::Interrupt,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 1,
+                    destination: Default::default(),
                 },
             })
             .await?

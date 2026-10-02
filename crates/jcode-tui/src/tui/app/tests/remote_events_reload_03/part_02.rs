@@ -57,6 +57,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             server_icon: None,
             server_has_update: None,
             was_interrupted: None,
+            runtime_recovery: None,
             reload_recovery: None,
             connection_type: Some("https".to_string()),
             status_detail: None,
@@ -132,7 +133,14 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             all_sessions: vec![],
             client_count: None,
             is_canary: None,
-            reload_recovery: None,
+            runtime_recovery: None,
+            // WP-09: only an explicit server directive (here, as an older
+            // server would send it) continues; the hint alone never does.
+            reload_recovery: Some(crate::protocol::ReloadRecoverySnapshot {
+                reconnect_notice: None,
+                continuation_message:
+                    "Your session was interrupted by a server reload. Continue.".to_string(),
+            }),
             server_version: None,
             server_name: None,
             server_icon: None,
@@ -828,6 +836,7 @@ fn context_protocol_events_reduce_with_exact_correlation_and_prompt_safe_action_
         all_sessions: Vec::new(),
         client_count: None,
         is_canary: None,
+        runtime_recovery: None,
         reload_recovery: None,
         server_version: None,
         server_name: None,

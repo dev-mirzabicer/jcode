@@ -176,6 +176,7 @@ fn options(strategy: StopStrategy, independent: IndependentTasks) -> ShutdownOpt
         strategy,
         independent,
         quiescence_timeout_seconds: 30,
+        destination: Default::default(),
     }
 }
 fn work(id: &str, survivor: bool) -> RuntimeWork {
@@ -500,5 +501,187 @@ fn private_regular_control_files_reject_symlink_aliases() -> Result<()> {
         std::fs::remove_file(&path)?;
         std::fs::rename(&saved, &path)?;
     }
+    Ok(())
+}
+
+fn restart_options() -> ShutdownOptions {
+    ShutdownOptions {
+        destination: RuntimeDestination::Restart,
+        ..options(StopStrategy::Interrupt, IndependentTasks::Stop)
+    }
+}
+
+/// Drive one operation of `owner` to a verified Stopped receipt.
+fn stop_verified(owner: &RuntimeStopOwner, options: ShutdownOptions) -> Result<ShutdownOperation> {
+    let review = owner.review(options, Vec::new())?;
+    let begun = owner.begin(RequestId::new(), review.id, Vec::new())?;
+    let stopped = owner.complete(begun.id, begun.revision)?;
+    assert_eq!(stopped.phase, ShutdownPhase::Stopped);
+    Ok(stopped)
+}
+
+#[test]
+fn verified_restart_keeps_desired_running_and_hands_interrupted_turns_to_continuation() -> Result<()>
+{
+    let (_root, store) = fixture()?;
+    let old = store.claim()?;
+    let record = old.turns().begin("session_restart")?;
+    let stopped = stop_verified(&old, restart_options())?;
+    assert!(!stopped.records_intentional_stop());
+    assert!(!store.status()?.desired_stopped, "restart is not a Stop");
+    old.confirm_stopped(stopped.id)?;
+    drop(old);
+    store.require_automatic_start()?;
+
+    let next = store.claim()?;
+    let mut planned = Vec::new();
+    let recovered = next.reconcile_interrupted_turns(|record, transition| {
+        planned.push((record.clone(), transition));
+        Ok(())
+    })?;
+    assert!(recovered.is_empty(), "a verified restart is not a crash");
+    assert_eq!(
+        planned,
+        vec![(
+            record,
+            PlannedTransition::Restart {
+                operation: stopped.id
+            }
+        )]
+    );
+    assert!(
+        next.turns().leftovers()?.is_empty(),
+        "classified records settle only after the continuation intent persisted"
+    );
+    Ok(())
+}
+
+#[test]
+fn reload_handoff_receipt_classifies_only_its_own_incarnation() -> Result<()> {
+    let (_root, store) = fixture()?;
+    let old = store.claim()?;
+    old.turns().begin("session_reloaded")?;
+    old.record_reload_handoff("reload-1")?;
+    drop(old);
+    let middle = store.claim()?;
+    // A turn of the replacement that then crashes is not covered by the old receipt.
+    middle.turns().begin("session_crashed")?;
+    let mut planned = Vec::new();
+    middle.reconcile_interrupted_turns(|record, transition| {
+        planned.push((record.session.clone(), transition));
+        Ok(())
+    })?;
+    assert_eq!(
+        planned,
+        vec![(
+            "session_reloaded".to_string(),
+            PlannedTransition::Reload {
+                reload: "reload-1".into()
+            }
+        )]
+    );
+    drop(middle);
+    let last = store.claim()?;
+    let items = last.reconcile_interrupted_turns(|_, _| {
+        anyhow::bail!("no planned transition covers a crash")
+    })?;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].session, "session_crashed");
+    assert_eq!(items[0].cause, RecoveryCause::UnexpectedExit);
+    Ok(())
+}
+
+#[test]
+fn failed_continuation_persistence_retains_the_turn_record_for_retry() -> Result<()> {
+    let (_root, store) = fixture()?;
+    let old = store.claim()?;
+    old.turns().begin("session_retry")?;
+    old.record_reload_handoff("reload-2")?;
+    drop(old);
+    let next = store.claim()?;
+    assert!(
+        next.reconcile_interrupted_turns(|_, _| anyhow::bail!("disk full"))
+            .is_err()
+    );
+    assert_eq!(next.turns().leftovers()?.len(), 1, "evidence kept");
+    let mut retried = 0;
+    next.reconcile_interrupted_turns(|_, _| {
+        retried += 1;
+        Ok(())
+    })?;
+    assert_eq!(retried, 1);
+    assert!(next.turns().leftovers()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn external_signal_and_forced_exits_become_selectable_recovery() -> Result<()> {
+    let (_root, store) = fixture()?;
+    let signalled = store.claim()?;
+    signalled.turns().begin("session_signal")?;
+    let review = signalled.review(
+        ShutdownOptions {
+            independent: IndependentTasks::KeepSupported,
+            ..options(StopStrategy::Interrupt, IndependentTasks::Stop)
+        },
+        Vec::new(),
+    )?;
+    let operation = signalled.begin_external_signal(RequestId::new(), review.id, Vec::new())?;
+    assert_eq!(operation.origin, ShutdownOrigin::ExternalSignal);
+    assert!(
+        !store.status()?.desired_stopped,
+        "termination by the system is not an intentional Stop"
+    );
+    let stopped = signalled.complete(operation.id, operation.revision)?;
+    signalled.confirm_stopped(stopped.id)?;
+    drop(signalled);
+    store.require_automatic_start()?;
+
+    let next = store.claim()?;
+    let items = next.reconcile_interrupted_turns(|_, _| {
+        anyhow::bail!("a signal is not a planned transition")
+    })?;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].cause, RecoveryCause::ExternalSignal);
+    // Startup classification is idempotent across a crash before settlement.
+    assert!(
+        next.reconcile_interrupted_turns(|_, _| unreachable!())?
+            .is_empty()
+    );
+    assert_eq!(next.recovery().list()?.len(), 1);
+    assert_eq!(store.recoveries()?.len(), 1, "offline inspection sees it");
+    Ok(())
+}
+
+#[test]
+fn reviewed_change_cannot_rewrite_an_external_signal_exit() -> Result<()> {
+    let (_root, store) = fixture()?;
+    let owner = store.claim()?;
+    let review = owner.review(
+        options(StopStrategy::FinishCurrent, IndependentTasks::Stop),
+        Vec::new(),
+    )?;
+    assert!(
+        owner
+            .begin_external_signal(RequestId::new(), review.id, Vec::new())
+            .is_err(),
+        "an external exit is a fresh interrupting stop"
+    );
+    let review = owner.review(
+        options(StopStrategy::Interrupt, IndependentTasks::Stop),
+        Vec::new(),
+    )?;
+    let operation = owner.begin_external_signal(RequestId::new(), review.id, Vec::new())?;
+    let blocked = owner.block(operation.id, operation.revision, vec!["owner busy".into()])?;
+    assert!(
+        owner
+            .review_change(
+                blocked.id,
+                blocked.revision,
+                options(StopStrategy::Interrupt, IndependentTasks::Stop),
+                Vec::new()
+            )
+            .is_err()
+    );
     Ok(())
 }

@@ -1467,6 +1467,21 @@ async fn spawn_server_intent(
     #[cfg(not(unix))]
     let _ = explicit_start;
 
+    // A namespace with a registered login service is started through that
+    // service, never by spawning a competing unmanaged daemon. Desired-stop
+    // was already checked (automatic) or cleared (explicit) under the lock.
+    #[cfg(target_os = "macos")]
+    if crate::runtime_service::registered_for_socket(&socket_path).unwrap_or(false) {
+        startup_profile::mark("server_spawn_start");
+        output::stderr_info("Starting server through its login service...");
+        crate::runtime_service::kickstart(&socket_path)?;
+        server::wait_for_server_ready(&socket_path, std::time::Duration::from_secs(120))
+            .await
+            .context("Login service did not bring the runtime up")?;
+        startup_profile::mark("server_ready");
+        return Ok(());
+    }
+
     startup_profile::mark("server_spawn_start");
     output::stderr_info("Starting server...");
     let client_requested_selfdev = selfdev::client_selfdev_requested();

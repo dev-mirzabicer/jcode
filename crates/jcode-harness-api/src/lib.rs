@@ -41,9 +41,12 @@ pub use jcode_tool_types::inspection::{
     TranscriptRange,
 };
 pub use jcode_workspace_types::runtime::{
-    CAPABILITY as RUNTIME_LIFECYCLE_CAPABILITY, IndependentTasks, RuntimeRequest, RuntimeResponse,
-    RuntimeStatus, RuntimeWork, RuntimeWorkKind, ShutdownOperation, ShutdownOptions, ShutdownPhase,
-    ShutdownReview, ShutdownRevision, StopStrategy,
+    CAPABILITY as RUNTIME_LIFECYCLE_CAPABILITY, IndependentTasks, PowerStatus, RecoveryCause,
+    RecoveryDecision, RecoveryExecution, RecoveryId, RecoveryItem, RecoveryResolution,
+    RecoveryResolved, RuntimeDestination, RuntimeRequest, RuntimeResponse, RuntimeStatus,
+    RuntimeWork, RuntimeWorkKind, SUPERVISION_CAPABILITY as RUNTIME_SUPERVISION_CAPABILITY,
+    ShutdownOperation, ShutdownOptions, ShutdownOrigin, ShutdownPhase, ShutdownReview,
+    ShutdownRevision, StopStrategy, SupervisionStatus,
 };
 pub use jcode_workspace_types::{
     CloseoutAction, CloseoutActionRecord, CloseoutActionResult, CloseoutActionSpec,
@@ -71,7 +74,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 11;
+pub const API_VERSION_MINOR: u32 = 12;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

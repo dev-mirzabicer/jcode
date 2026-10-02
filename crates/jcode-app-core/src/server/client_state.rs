@@ -2,12 +2,11 @@ use super::ClientConnectionInfo;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
-use crate::message::{ContentBlock, Role};
 use crate::protocol::{
     HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals, encode_event,
 };
 use crate::provider::Provider;
-use crate::session::{Session, SessionStatus};
+use crate::session::Session;
 use crate::transport::WriteHalf;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
@@ -22,7 +21,6 @@ pub(super) enum HistoryPayloadMode {
 use tokio::sync::{Mutex, RwLock};
 
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
-const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
 fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {
     (totals.messages_with_token_usage > 0).then_some(totals)
@@ -135,7 +133,6 @@ pub(super) async fn handle_get_history(
     writer: &Arc<Mutex<WriteHalf>>,
     server_name: &str,
     server_icon: &str,
-    was_interrupted: Option<bool>,
     delivery: Option<&crate::client_delivery::ClientEventSender>,
 ) -> Result<()> {
     let operation = async {
@@ -168,7 +165,6 @@ pub(super) async fn handle_get_history(
                 writer,
                 server_name,
                 server_icon,
-                was_interrupted,
                 activity,
                 Some((delivery, snapshot)),
             )
@@ -200,7 +196,6 @@ pub(super) async fn handle_get_history(
                 writer,
                 server_name,
                 server_icon,
-                was_interrupted,
                 activity,
                 None,
             )
@@ -223,7 +218,6 @@ pub(super) async fn handle_get_history(
             writer,
             server_name,
             server_icon,
-            was_interrupted,
             activity,
             HistoryPayloadMode::Full,
             true,
@@ -329,6 +323,7 @@ pub(super) async fn handle_get_model_catalog(
         server_icon: None,
         server_has_update: None,
         was_interrupted: None,
+        runtime_recovery: None,
         reload_recovery: None,
         connection_type: None,
         status_detail: None,
@@ -448,103 +443,32 @@ fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryM
     }
 }
 
-fn history_reload_recovery_snapshot(
+/// The oldest unresolved unexpected-exit recovery item for this session, so a
+/// client can explain why the session did not continue on its own.
+fn unresolved_runtime_recovery(
     session_id: &str,
-    was_interrupted: Option<bool>,
-) -> Option<crate::protocol::ReloadRecoverySnapshot> {
-    match super::reload_recovery::pending_directive_for_session(session_id) {
-        Ok(Some(directive)) => {
-            crate::logging::info(&format!(
-                "history_reload_recovery_snapshot: attaching server-owned recovery intent for session={} without marking delivered",
-                session_id
-            ));
-            return Some(directive);
-        }
-        Ok(None) => {}
-        Err(err) => crate::logging::warn(&format!(
-            "history_reload_recovery_snapshot: failed to read server-owned recovery intent for session={}: {}",
-            session_id, err
-        )),
-    }
-
-    let reload_ctx = crate::tool::selfdev::ReloadContext::peek_for_session(session_id)
-        .ok()
-        .flatten();
-    let inferred_interrupted = was_interrupted
-        .unwrap_or_else(|| infer_persisted_session_interrupted_by_reload(session_id));
-    let directive = crate::tool::selfdev::ReloadContext::recovery_directive_for_session(
-        session_id,
-        reload_ctx.as_ref(),
-        inferred_interrupted,
-        None,
-    );
-    crate::logging::info(&format!(
-        "history_reload_recovery_snapshot: session={} explicit_was_interrupted={:?} inferred_was_interrupted={} has_reload_ctx={} directive={}",
-        session_id,
-        was_interrupted,
-        inferred_interrupted,
-        reload_ctx.is_some(),
-        directive.is_some()
-    ));
-    directive
-}
-
-fn persisted_session_has_reload_interruption_marker(session: &Session) -> bool {
-    let Some(last) = session.messages.last() else {
-        return false;
-    };
-
-    last.content.iter().any(|block| match block {
-        ContentBlock::Text { text, .. } => {
-            text.ends_with("[generation interrupted - server reloading]")
-        }
-        ContentBlock::ToolResult {
-            content, is_error, ..
-        } => {
-            content == "Reload initiated. Process restarting..."
-                || (is_error.unwrap_or(false)
-                    && (content.contains("interrupted by server reload")
-                        || content.contains("Skipped - server reloading")))
-        }
-        _ => false,
-    })
-}
-
-fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
-    let session = match Session::load_for_remote_startup(session_id)
-        .or_else(|_| Session::load_startup_stub(session_id))
+) -> Option<crate::workspace::runtime::RecoveryItem> {
+    #[cfg(unix)]
     {
-        Ok(session) => session,
-        Err(err) => {
+        crate::runtime_lifecycle::RuntimeStopStore::new(
+            &crate::storage::durable_state_dir(),
+            &crate::server::socket_path(),
+        )
+        .and_then(|store| store.recoveries())
+        .inspect_err(|error| {
             crate::logging::warn(&format!(
-                "history_reload_recovery_snapshot: could not inspect persisted session {} for reload interruption fallback: {}",
-                session_id, err
-            ));
-            return false;
-        }
-    };
-
-    let last_is_user = session
-        .messages
-        .last()
-        .map(|message| message.role == Role::User)
-        .unwrap_or(false);
-    let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
-    let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
-        || (matches!(session.status, SessionStatus::Active) && last_is_user && marker_active)
-        || (matches!(session.status, SessionStatus::Closed) && last_is_user && marker_active)
-        || persisted_session_has_reload_interruption_marker(&session);
-
-    crate::logging::info(&format!(
-        "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} marker_active={} interrupted={}",
-        session_id,
-        session.status.display(),
-        last_is_user,
-        marker_active,
-        interrupted
-    ));
-
-    interrupted
+                "Runtime recovery state for {session_id} is unavailable to History: {error:#}"
+            ))
+        })
+        .ok()?
+        .into_iter()
+        .find(|item| item.session == session_id && item.resolved.is_none())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = session_id;
+        None
+    }
 }
 
 #[expect(
@@ -561,7 +485,6 @@ async fn send_history_from_persisted_session(
     writer: &Arc<Mutex<WriteHalf>>,
     server_name: &str,
     server_icon: &str,
-    was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
     presentation: Option<(
         &crate::client_delivery::ClientEventSender,
@@ -637,8 +560,12 @@ async fn send_history_from_persisted_session(
         server_name: Some(server_name.to_string()),
         server_icon: Some(server_icon.to_string()),
         server_has_update: Some(server_has_newer_binary()),
-        was_interrupted,
-        reload_recovery: history_reload_recovery_snapshot(session_id, was_interrupted),
+        // Continuation after a reload or restart is server-owned durable input;
+        // an unexpected exit waits for an explicit decision. Clients are never
+        // asked to infer or queue a continuation themselves.
+        was_interrupted: None,
+        reload_recovery: None,
+        runtime_recovery: unresolved_runtime_recovery(session_id).map(Box::new),
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
@@ -693,7 +620,6 @@ pub(super) async fn send_history(
     writer: &Arc<Mutex<WriteHalf>>,
     server_name: &str,
     server_icon: &str,
-    was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
@@ -901,8 +827,12 @@ pub(super) async fn send_history(
         server_name: Some(server_name.to_string()),
         server_icon: Some(server_icon.to_string()),
         server_has_update: Some(server_has_newer_binary()),
-        was_interrupted,
-        reload_recovery: history_reload_recovery_snapshot(session_id, was_interrupted),
+        // Continuation after a reload or restart is server-owned durable input;
+        // an unexpected exit waits for an explicit decision. Clients are never
+        // asked to infer or queue a continuation themselves.
+        was_interrupted: None,
+        reload_recovery: None,
+        runtime_recovery: unresolved_runtime_recovery(session_id).map(Box::new),
         connection_type,
         status_detail,
         upstream_provider,

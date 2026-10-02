@@ -93,7 +93,7 @@ fn explicit_force_exits_only_the_reviewed_fixture_and_retains_uncertainty() -> R
                 other => anyhow::bail!("Wrong runtime reply: {other:?}"),
             }
         }
-        let RuntimeResponse::Review(review) = exchange(&mut read, &mut write, 1, RuntimeRequest::Review { options: ShutdownOptions { strategy: StopStrategy::Interrupt, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 1 }}).await? else { anyhow::bail!("Review missing"); };
+        let RuntimeResponse::Review(review) = exchange(&mut read, &mut write, 1, RuntimeRequest::Review { options: ShutdownOptions { strategy: StopStrategy::Interrupt, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 1, destination: Default::default() }}).await? else { anyhow::bail!("Review missing"); };
         let RuntimeResponse::Operation(operation) = exchange(&mut read, &mut write, 2, RuntimeRequest::Begin { request: RequestId::new(), review: review.id }).await? else { anyhow::bail!("Operation missing"); };
         let blocked = tokio::time::timeout(Duration::from_secs(15), async {
             loop {

@@ -76,6 +76,7 @@ pub mod provider_catalog;
 pub mod registry;
 pub mod runtime_lifecycle;
 pub mod runtime_memory_log;
+pub mod runtime_service;
 pub mod safety;
 pub mod secret_input;
 pub mod session;

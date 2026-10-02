@@ -35,6 +35,7 @@ fn reviewed_change_and_explicit_force_keep_uncertain_owner_truth() -> Result<()>
                     strategy: StopStrategy::Interrupt,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 1,
+                    destination: Default::default(),
                 },
             })
             .await?
@@ -100,6 +101,7 @@ fn force_does_not_abandon_an_unpublished_keep_supported_handoff() -> Result<()> 
                     strategy: StopStrategy::Interrupt,
                     independent: IndependentTasks::KeepSupported,
                     quiescence_timeout_seconds: 1,
+                    destination: Default::default(),
                 },
             })
             .await?
@@ -150,6 +152,7 @@ fn replay_recovers_stopped_publication_without_reexecuting_the_operation() -> Re
                 strategy: StopStrategy::Interrupt,
                 independent: IndependentTasks::Stop,
                 quiescence_timeout_seconds: 2,
+                destination: Default::default(),
             },
             Vec::new(),
         )?;
@@ -203,6 +206,7 @@ async fn begin(
                 strategy,
                 independent: IndependentTasks::Stop,
                 quiescence_timeout_seconds: seconds,
+                destination: Default::default(),
             },
         })
         .await?
@@ -258,7 +262,8 @@ fn idle_shutdown_is_runtime_driven_and_not_just_begin_acknowledgement() -> Resul
             *lifecycle.stopped().borrow()
                 == Some(RuntimeExit {
                     operation: complete.id,
-                    forced: false
+                    forced: false,
+                    restart: false
                 }),
             "No runtime-owned exit signal"
         );
@@ -392,6 +397,159 @@ fn legacy_background_owner_is_joined_and_its_partial_output_survives_interrupt()
             tokio::fs::read(lifecycle.background.output_path_for(&task.task_id)).await?
                 == b"retained original bytes",
             "Legacy output was lost"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn verified_restart_publishes_a_replacement_exit_without_intentional_stop() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let RuntimeResponse::Review(review) = lifecycle
+            .request(RuntimeRequest::Review {
+                options: ShutdownOptions {
+                    strategy: StopStrategy::Interrupt,
+                    independent: IndependentTasks::Stop,
+                    quiescence_timeout_seconds: 3,
+                    destination: RuntimeDestination::Restart,
+                },
+            })
+            .await?
+        else {
+            panic!("review");
+        };
+        let RuntimeResponse::Operation(operation) = lifecycle
+            .request(RuntimeRequest::Begin {
+                request: RequestId::new(),
+                review: review.id,
+            })
+            .await?
+        else {
+            panic!("operation");
+        };
+        let stopped = phase(&lifecycle, operation.id, ShutdownPhase::Stopped).await?;
+        let mut exit = lifecycle.stopped();
+        tokio::time::timeout(Duration::from_secs(3), exit.wait_for(|exit| exit.is_some()))
+            .await??;
+        ensure!(
+            *exit.borrow()
+                == Some(RuntimeExit {
+                    operation: stopped.id,
+                    forced: false,
+                    restart: true
+                }),
+            "Restart did not publish a replacement exit"
+        );
+        ensure!(
+            !lifecycle.owner.status()?.desired_stopped,
+            "A restart recorded an intentional Stop"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn external_signal_quiesces_without_desired_stop_and_reviewed_control_cannot_replace_it()
+-> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        lifecycle.begin_external_signal().await?;
+        ensure!(
+            lifecycle.begin_external_signal().await.is_err(),
+            "A second signal opened a second transition"
+        );
+        let mut exit = lifecycle.stopped();
+        tokio::time::timeout(Duration::from_secs(5), exit.wait_for(|exit| exit.is_some()))
+            .await??;
+        let published = (*exit.borrow()).expect("exit");
+        ensure!(
+            !published.forced && !published.restart,
+            "Unexpected exit kind"
+        );
+        let operation = lifecycle.owner.inspect(published.operation)?;
+        ensure!(
+            operation.origin == ShutdownOrigin::ExternalSignal
+                && operation.review.options.independent == IndependentTasks::KeepSupported
+                && operation.review.options.strategy == StopStrategy::Interrupt,
+            "Signal did not use Interrupt with supported-task survival"
+        );
+        ensure!(
+            !lifecycle.owner.status()?.desired_stopped,
+            "A signal recorded an intentional Stop; login would not restart the runtime"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn supervision_status_and_recovery_decisions_use_the_live_coordinator() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let lifecycle = fixture(sandbox.root()).await?;
+        let RuntimeResponse::Supervision(status) =
+            lifecycle.request(RuntimeRequest::Supervision {}).await?
+        else {
+            panic!("supervision");
+        };
+        ensure!(
+            status.recoveries.is_empty() && !status.runtime.is_empty(),
+            "{status:?}"
+        );
+        let item = lifecycle
+            .owner
+            .recovery()
+            .adopt(
+                &[crate::runtime_lifecycle::turns::TurnRecord {
+                    schema: 1,
+                    session: "session_unpublished".into(),
+                    turn: "t".into(),
+                    runtime: "previous".into(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                }],
+                |_| RecoveryCause::UnexpectedExit,
+            )?
+            .remove(0);
+        // Continue validates that the session can actually run; nothing is
+        // recorded when it cannot.
+        ensure!(
+            lifecycle
+                .request(RuntimeRequest::Recover {
+                    item: item.id,
+                    expected_revision: item.revision,
+                    request: RequestId::new(),
+                    decision: RecoveryDecision::Continue,
+                })
+                .await
+                .is_err(),
+            "Continue accepted an unpublished session"
+        );
+        let request = RequestId::new();
+        let leave = RuntimeRequest::Recover {
+            item: item.id,
+            expected_revision: item.revision,
+            request,
+            decision: RecoveryDecision::LeaveStopped,
+        };
+        let first = lifecycle.request(leave.clone()).await?;
+        ensure!(
+            leave.matches_response(&first),
+            "Uncorrelated recovery reply"
+        );
+        ensure!(
+            lifecycle.request(leave).await? == first,
+            "Same request did not replay"
+        );
+        let RuntimeResponse::Supervision(status) =
+            lifecycle.request(RuntimeRequest::Supervision {}).await?
+        else {
+            panic!("supervision");
+        };
+        ensure!(
+            status.recoveries.len() == 1 && status.recoveries[0].resolved.is_some(),
+            "Resolved history missing"
         );
         Ok(())
     })

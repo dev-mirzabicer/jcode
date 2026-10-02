@@ -435,20 +435,64 @@ pub(crate) fn ensure_primary_input_delivery(
                 }
             };
             let store = crate::primary_input::PrimaryInputStore::current();
-            let input = match store.pending(&session) {
-                Ok(pending) => match pending.into_iter().next() {
-                    Some(input) => input,
-                    None => match drain.finish_if_empty() {
-                        Ok(false) => continue,
-                        _ => return,
-                    },
-                },
+            let pending = match store.pending(&session) {
+                Ok(pending) => pending,
                 Err(error) => {
                     crate::logging::warn(&format!(
                         "Primary input recovery is blocked for {session}: {error:#}"
                     ));
                     return;
                 }
+            };
+            // An unexpected exit interrupted this session's last turn and the
+            // user has not decided yet. Automatic wakes stay durable but are not
+            // delivered; only a human message proceeds, and it resolves the
+            // interruption so no stale continuation can follow it.
+            let unresolved = match host
+                .runtime_journals()
+                .map(|journals| journals.recovery.unresolved(&session))
+                .transpose()
+            {
+                Ok(unresolved) => unresolved.unwrap_or_default(),
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Input for {session} waits: its recovery state cannot be read: {error:#}"
+                    ));
+                    return;
+                }
+            };
+            let next = if unresolved.is_empty() {
+                pending.into_iter().next()
+            } else {
+                let human = pending.into_iter().find(|input| {
+                    input.origin == Some(jcode_session_types::StoredMessageOrigin::Human)
+                });
+                match human {
+                    Some(input) => {
+                        if let Some(journals) = host.runtime_journals()
+                            && let Err(error) = journals.recovery.supersede(&session, input.id)
+                        {
+                            crate::logging::warn(&format!(
+                                "Human input for {session} waits: recovery could not be resolved: {error:#}"
+                            ));
+                            return;
+                        }
+                        Some(input)
+                    }
+                    None => {
+                        crate::logging::info(&format!(
+                            "Automatic input for {session} deferred until its runtime recovery decision"
+                        ));
+                        return;
+                    }
+                }
+            };
+            let input = match next {
+                Some(input) => input,
+                None => match drain.finish_if_empty() {
+                    Ok(false) => continue,
+                    _ => return,
+                },
             };
             if let Err(error) = host.restore_input_recipient(&session).await {
                 if !host.accepts_input() {

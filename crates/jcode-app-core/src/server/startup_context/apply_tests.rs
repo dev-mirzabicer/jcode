@@ -60,6 +60,7 @@ fn runtime_shutdown_preserves_queued_startup_apply_until_admission_returns() -> 
                 strategy: StopStrategy::FinishCurrent,
                 independent: IndependentTasks::Stop,
                 quiescence_timeout_seconds: 5,
+                destination: Default::default(),
             },
             Vec::new(),
         )?;

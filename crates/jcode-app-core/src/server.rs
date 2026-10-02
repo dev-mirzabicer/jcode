@@ -57,6 +57,7 @@ mod runtime_control;
 pub mod shutdown;
 mod socket;
 pub(crate) mod startup_context;
+mod supervision;
 mod swarm;
 mod swarm_channels;
 mod swarm_mutation_state;
@@ -613,7 +614,7 @@ pub use self::lifecycle::configure_temporary_server;
 #[cfg(unix)]
 pub use self::socket::spawn_server_notify;
 #[cfg(unix)]
-use self::socket::{acquire_daemon_lock, mark_close_on_exec};
+use self::socket::{acquire_daemon_lock, mark_close_on_exec, wait_for_daemon_lock};
 pub use self::socket::{
     cleanup_socket_pair, connect_socket, debug_socket_path, has_live_listener, is_server_ready,
     reap_stale_socket_if_dead, set_socket_path, socket_path, wait_for_server_ready,
@@ -1293,6 +1294,19 @@ impl Server {
         );
         runtime
             .spawn_background_task(async move {
+                // Continuations first become ordinary durable input; the scan
+                // below then restores recipients and drains them normally.
+                self::supervision::redeliver_continued(&input_host, input_events.clone()).await;
+                let planned = self::supervision::deliver_planned_continuations(
+                    &input_host,
+                    input_events.clone(),
+                )
+                .await;
+                if planned > 0 {
+                    crate::logging::info(&format!(
+                        "Runtime startup: {planned} planned continuation(s) accepted for interrupted turns"
+                    ));
+                }
                 let store = crate::primary_input::PrimaryInputStore::current();
                 let sessions = match store.sessions() {
                     Ok(sessions) => sessions,
@@ -1443,32 +1457,36 @@ impl Server {
         // In the unified server design, self-dev sessions share the main server,
         // so the shared server must always listen for reload signals.
         let signal_sessions = Arc::clone(&self.sessions);
-        let signal_swarm_members = Arc::clone(&self.swarm_state.members);
-        let signal_shutdown_signals = Arc::clone(&self.shutdown_signals);
-        let signal_swarm_event_tx = self.swarm_event_tx.clone();
+        // Background listeners hold the coordinator weakly: its owner lease
+        // must end with the runtime, not with a task that outlives it.
+        let signal_lifecycle = self.runtime_lifecycle.get().map(Arc::downgrade);
         tokio::spawn(async move {
-            await_reload_signal(
-                signal_sessions,
-                signal_swarm_members,
-                signal_shutdown_signals,
-                signal_swarm_event_tx,
-            )
-            .await;
+            await_reload_signal(signal_sessions, signal_lifecycle).await;
         });
 
-        // Log when we receive SIGTERM for debugging
+        // External termination (logout, service unload, `kill`) enters the
+        // same graceful quiescence as a reviewed Interrupt. It is not an
+        // intentional Stop; the operating system's own deadline still applies.
         #[cfg(unix)]
-        {
-            let sigterm_server_name = self.identity.name.clone();
+        if let Some(lifecycle) = self.runtime_lifecycle.get().map(Arc::downgrade) {
             tokio::spawn(async move {
                 use tokio::signal::unix::{SignalKind, signal};
-                if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
-                    sigterm.recv().await;
-                    crate::logging::info(
-                        "Server received external SIGTERM; this is not a reviewed runtime Stop",
-                    );
-                    let _ = crate::registry::unregister_server(&sigterm_server_name).await;
-                    std::process::exit(0);
+                let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+                    crate::logging::error("SIGTERM handler could not be installed");
+                    return;
+                };
+                while sigterm.recv().await.is_some() {
+                    let Some(lifecycle) = lifecycle.upgrade() else {
+                        return;
+                    };
+                    match lifecycle.begin_external_signal().await {
+                        Ok(()) => crate::logging::warn(
+                            "Server received SIGTERM; quiescing owned work before exit (not an intentional Stop)",
+                        ),
+                        Err(error) => crate::logging::warn(&format!(
+                            "Server received SIGTERM while another runtime transition owns admission; that transition continues: {error:#}"
+                        )),
+                    }
                 }
             });
         }
@@ -1582,7 +1600,13 @@ impl Server {
         // Presence and power inhibition serve ordinary sessions too.
         // This watches the same "running" member signal Waybar surfaces as
         // "N streaming" and toggles a best-effort OS power inhibitor accordingly.
-        Self::spawn_power_inhibitor(Arc::clone(&self.swarm_state.members));
+        self::supervision::spawn_power_monitor(
+            self.runtime_lifecycle
+                .get()
+                .map(Arc::downgrade)
+                .unwrap_or_default(),
+            Arc::downgrade(&self.sessions),
+        );
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
@@ -1977,71 +2001,6 @@ impl Server {
         });
     }
 
-    /// Spawn the background loop that keeps the machine awake while any session
-    /// is actively streaming/processing.
-    ///
-    /// The shared daemon owns every session, so a single inhibitor here covers
-    /// all of them. We poll the swarm-member map (the authoritative "running"
-    /// signal that also drives Waybar's "N streaming" indicator) on a short
-    /// interval and reconcile a best-effort OS power inhibitor against it. The
-    /// inhibitor blocks automatic system sleep; Linux also blocks lid-switch
-    /// handling. Windows still honors explicit lid/power-button actions from the
-    /// active power plan. The display can turn off. When no session is running,
-    /// the guard is released so normal power management resumes immediately.
-    fn spawn_power_inhibitor(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
-        // Reconcile interval. Short enough that the inhibitor engages promptly
-        // when a turn starts and releases promptly when work finishes, but cheap
-        // (a read lock + a scan) so it adds no meaningful load.
-        const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-
-        let mut inhibitor = crate::power_inhibit::PowerInhibitor::new();
-        if !inhibitor.is_available() {
-            // Disabled via the legacy env escape hatch, or unsupported platform.
-            crate::logging::info(
-                "power_inhibit: unavailable (unsupported platform or JCODE_DISABLE_POWER_INHIBIT set); not monitoring",
-            );
-            return;
-        }
-
-        crate::logging::info(
-            "power_inhibit: monitoring active sessions to prevent sleep while streaming",
-        );
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_active: Option<bool> = None;
-            loop {
-                interval.tick().await;
-
-                // Re-evaluate the config each tick so toggling it at runtime
-                // takes effect without restarting the daemon.
-                let enabled = crate::config::config().power.prevent_sleep_while_streaming;
-
-                let active = enabled && Self::any_session_streaming(&swarm_members).await;
-                if last_active != Some(active) {
-                    crate::logging::info(&format!(
-                        "power_inhibit: {} (streaming sessions {})",
-                        if active { "engaging" } else { "releasing" },
-                        if active { "present" } else { "absent" },
-                    ));
-                    last_active = Some(active);
-                }
-                inhibitor.set_active(active);
-            }
-        });
-    }
-
-    /// Whether at least one session is currently in the "running" state, i.e.
-    /// actively streaming/processing a turn. This is the same signal that drives
-    /// the Waybar "N streaming" indicator.
-    async fn any_session_streaming(
-        swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    ) -> bool {
-        let members = swarm_members.read().await;
-        members.values().any(|member| member.status == "running")
-    }
-
     /// Monitor the global Bus for FileTouch events and detect conflicts
     #[expect(
         clippy::too_many_arguments,
@@ -2366,8 +2325,15 @@ impl Server {
             std::fs::create_dir_all(parent)?;
         }
 
+        // A supervised launch waits for the namespace's daemon lock instead of
+        // competing with (or failing beside) a live unmanaged runtime; it takes
+        // over when that runtime exits. Unsupervised starts keep failing fast.
         #[cfg(unix)]
-        let _daemon_lock = acquire_daemon_lock()?;
+        let _daemon_lock = if self::supervision::supervised() {
+            wait_for_daemon_lock().await?
+        } else {
+            acquire_daemon_lock()?
+        };
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(
@@ -2377,11 +2343,24 @@ impl Server {
         }
 
         #[cfg(unix)]
-        crate::runtime_lifecycle::RuntimeStopStore::new(
-            &crate::storage::durable_state_dir(),
-            &self.socket_path,
-        )?
-        .require_automatic_start()?;
+        {
+            let store = crate::runtime_lifecycle::RuntimeStopStore::new(
+                &crate::storage::durable_state_dir(),
+                &self.socket_path,
+            )?;
+            if let Err(error) = store.require_automatic_start() {
+                // Login or relaunch must not undo an intentional Stop. The
+                // supervised launcher exits successfully, so launchd does not
+                // restart it, and explicit Start remains the only way back.
+                if self::supervision::supervised() && store.status()?.desired_stopped {
+                    crate::logging::info(
+                        "Supervised start found an intentional Stop; exiting without starting the runtime",
+                    );
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
 
         // Remove existing sockets (uses transport abstraction for cross-platform cleanup)
         crate::transport::remove_socket(&self.socket_path);
@@ -2481,8 +2460,8 @@ impl Server {
         let mut main_handle = main_handle;
         let mut debug_handle = debug_handle;
         tokio::select! {
-            forced = self.wait_for_reviewed_stop() => {
-                if forced {
+            exit = self.wait_for_reviewed_stop() => {
+                if exit.forced {
                     // Force has a durable, owner-bound uncertainty receipt.
                     // Tokio may be unable to join the blocking work named in
                     // that receipt. This exits ONLY this runtime process.
@@ -2498,6 +2477,10 @@ impl Server {
                 #[cfg(unix)]
                 cleanup_bound_sockets(&socket_files)?;
                 let _ = crate::registry::unregister_server(&self.identity.name).await;
+                #[cfg(unix)]
+                if exit.restart {
+                    self.replace_after_restart(exit.operation);
+                }
             }
             result = &mut main_handle => {
                 if let Err(error) = result {
@@ -2529,20 +2512,70 @@ impl Server {
             .await
     }
 
-    async fn wait_for_reviewed_stop(&self) -> bool {
+    /// A verified restart replaces this incarnation. Under the login service
+    /// the process image is replaced in place, preserving the supervised job.
+    /// An unmanaged runtime whose namespace has a registered service exits so
+    /// the waiting service job takes ownership (service takeover). Otherwise
+    /// the image is replaced in place. Turns the restart interrupted remain
+    /// durable; a failed replacement exits nonzero and the next start
+    /// continues them.
+    #[cfg(unix)]
+    fn replace_after_restart(&self, operation: crate::workspace::OperationId) -> ! {
+        if !self::supervision::supervised()
+            && crate::runtime_service::registered_for_socket(&self.socket_path).unwrap_or(false)
+        {
+            // The registered job may have exited earlier (for example at login
+            // under a then-intentional Stop); ask launchd to run it so it waits
+            // for this incarnation's daemon lock, then release ownership.
+            if let Err(error) = crate::runtime_service::kickstart(&self.socket_path) {
+                crate::logging::error(&format!(
+                    "Restart {operation}: login service could not be started for handoff: {error:#}"
+                ));
+                std::process::exit(43);
+            }
+            crate::logging::info(&format!(
+                "Restart {operation}: verified quiescence; handing the namespace to its login service"
+            ));
+            std::process::exit(0);
+        }
+        // Same selection as an ordinary spawn: current shared channel, stable,
+        // or this executable.
+        let Some((binary, label)) = crate::build::shared_server_update_candidate(false) else {
+            crate::logging::error(&format!(
+                "Restart {operation}: no runtime binary to replace this incarnation"
+            ));
+            std::process::exit(43);
+        };
+        crate::logging::info(&format!(
+            "Restart {operation}: replacing runtime with {label} binary {binary:?}"
+        ));
+        // The same runtime configuration: original arguments (provider,
+        // profile, model, socket, server name), current shared binary.
+        let error = self::reload::replace_runtime_process_with(
+            &binary,
+            &self.socket_path,
+            std::env::args_os().skip(1),
+        );
+        crate::logging::error(&format!(
+            "Restart {operation}: replacement exec failed: {error}. Interrupted turns remain durable for the next start."
+        ));
+        std::process::exit(43);
+    }
+
+    async fn wait_for_reviewed_stop(&self) -> shutdown::RuntimeExit {
         #[cfg(unix)]
         if let Some(lifecycle) = self.runtime_lifecycle.get() {
             let mut stopped = lifecycle.stopped();
             loop {
                 if let Some(exit) = *stopped.borrow() {
-                    return exit.forced;
+                    return exit;
                 }
                 if stopped.changed().await.is_err() {
                     break;
                 }
             }
         }
-        std::future::pending::<bool>().await
+        std::future::pending::<shutdown::RuntimeExit>().await
     }
 
     /// Spawn the WebSocket gateway if enabled in config.

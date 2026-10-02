@@ -128,6 +128,7 @@ fn runtime_cli_controls_real_server_and_recovers_offline_receipts_without_autost
                     strategy: StopStrategy::FinishCurrent,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 2,
+                    destination: Default::default(),
                 },
             },
         )
@@ -191,6 +192,7 @@ fn runtime_cli_controls_real_server_and_recovers_offline_receipts_without_autost
                     strategy: StopStrategy::Interrupt,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 5,
+                    destination: Default::default(),
                 },
             },
         )
@@ -277,6 +279,7 @@ fn runtime_client_rejects_wrong_namespace_before_sending_mutation() -> Result<()
                     (serde_json::to_string(&ServerEvent::RuntimeCapabilities {
                         id: 1,
                         version: Some(1),
+                        supervision: Some(1),
                     })? + "\n")
                         .as_bytes(),
                 )
@@ -315,7 +318,8 @@ fn runtime_client_rejects_wrong_namespace_before_sending_mutation() -> Result<()
                     options: ShutdownOptions {
                         strategy: StopStrategy::Interrupt,
                         independent: IndependentTasks::Stop,
-                        quiescence_timeout_seconds: 1
+                        quiescence_timeout_seconds: 1,
+                        destination: Default::default()
                     }
                 }
             )
@@ -353,6 +357,7 @@ fn runtime_client_rejects_foreign_logical_receipt_even_with_matching_transport_i
                     (serde_json::to_string(&ServerEvent::RuntimeCapabilities {
                         id: 1,
                         version: Some(1),
+                        supervision: Some(1),
                     })? + "\n")
                         .as_bytes(),
                 )

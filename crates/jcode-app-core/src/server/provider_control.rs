@@ -1674,6 +1674,7 @@ mod tests {
                         strategy,
                         independent: IndependentTasks::Stop,
                         quiescence_timeout_seconds: 5,
+                        destination: Default::default(),
                     },
                     Vec::new(),
                 )?;

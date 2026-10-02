@@ -45,6 +45,19 @@ pub struct PrimaryHost {
     stdin: StdMutex<HashMap<String, Arc<crate::server::primary_stdin::PrimaryStdin>>>,
     presentations: StdMutex<HashMap<String, Arc<presentation::Presentation>>>,
     checkpoint: StdMutex<Option<shutdown::Checkpoint>>,
+    journals: std::sync::OnceLock<RuntimeJournals>,
+    /// Set by a planned restart, reload or external-signal exit before it
+    /// interrupts turns. Their admission records then survive as evidence for
+    /// the next incarnation instead of settling as ordinary interruptions.
+    retain_interrupted: AtomicBool,
+}
+
+/// Durable turn admission and recovery records of the bound runtime namespace.
+/// Hosts without a runtime (tests, process-owned callers) keep neither.
+#[derive(Clone)]
+pub(crate) struct RuntimeJournals {
+    pub turns: crate::runtime_lifecycle::turns::TurnJournal,
+    pub recovery: crate::runtime_lifecycle::recovery::RecoveryStore,
 }
 
 struct InputRestore {
@@ -99,12 +112,14 @@ struct Reservation {
     control: Arc<TurnControl>,
     started: bool,
     permit: Option<crate::runtime_lifecycle::admission::WorkPermit>,
+    turn: Option<crate::runtime_lifecycle::turns::TurnRecord>,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
         if !self.started
             && let Some(host) = self.host.upgrade()
         {
+            host.settle_turn_record(self.turn.take());
             host.turns
                 .lock()
                 .expect("primary turns")
@@ -157,7 +172,55 @@ impl PrimaryHost {
             stdin: StdMutex::new(HashMap::new()),
             presentations: StdMutex::new(HashMap::new()),
             checkpoint: StdMutex::new(None),
+            journals: std::sync::OnceLock::new(),
+            retain_interrupted: AtomicBool::new(false),
         }
+    }
+
+    /// Keep interrupted turns' admission records for the next incarnation.
+    /// Only a transition that ends this process image may set this, and it
+    /// is cleared if that transition fails and this incarnation continues.
+    pub(crate) fn retain_interrupted_turns(&self, retain: bool) {
+        self.retain_interrupted.store(retain, Ordering::SeqCst);
+    }
+
+    pub(crate) fn bind_runtime_journals(&self, journals: RuntimeJournals) -> Result<()> {
+        ensure!(
+            self.journals.set(journals).is_ok(),
+            "Primary host already has runtime journals"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn runtime_journals(&self) -> Option<&RuntimeJournals> {
+        self.journals.get()
+    }
+
+    /// Settle a turn's admission record after its terminal outcome persisted.
+    /// A failure leaves evidence that the next runtime presents for review,
+    /// never a silent continuation.
+    fn settle_turn_record(&self, record: Option<crate::runtime_lifecycle::turns::TurnRecord>) {
+        if let (Some(record), Some(journals)) = (record, self.journals.get())
+            && let Err(error) = journals.turns.remove(&record)
+        {
+            crate::logging::error(&format!(
+                "Primary turn record for {} could not be settled; a later runtime will present it for recovery review: {error:#}",
+                record.session
+            ));
+        }
+    }
+
+    /// Sessions whose turns this host currently owns.
+    pub(crate) fn processing_sessions(&self) -> Vec<String> {
+        let mut sessions = self
+            .turns
+            .lock()
+            .expect("primary turns")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        sessions.sort();
+        sessions
     }
 
     // Existing runtime inspection and new-context coordinators share this same
@@ -551,6 +614,14 @@ impl PrimaryHost {
             "Primary identity changed before admission"
         );
         agent.primary_owner = Some(self.adopt_owner(&agent)?);
+        // Durable admission evidence precedes any provider dispatch. Without it
+        // an unexpected exit could not be presented for selected recovery.
+        let turn = self
+            .journals
+            .get()
+            .map(|journals| journals.turns.begin(session))
+            .transpose()
+            .context("Primary turn admission could not be recorded")?;
         let presentation = self.presentation(session);
         presentation.begin(request_id);
         let control = Arc::new(TurnControl {
@@ -576,6 +647,7 @@ impl PrimaryHost {
                 control,
                 started: false,
                 permit,
+                turn,
             },
         })
     }
@@ -601,6 +673,7 @@ impl PrimaryHost {
         let control = reservation.control.clone();
         let starting = control.clone();
         let permit = reservation.permit.clone();
+        let turn_record = reservation.turn.take();
         let mut task = TurnBody(tokio::spawn(crate::runtime_lifecycle::admission::scope(
             permit,
             async move {
@@ -646,6 +719,12 @@ impl PrimaryHost {
             let Some(host) = host.upgrade() else {
                 return;
             };
+            if interrupted && host.retain_interrupted.load(Ordering::SeqCst) {
+                // The replacement incarnation classifies this exact record.
+                drop(turn_record);
+            } else {
+                host.settle_turn_record(turn_record);
+            }
             host.turns.lock().expect("primary turns").remove(&session);
             control.finished.send_replace(true);
             host.revision.send_modify(|r| *r = r.wrapping_add(1));

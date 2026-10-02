@@ -34,6 +34,8 @@ pub struct RuntimeLifecycle {
 pub struct RuntimeExit {
     pub operation: OperationId,
     pub forced: bool,
+    /// Verified quiescence for a reviewed restart: replace, do not stop.
+    pub restart: bool,
 }
 
 struct WakeMutation(Option<Arc<Notify>>);
@@ -61,6 +63,21 @@ impl RuntimeLifecycle {
     ) -> Result<Arc<Self>> {
         let store = RuntimeStopStore::new(&crate::storage::durable_state_dir(), socket)?;
         let owner = store.claim()?;
+        // Before any admission: interrupted turns of the previous incarnation
+        // become planned continuations or durable recovery items.
+        let recovered = owner.reconcile_interrupted_turns(|record, planned| {
+            super::supervision::persist_planned_continuation(record, planned)
+        })?;
+        if !recovered.is_empty() {
+            crate::logging::warn(&format!(
+                "Runtime recovery: {} interrupted primary turn(s) await an explicit continue or leave-stopped decision",
+                recovered.len()
+            ));
+        }
+        primaries.bind_runtime_journals(crate::primary::RuntimeJournals {
+            turns: owner.turns(),
+            recovery: owner.recovery(),
+        })?;
         let registration = RuntimeAdmission::register_namespace(
             root,
             owner.identity(),
@@ -212,7 +229,7 @@ impl RuntimeLifecycle {
         }
     }
 
-    async fn work(&self) -> Result<Vec<RuntimeWork>> {
+    pub(crate) async fn work(&self) -> Result<Vec<RuntimeWork>> {
         let mut work = self
             .registration
             .admission()
@@ -313,6 +330,30 @@ impl RuntimeLifecycle {
             } => {
                 RuntimeResponse::Operation(self.owner.retry(operation, expected_revision, true)?)
             }
+            RuntimeRequest::Supervision {} => RuntimeResponse::Supervision(SupervisionStatus {
+                namespace: self.owner.namespace().into(),
+                runtime: self.owner.identity().into(),
+                supervised: super::supervision::supervised(),
+                power: super::supervision::power_status(),
+                recoveries: super::supervision::recoveries(&self.primaries)?,
+            }),
+            RuntimeRequest::Recover {
+                item,
+                expected_revision,
+                request,
+                decision,
+            } => {
+                let mut resolved = super::supervision::decide(
+                    &self.primaries,
+                    item,
+                    expected_revision,
+                    request,
+                    decision,
+                )
+                .await?;
+                resolved.executions = Vec::new();
+                RuntimeResponse::Recovery(resolved)
+            }
         };
         // Notify retains a permit if this races the driver retiring an attempt.
         // Repeated requests never create another shutdown or provider turn.
@@ -368,7 +409,8 @@ impl RuntimeLifecycle {
             match operation.phase {
                 ShutdownPhase::Forced
                     if operation.review.runtime == self.owner.identity()
-                        && self.owner.status()?.desired_stopped =>
+                        && self.owner.status()?.desired_stopped
+                            == operation.records_intentional_stop() =>
                 {
                     self.registration
                         .admission()
@@ -376,12 +418,14 @@ impl RuntimeLifecycle {
                     self.stopped.send_replace(Some(RuntimeExit {
                         operation: operation.id,
                         forced: true,
+                        restart: false,
                     }));
                     return Ok(());
                 }
                 ShutdownPhase::Stopped
                     if operation.review.runtime == self.owner.identity()
-                        && self.owner.status()?.desired_stopped =>
+                        && self.owner.status()?.desired_stopped
+                            == operation.records_intentional_stop() =>
                 {
                     // A prior complete() can report a post-rename fsync error.
                     // Retry confirms the original receipt, not the work effects.
@@ -404,6 +448,7 @@ impl RuntimeLifecycle {
                     self.stopped.send_replace(Some(RuntimeExit {
                         operation: operation.id,
                         forced: false,
+                        restart: restarts(&operation),
                     }));
                     return Ok(());
                 }
@@ -486,6 +531,7 @@ impl RuntimeLifecycle {
                             self.stopped.send_replace(Some(RuntimeExit {
                                 operation: completed.id,
                                 forced: false,
+                                restart: restarts(&completed),
                             }));
                             return Ok(());
                         }
@@ -514,6 +560,7 @@ impl RuntimeLifecycle {
                                 self.stopped.send_replace(Some(RuntimeExit {
                                     operation: forced.id,
                                     forced: true,
+                                    restart: false,
                                 }));
                             }
                             return Ok(());
@@ -578,6 +625,11 @@ impl RuntimeLifecycle {
             .map(|work| work.id.clone())
             .collect::<BTreeSet<_>>();
         self.registration.admission().interrupt_preparations()?;
+        // A restart or external-signal exit leaves interrupted turns' admission
+        // records for the next incarnation to classify; a reviewed Stop settles
+        // them because it records no continuation.
+        self.primaries
+            .retain_interrupted_turns(!operation.records_intentional_stop());
         let execution_work = self.executions.inventory().await?;
         let legacy_work = self
             .background
@@ -637,6 +689,50 @@ impl RuntimeLifecycle {
             .context("Runtime primary checkpoint")
     }
 }
+
+fn restarts(operation: &ShutdownOperation) -> bool {
+    operation.origin.is_reviewed()
+        && operation.review.options.destination == RuntimeDestination::Restart
+}
+
+impl RuntimeLifecycle {
+    /// Durable proof that this incarnation reached verified reload quiescence;
+    /// its retained turn records become planned continuations next start.
+    pub(crate) fn record_reload_handoff(&self, reload: &str) -> Result<()> {
+        self.owner.record_reload_handoff(reload)
+    }
+
+    /// External termination (logout, service unload, `kill`) enters the same
+    /// fenced quiescence as a reviewed Interrupt, preserving supported native
+    /// tasks. It records no intentional Stop; interrupted turns become
+    /// recovery items for an explicit decision after the next start.
+    pub async fn begin_external_signal(&self) -> Result<()> {
+        let _wake = WakeMutation(Some(self.wake.clone()));
+        let _mutation = self.mutation.lock().await;
+        let work = self.work().await?;
+        let operation = self.registration.admission().begin_external_signal(
+            &self.owner,
+            ShutdownOptions {
+                strategy: StopStrategy::Interrupt,
+                independent: IndependentTasks::KeepSupported,
+                quiescence_timeout_seconds: EXTERNAL_SIGNAL_QUIESCENCE_SECONDS,
+                destination: RuntimeDestination::Stopped,
+            },
+            work,
+        )?;
+        self.control_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::logging::warn(&format!(
+            "External termination signal began runtime quiescence as operation {}",
+            operation.id
+        ));
+        Ok(())
+    }
+}
+
+/// Bounded below the login service's exit timeout so actual quiescence and
+/// checkpoints can be published before the operating system escalates.
+pub const EXTERNAL_SIGNAL_QUIESCENCE_SECONDS: u32 = 20;
 
 impl Drop for RuntimeLifecycle {
     fn drop(&mut self) {

@@ -1297,7 +1297,14 @@ pub enum ServerEvent {
         response: Box<jcode_workspace_types::WorkspaceResponse>,
     },
     #[serde(rename = "runtime_capabilities")]
-    RuntimeCapabilities { id: u64, version: Option<u32> },
+    RuntimeCapabilities {
+        id: u64,
+        version: Option<u32>,
+        /// `runtime_supervision_v1`: restart destination, recovery decisions
+        /// and supervision status. Absent from servers that predate it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervision: Option<u32>,
+    },
     #[serde(rename = "runtime_response")]
     RuntimeResponse {
         id: u64,
@@ -1786,6 +1793,11 @@ pub enum ServerEvent {
         /// Server-owned reload recovery directive for this session, if a reconnect should continue automatically.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reload_recovery: Option<ReloadRecoverySnapshot>,
+        /// Unresolved unexpected-exit recovery for this session. The runtime
+        /// did not continue it; a trusted client decides (continue or leave
+        /// stopped) or the user sends a new message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_recovery: Option<Box<jcode_workspace_types::runtime::RecoveryItem>>,
         /// Last observed actual connection type for this session (e.g. websocket, https/sse)
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_type: Option<String>,

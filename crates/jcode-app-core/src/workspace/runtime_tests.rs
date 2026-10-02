@@ -34,6 +34,7 @@ fn stopping_runtime_allows_revocation_but_not_new_grant_authority() -> anyhow::R
             strategy: StopStrategy::Interrupt,
             independent: IndependentTasks::Stop,
             quiescence_timeout_seconds: 3,
+            destination: Default::default(),
         },
         Vec::new(),
     )?;
@@ -133,6 +134,7 @@ fn shutdown_fences_workspace_effects_but_preserves_inspection_and_admitted_publi
             strategy: StopStrategy::FinishCurrent,
             independent: IndependentTasks::Stop,
             quiescence_timeout_seconds: 5,
+            destination: Default::default(),
         },
         Vec::new(),
     )?;

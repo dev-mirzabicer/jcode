@@ -1010,7 +1010,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
         .await?;
         return Ok(());
     }
-    let mut initial_restore_status = None;
     let (mut agent, mut provider, mut registry, mut client_session_id, mut friendly_name) =
         if let Some(target) = requested_target.filter(|_| target_available) {
             match sessions
@@ -1022,7 +1021,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 )
                 .await
             {
-                Ok(status) => initial_restore_status = status,
+                Ok(_) => {}
                 Err(error) => {
                     write_direct_event(
                         &writer,
@@ -1879,7 +1878,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     registry = resources.registry;
                     // Establish the replacement's canonical cursor before its
                     // first turn. The old stream must not follow a Clear.
-                    handle_get_history(id,&client_session_id,false,&agent,&startup_context,&provider,&sessions,&client_connections,&client_count,&writer,&server_name,&server_icon,None,Some(&client_event_tx)).await?;
+                    handle_get_history(id,&client_session_id,false,&agent,&startup_context,&provider,&sessions,&client_connections,&client_count,&writer,&server_name,&server_icon,Some(&client_event_tx)).await?;
                 }
                 session_control = refresh_session_control_handle(
                     &client_session_id,
@@ -1962,7 +1961,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             &writer,
                             &server_name,
                             &server_icon,
-                            None,
                     Some(&client_event_tx),
                         )
                         .await
@@ -2028,7 +2026,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             &writer,
                             &server_name,
                             &server_icon,
-                            None,
                             Some(&client_event_tx),
                         )
                         .await
@@ -2270,7 +2267,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                                 &startup_context,
                                 attach_provider,
                                 &instruction_repositories,
-                            initial_restore_status.take(),
                                 &sessions,
                                 &shutdown_signals,
                                 &soft_interrupt_queues,
@@ -2452,7 +2448,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     &writer,
                     &server_name,
                     &server_icon,
-                    None,
                     Some(&client_event_tx),
                 )
                 .await
@@ -3012,7 +3007,6 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         &startup_context,
                         &provider,
                         &instruction_repositories,
-                    None,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,
@@ -5069,6 +5063,18 @@ async fn start_processing_message(
             retry_after_secs: None,
         });
         return;
+    }
+    // A human message after an unexpected exit is the user's own decision to
+    // proceed; it resolves pending recovery so no stale continuation follows.
+    if (!message.content.is_empty() || message.queued_messages.is_some())
+        && let Some(journals) = host.runtime_journals()
+        && let Err(error) = journals
+            .recovery
+            .supersede(client_session_id, message.input_id)
+    {
+        crate::logging::warn(&format!(
+            "Runtime recovery for {client_session_id} could not record the superseding message: {error:#}"
+        ));
     }
     let _ = client_event_tx.send(ServerEvent::Ack { id });
     *state.client_is_processing = true;

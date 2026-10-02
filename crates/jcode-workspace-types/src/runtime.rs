@@ -3,6 +3,41 @@ use crate::{OperationId, RequestId, ReviewId, Revision};
 use serde::{Deserialize, Serialize};
 
 pub const CAPABILITY: &str = "runtime_lifecycle_v1";
+/// Planned restart, selected crash recovery and power inspection. Clients send
+/// supervision requests or a non-default destination only after negotiating it.
+pub const SUPERVISION_CAPABILITY: &str = "runtime_supervision_v1";
+
+/// Where the runtime goes after verified quiescence. Only `Stopped` records an
+/// intentional Stop; a restart keeps the runtime desired-available.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDestination {
+    #[default]
+    Stopped,
+    Restart,
+}
+
+impl RuntimeDestination {
+    pub fn is_stopped(&self) -> bool {
+        *self == Self::Stopped
+    }
+}
+
+/// Who initiated a shutdown. External signals are not reviewed user intent and
+/// never record an intentional Stop.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownOrigin {
+    #[default]
+    Reviewed,
+    ExternalSignal,
+}
+
+impl ShutdownOrigin {
+    pub fn is_reviewed(&self) -> bool {
+        *self == Self::Reviewed
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +61,8 @@ pub struct ShutdownOptions {
     /// Waiting for natural completion has no deadline. This bounds only the
     /// quiescence attempt after entering Stopping, never authorizes Force.
     pub quiescence_timeout_seconds: u32,
+    #[serde(default, skip_serializing_if = "RuntimeDestination::is_stopped")]
+    pub destination: RuntimeDestination,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -109,6 +146,16 @@ pub struct ShutdownOperation {
     pub remaining: Vec<RuntimeWork>,
     pub preserved: Vec<RuntimeWork>,
     pub issues: Vec<String>,
+    #[serde(default, skip_serializing_if = "ShutdownOrigin::is_reviewed")]
+    pub origin: ShutdownOrigin,
+}
+
+impl ShutdownOperation {
+    /// Only reviewed intent to stop leaves the runtime desired-stopped. A
+    /// restart and an external signal keep it available for the next start.
+    pub fn records_intentional_stop(&self) -> bool {
+        self.origin.is_reviewed() && self.review.options.destination.is_stopped()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -155,6 +202,16 @@ pub enum RuntimeRequest {
         operation: OperationId,
         expected_revision: Revision,
     },
+    /// Requires `runtime_supervision_v1`.
+    Supervision {},
+    /// Resolve one unexpected-exit recovery item exactly once. Requires
+    /// `runtime_supervision_v1`. The same request ID replays its outcome.
+    Recover {
+        item: RecoveryId,
+        expected_revision: Revision,
+        request: RequestId,
+        decision: RecoveryDecision,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -164,9 +221,142 @@ pub enum RuntimeResponse {
     Review(ShutdownReview),
     Operation(ShutdownOperation),
     Error(crate::Issue),
+    Supervision(SupervisionStatus),
+    Recovery(RecoveryItem),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RecoveryId(uuid::Uuid);
+impl RecoveryId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+impl Default for RecoveryId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl std::fmt::Display for RecoveryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::str::FromStr for RecoveryId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(s).map(Self)
+    }
+}
+
+/// Why a primary turn ended without a terminal record from its runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCause {
+    /// The runtime process ended without a verified shutdown outcome.
+    UnexpectedExit,
+    /// An explicit Force ended the runtime with uncertain outcomes.
+    ForcedExit,
+    /// An external termination signal interrupted the turn.
+    ExternalSignal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryDecision {
+    Continue,
+    LeaveStopped,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RecoveryResolution {
+    /// A trusted client chose continuation; this input carries it.
+    Continued {
+        input: RequestId,
+    },
+    LeftStopped {},
+    /// A later human message to the session resolved the interruption.
+    SupersededByInput {
+        input: RequestId,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryResolved {
+    pub resolution: RecoveryResolution,
+    /// Present for trusted-client decisions; replay with it returns this item.
+    pub request: Option<RequestId>,
+    pub resolved_at: String,
+}
+
+/// Execution owned by the interrupted session that had not reached a terminal
+/// receipt when inspected. A live owner is still running; it is not replayed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryExecution {
+    pub id: String,
+    pub tool: String,
+    pub state: String,
+    pub live_owner: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryItem {
+    pub id: RecoveryId,
+    pub session: String,
+    /// Durable turn identity from the runtime that admitted it.
+    pub turn: String,
+    /// Runtime incarnation that admitted the interrupted turn.
+    pub runtime: String,
+    pub cause: RecoveryCause,
+    pub detected_at: String,
+    pub revision: Revision,
+    pub resolved: Option<RecoveryResolved>,
+    /// Fresh inspection, filled by the live coordinator; not durable authority.
+    #[serde(default)]
+    pub executions: Vec<RecoveryExecution>,
+}
+
+/// Actual inhibitor state. `active` reports a held platform assertion, not the
+/// desired state; `available` is false on unsupported platforms or opt-out.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PowerStatus {
+    pub enabled: bool,
+    pub available: bool,
+    pub active: bool,
+    pub active_work: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisionStatus {
+    pub namespace: String,
+    pub runtime: String,
+    /// The process was launched by the namespaced login service.
+    pub supervised: bool,
+    pub power: PowerStatus,
+    /// Unresolved items first, then recently resolved items.
+    pub recoveries: Vec<RecoveryItem>,
 }
 
 impl RuntimeRequest {
+    /// Requests that only a `runtime_supervision_v1` runtime understands.
+    /// Clients negotiate before sending; older runtimes reject them.
+    pub fn requires_supervision(&self) -> bool {
+        match self {
+            Self::Supervision {} | Self::Recover { .. } => true,
+            Self::Review { options } | Self::ReviewChange { options, .. } => {
+                !options.destination.is_stopped()
+            }
+            _ => false,
+        }
+    }
+
     /// Correlation only. This never grants authority or infers completion from
     /// a transport acknowledgement. Begin replay may return later durable state.
     pub fn matches_response(&self, response: &RuntimeResponse) -> bool {
@@ -193,6 +383,19 @@ impl RuntimeRequest {
                 op.request == *request && op.review.id == *review
             }
             (Self::Inspect { operation }, RuntimeResponse::Operation(op)) => op.id == *operation,
+            (Self::Supervision {}, RuntimeResponse::Supervision(_)) => true,
+            (
+                Self::Recover {
+                    item: id, request, ..
+                },
+                RuntimeResponse::Recovery(item),
+            ) => {
+                item.id == *id
+                    && item
+                        .resolved
+                        .as_ref()
+                        .is_some_and(|resolved| resolved.request == Some(*request))
+            }
             (
                 Self::CancelWait {
                     operation,

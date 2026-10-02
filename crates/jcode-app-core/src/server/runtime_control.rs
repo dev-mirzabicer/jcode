@@ -13,7 +13,11 @@ pub(super) async fn dispatch(
     #[cfg(not(unix))]
     let version = None;
     match request {
-        Request::RuntimeProbe { id } => Some(ServerEvent::RuntimeCapabilities { id: *id, version }),
+        Request::RuntimeProbe { id } => Some(ServerEvent::RuntimeCapabilities {
+            id: *id,
+            version,
+            supervision: version.map(|_| 1),
+        }),
         Request::RuntimeControl { id, request } => {
             #[cfg(unix)]
             let result = match lifecycle {

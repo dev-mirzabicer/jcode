@@ -115,7 +115,6 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         &crate::server::startup_context::test_coordinator(),
         &provider,
         &crate::instruction::InstructionRepositoryService::new(),
-        None,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

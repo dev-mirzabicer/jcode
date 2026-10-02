@@ -402,6 +402,29 @@ impl RuntimeAdmission {
         owner.review_change(operation, expected, options, merge_work(&state, observed))
     }
 
+    /// External termination enters the same fenced transition as a reviewed
+    /// Interrupt, atomically with its internal review, while still Running.
+    pub fn begin_external_signal(
+        &self,
+        owner: &RuntimeStopOwner,
+        options: ShutdownOptions,
+        observed: Vec<RuntimeWork>,
+    ) -> Result<ShutdownOperation> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Runtime admission is poisoned"))?;
+        ensure!(
+            state.mode == Mode::Running,
+            "Runtime transition already owns admission"
+        );
+        let work = merge_work(&state, observed);
+        let review = owner.review(options, work.clone())?;
+        let result = owner.begin_external_signal(RequestId::new(), review.id, work);
+        self.reconcile(&mut state, owner)?;
+        result
+    }
+
     pub fn force_exit(
         &self,
         owner: &RuntimeStopOwner,
@@ -478,6 +501,9 @@ impl RuntimeAdmission {
         state.mode = match status.operation.map(|op| op.phase) {
             Some(ShutdownPhase::WaitingForCurrent) => Mode::Draining,
             Some(ShutdownPhase::Stopped | ShutdownPhase::Forced) => Mode::Sealed,
+            // A restart or external-signal exit keeps the runtime desired
+            // available, but its active operation still fences admission.
+            Some(ShutdownPhase::Stopping | ShutdownPhase::Blocked) => Mode::Stopping,
             _ if !status.desired_stopped => Mode::Running,
             _ => Mode::Stopping,
         };

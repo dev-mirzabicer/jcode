@@ -1366,7 +1366,14 @@ fn runtime_sdk_negotiates_without_attachment_and_matches_every_control() {
             vec!["runtime_lifecycle_v1".into()],
             move |frame, writer| {
                 assert!(matches!(frame.request, ApiRequest::RuntimeProbe));
-                reply(frame, ApiEvent::RuntimeCapabilities { version }, writer);
+                reply(
+                    frame,
+                    ApiEvent::RuntimeCapabilities {
+                        version,
+                        supervision: None,
+                    },
+                    writer,
+                );
             },
         );
         assert_eq!(
@@ -1390,11 +1397,17 @@ fn runtime_sdk_negotiates_without_attachment_and_matches_every_control() {
         let request: RuntimeRequest = serde_json::from_value(case["request"].clone()).unwrap();
         let expected = request.clone();
         let client = fake_harness_with_capabilities(
-            vec!["runtime_lifecycle_v1".into()],
+            vec![
+                "runtime_lifecycle_v1".into(),
+                "runtime_supervision_v1".into(),
+            ],
             move |frame, writer| match &frame.request {
                 ApiRequest::RuntimeProbe => reply(
                     frame,
-                    ApiEvent::RuntimeCapabilities { version: Some(1) },
+                    ApiEvent::RuntimeCapabilities {
+                        version: Some(1),
+                        supervision: Some(1),
+                    },
                     writer,
                 ),
                 ApiRequest::RuntimeControl { request } => {
@@ -1419,6 +1432,60 @@ fn runtime_sdk_negotiates_without_attachment_and_matches_every_control() {
         );
         if let Err(error) = result {
             assert_eq!(error.kind, ErrorKind::UnexpectedReply);
+        }
+    }
+}
+
+#[test]
+fn runtime_supervision_requests_never_reach_an_older_runtime() {
+    use jcode_harness_api::{RecoveryDecision, RecoveryId, RuntimeDestination, RuntimeRequest};
+    let restart = RuntimeRequest::Review {
+        options: jcode_harness_api::ShutdownOptions {
+            strategy: jcode_harness_api::StopStrategy::Interrupt,
+            independent: jcode_harness_api::IndependentTasks::Stop,
+            quiescence_timeout_seconds: 30,
+            destination: RuntimeDestination::Restart,
+        },
+    };
+    let recover = RuntimeRequest::Recover {
+        item: RecoveryId::new(),
+        expected_revision: 1,
+        request: jcode_harness_api::RequestId::new(),
+        decision: RecoveryDecision::Continue,
+    };
+    for (capabilities, supervision) in [
+        (vec!["runtime_lifecycle_v1".to_string()], Some(1)),
+        (
+            vec![
+                "runtime_lifecycle_v1".to_string(),
+                "runtime_supervision_v1".to_string(),
+            ],
+            None,
+        ),
+    ] {
+        let client = fake_harness_with_capabilities(capabilities, move |frame, writer| {
+            assert!(
+                matches!(frame.request, ApiRequest::RuntimeProbe),
+                "a supervision control reached an older runtime"
+            );
+            reply(
+                frame,
+                ApiEvent::RuntimeCapabilities {
+                    version: Some(1),
+                    supervision,
+                },
+                writer,
+            );
+        });
+        for request in [
+            restart.clone(),
+            recover.clone(),
+            RuntimeRequest::Supervision {},
+        ] {
+            assert_eq!(
+                client.runtime_control(request).unwrap_err().kind,
+                ErrorKind::UnsupportedCapability
+            );
         }
     }
 }

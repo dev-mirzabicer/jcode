@@ -105,7 +105,6 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         &coordinator,
         &provider,
         &crate::instruction::InstructionRepositoryService::new(),
-        None,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

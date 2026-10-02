@@ -98,6 +98,14 @@ impl PowerInhibitor {
         self.available
     }
 
+    /// Whether a platform assertion is currently held, as opposed to merely
+    /// requested. A helper that exited is reported released.
+    pub fn is_held(&mut self) -> bool {
+        self.handle
+            .as_mut()
+            .is_some_and(|handle| handle.status().running)
+    }
+
     /// Reconcile the platform guard against the desired active state. Safe to
     /// call frequently; it is idempotent and refreshes bounded Unix helpers.
     pub fn set_active(&mut self, active: bool) {

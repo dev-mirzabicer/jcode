@@ -1178,6 +1178,52 @@ pub(super) async fn handle_resume_all_sessions(
             continue;
         };
 
+        // An explicit human resume of a session interrupted by an unexpected
+        // exit is that session's recovery decision; record it durably rather
+        // than inferring a continuation beside it.
+        let unresolved = sessions
+            .runtime_journals()
+            .and_then(|journals| journals.recovery.unresolved(&session_id).ok())
+            .unwrap_or_default();
+        if !unresolved.is_empty() {
+            let display_name = agent_guard
+                .session_short_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
+            drop(agent_guard);
+            let mut continued = false;
+            let newest = unresolved.len().saturating_sub(1);
+            for (index, item) in unresolved.into_iter().enumerate() {
+                // Several interruptions need one continuation; older ones are
+                // explicitly left stopped rather than replayed.
+                let decision = if index == newest {
+                    crate::workspace::runtime::RecoveryDecision::Continue
+                } else {
+                    crate::workspace::runtime::RecoveryDecision::LeaveStopped
+                };
+                match super::supervision::decide(
+                    sessions,
+                    item.id,
+                    item.revision,
+                    crate::workspace::RequestId::new(),
+                    decision,
+                )
+                .await
+                {
+                    Ok(_) => continued |= index == newest,
+                    Err(error) => crate::logging::warn(&format!(
+                        "resume_all_sessions: recovery decision for {session_id} failed: {error:#}"
+                    )),
+                }
+            }
+            if continued {
+                resumed_sessions.push(display_name);
+            } else {
+                skipped += 1;
+            }
+            continue;
+        }
+
         if !live_session_owes_continuation(&agent_guard) {
             drop(agent_guard);
             skipped += 1;

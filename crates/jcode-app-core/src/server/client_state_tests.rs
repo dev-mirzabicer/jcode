@@ -171,7 +171,6 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
         "server-name",
         "🔥",
         None,
-        None,
     )
     .await
     .expect("history should be written from persisted fallback");
@@ -328,126 +327,58 @@ impl Drop for ReloadHistoryEnvGuard {
     }
 }
 
-fn write_pending_user_session(
-    session_id: &str,
-    status: crate::session::SessionStatus,
-) -> Result<()> {
+/// History never infers a continuation from transcript shape or session
+/// status. An unexpected exit is reported as its durable recovery item, which
+/// only an explicit decision or a new human message resolves.
+#[cfg(unix)]
+#[test]
+fn history_reports_crash_recovery_without_inferring_continuation() -> Result<()> {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new()?;
+    let runtime = tempfile::TempDir::new()?;
+    let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
+    let session_id = "session_history_crash_recovery";
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
-    session.status = status;
+    session.status = crate::session::SessionStatus::Crashed { message: None };
     session.add_message(
         crate::message::Role::User,
         vec![crate::message::ContentBlock::Text {
-            text: "continue this after reload".to_string(),
+            text: "work that was interrupted".to_string(),
             cache_control: None,
         }],
     );
-    session.save()
-}
-
-#[test]
-fn history_reload_recovery_infers_pending_active_user_turn_during_reload() -> Result<()> {
-    let _lock = crate::storage::lock_test_env();
-    let home = tempfile::TempDir::new()?;
-    let runtime = tempfile::TempDir::new()?;
-    let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
-    let session_id = "session_history_reload_fallback";
-    write_pending_user_session(session_id, crate::session::SessionStatus::Active)?;
+    session.save()?;
     crate::server::write_reload_state(
-        "reload-history-fallback",
-        "test-hash",
-        crate::server::ReloadPhase::SocketReady,
+        "reload-history-test",
+        "hash",
+        crate::server::ReloadPhase::Starting,
         Some(session_id.to_string()),
     );
+    // Crashed status, a final user message and an active reload marker used
+    // to make History ask the client to continue. Nothing is inferred now.
+    assert!(super::unresolved_runtime_recovery(session_id).is_none());
 
-    let snapshot = super::history_reload_recovery_snapshot(session_id, None);
-    assert!(
-        snapshot.is_some(),
-        "pending user turn during reload should get recovery directive"
-    );
-    let Some(snapshot) = snapshot else {
-        return Ok(());
-    };
-
-    assert!(
-        snapshot
-            .continuation_message
-            .contains("interrupted by a server reload")
-    );
-    Ok(())
-}
-
-#[test]
-fn history_reload_recovery_does_not_infer_pending_user_turn_without_reload_marker() -> Result<()> {
-    let _lock = crate::storage::lock_test_env();
-    let home = tempfile::TempDir::new()?;
-    let runtime = tempfile::TempDir::new()?;
-    let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
-    let session_id = "session_history_no_reload_fallback";
-    write_pending_user_session(session_id, crate::session::SessionStatus::Active)?;
-
-    assert!(super::history_reload_recovery_snapshot(session_id, None).is_none());
-    Ok(())
-}
-
-#[test]
-fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepted() -> Result<()> {
-    let _lock = crate::storage::lock_test_env();
-    let home = tempfile::TempDir::new()?;
-    let runtime = tempfile::TempDir::new()?;
-    let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
-    let session_id = "session_history_store_owned";
-    super::super::reload_recovery::persist_intent(
-        "reload-store-owned",
-        session_id,
-        super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
-        crate::tool::selfdev::ReloadRecoveryDirective {
-            reconnect_notice: Some("stored notice".to_string()),
-            continuation_message: "stored continuation".to_string(),
-        },
-        "test store intent",
+    let store = crate::runtime_lifecycle::RuntimeStopStore::new(
+        &crate::storage::durable_state_dir(),
+        &crate::server::socket_path(),
     )?;
-
-    let Some(snapshot) = super::history_reload_recovery_snapshot(session_id, None) else {
-        anyhow::bail!("server-owned recovery intent should be used");
-    };
-    assert_eq!(snapshot.continuation_message, "stored continuation");
-    assert!(
-        super::super::reload_recovery::has_pending_for_session(session_id),
-        "building a History payload must not consume the intent; the client may disconnect before queuing it"
+    let crashed = store.claim()?;
+    crashed.turns().begin(session_id)?;
+    drop(crashed);
+    let next = store.claim()?;
+    let items = next.reconcile_interrupted_turns(|_, _| {
+        anyhow::bail!("an unexpected exit is never a planned transition")
+    })?;
+    assert_eq!(items.len(), 1);
+    let reported = super::unresolved_runtime_recovery(session_id)
+        .expect("unresolved recovery is reported to clients");
+    assert_eq!(reported.id, items[0].id);
+    assert_eq!(
+        reported.cause,
+        crate::workspace::runtime::RecoveryCause::UnexpectedExit
     );
-
-    let Some(snapshot_again) = super::history_reload_recovery_snapshot(session_id, None) else {
-        anyhow::bail!("pending server-owned recovery intent should be re-emitted until accepted");
-    };
-    assert_eq!(snapshot_again.continuation_message, "stored continuation");
-
-    assert!(
-        !super::super::reload_recovery::mark_delivered_if_matching_continuation(
-            session_id,
-            "different continuation",
-            "unit_test_mismatch",
-        )?,
-        "mismatched reminders must not consume a pending reload recovery intent"
-    );
-    assert!(super::super::reload_recovery::has_pending_for_session(
-        session_id
-    ));
-
-    assert!(
-        super::super::reload_recovery::mark_delivered_if_matching_continuation(
-            session_id,
-            "stored continuation",
-            "unit_test_accept",
-        )?,
-        "matching accepted continuation should mark the recovery intent delivered"
-    );
-    assert!(
-        !super::super::reload_recovery::has_pending_for_session(session_id),
-        "accepted continuation should consume the durable pending intent"
-    );
-    assert!(
-        super::history_reload_recovery_snapshot(session_id, None).is_none(),
-        "delivered server-owned recovery intent should no longer be emitted"
-    );
+    next.recovery()
+        .supersede(session_id, crate::workspace::RequestId::new())?;
+    assert!(super::unresolved_runtime_recovery(session_id).is_none());
     Ok(())
 }

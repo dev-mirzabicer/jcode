@@ -383,10 +383,23 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut recorded_stop = false;
+    // A native command is runtime-owned work that may outlive its daemon (a
+    // supported survivor of Stop). It keeps the machine awake itself, under
+    // the same user switch, once it has run long enough to matter; release is
+    // by drop when the command settles.
+    let mut power = crate::power_inhibit::PowerInhibitor::new();
+    let mut power_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    power_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let outcome = loop {
         tokio::select! {
             biased;
             outcome=&mut operation=>break outcome,
+            _=power_tick.tick()=>{
+                power.set_active(crate::config::config().power.prevent_sleep_while_streaming);
+            }
             _=run.stop.notified(),if !recorded_stop=>{
                 let store=store.clone();let id=record.id.clone();let owner=record.owner.clone();let cause=run.stop.stop_cause().unwrap_or(StopCause::HumanCancellation);
                 let persisted=tokio::task::spawn_blocking(move||store.request_stop(&id,&owner,cause)).await;
@@ -412,6 +425,7 @@ async fn worker_with_child(id: &str, child: tokio::process::Command) -> Result<(
             _=interrupt.recv(),if !run.stop.is_set()=>{run.stop.fire_with_cause(StopCause::HumanCancellation);}
         }
     };
+    drop(power);
     let store_for_finish = store.clone();
     let id = record.id.clone();
     let finished = tokio::task::spawn_blocking(move || {

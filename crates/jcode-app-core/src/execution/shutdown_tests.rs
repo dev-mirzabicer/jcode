@@ -92,6 +92,7 @@ async fn parent_fixture() -> Result<()> {
                 strategy: StopStrategy::Interrupt,
                 independent: IndependentTasks::KeepSupported,
                 quiescence_timeout_seconds: 10,
+                destination: Default::default(),
             },
         })
         .await?

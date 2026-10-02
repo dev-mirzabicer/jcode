@@ -6,6 +6,45 @@ pub(super) type Checkpoint = watch::Receiver<Option<std::result::Result<(), Stri
 
 impl PrimaryHost {
     pub(crate) async fn interrupt_runtime(&self) -> Result<()> {
+        self.interrupt_runtime_with_cause(StopCause::RuntimeShutdown)
+            .await
+    }
+
+    /// Settle records this incarnation retained for interrupted turns once it
+    /// has taken responsibility for continuing them itself.
+    pub(crate) fn settle_retained_turn_records(&self) -> Result<Vec<String>> {
+        let Some(journals) = self.runtime_journals() else {
+            return Ok(Vec::new());
+        };
+        let live = self.processing_sessions();
+        let mut settled = Vec::new();
+        for record in journals.turns.own_records()? {
+            if live.contains(&record.session) {
+                continue;
+            }
+            journals.turns.remove(&record)?;
+            settled.push(record.session);
+        }
+        Ok(settled)
+    }
+
+    /// Records retained by this incarnation for turns it interrupted.
+    pub(crate) fn retained_turn_records(
+        &self,
+    ) -> Result<Vec<crate::runtime_lifecycle::turns::TurnRecord>> {
+        let Some(journals) = self.runtime_journals() else {
+            return Ok(Vec::new());
+        };
+        let live = self.processing_sessions();
+        Ok(journals
+            .turns
+            .own_records()?
+            .into_iter()
+            .filter(|record| !live.contains(&record.session))
+            .collect())
+    }
+
+    pub(crate) async fn interrupt_runtime_with_cause(&self, cause: StopCause) -> Result<()> {
         let sessions = self
             .turns
             .lock()
@@ -14,7 +53,7 @@ impl PrimaryHost {
             .cloned()
             .collect::<Vec<_>>();
         let results = futures::future::join_all(sessions.iter().map(|session| async move {
-            self.stop_with_cause(session, StopCause::RuntimeShutdown)
+            self.stop_with_cause(session, cause)
                 .await
                 .map_err(|error| format!("{session}: {error:#}"))
         }))
@@ -137,6 +176,7 @@ mod tests {
                     strategy: StopStrategy::Interrupt,
                     independent: IndependentTasks::Stop,
                     quiescence_timeout_seconds: 1,
+                    destination: Default::default(),
                 },
                 Vec::new(),
             )?;

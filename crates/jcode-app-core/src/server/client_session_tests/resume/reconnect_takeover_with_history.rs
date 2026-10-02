@@ -109,7 +109,6 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         &crate::server::startup_context::test_coordinator(),
         &provider,
         &crate::instruction::InstructionRepositoryService::new(),
-        None,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

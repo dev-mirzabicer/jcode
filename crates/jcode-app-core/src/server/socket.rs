@@ -211,6 +211,37 @@ pub(super) fn acquire_daemon_lock() -> Result<DaemonLockGuard> {
     })
 }
 
+/// Wait for the namespace daemon lock held by another live runtime. Used only
+/// by the supervised launcher; the lock itself remains the single authority
+/// that prevents two runtimes from serving one namespace.
+#[cfg(unix)]
+pub(super) async fn wait_for_daemon_lock() -> Result<DaemonLockGuard> {
+    let path = daemon_lock_path();
+    let mut announced = false;
+    loop {
+        // An in-place reload releases the lock for an instant across exec.
+        // That is the same runtime continuing, not an exit to take over, so
+        // never even try the lock while it is in progress: a held try-lock
+        // would make the replacement image fail its own acquisition.
+        let reloading = super::recent_reload_state(Duration::from_secs(60)).is_some_and(|state| {
+            state.phase == super::ReloadPhase::Starting
+                && state.pid != std::process::id()
+                && super::reload_process_alive(state.pid)
+        });
+        if !reloading && let Some(lock) = try_acquire_daemon_lock(&path)? {
+            return Ok(lock);
+        }
+        if !announced {
+            crate::logging::info(&format!(
+                "Supervised runtime waiting for the live runtime in {} to exit",
+                crate::storage::runtime_dir().display()
+            ));
+            announced = true;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 #[cfg(unix)]
 pub(super) fn mark_close_on_exec<T: std::os::fd::AsRawFd>(io: &T) {
     let fd = io.as_raw_fd();

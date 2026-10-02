@@ -96,7 +96,7 @@ fn primary_location_idle_notice_prefix_and_missing_cwd_repair() -> Result<()> {
         let owner = RuntimeStopStore::new(&crate::storage::durable_state_dir(), &temp.path().join("location-runtime.sock"))?.claim()?;
         let registration = RuntimeAdmission::register(&crate::storage::jcode_dir()?, owner.identity())?;
         let pending = service.request_location_change(request.clone())?;
-        let review = registration.admission().review(&owner, ShutdownOptions { strategy: StopStrategy::FinishCurrent, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 5 }, Vec::new())?;
+        let review = registration.admission().review(&owner, ShutdownOptions { strategy: StopStrategy::FinishCurrent, independent: IndependentTasks::Stop, quiescence_timeout_seconds: 5, destination: Default::default() }, Vec::new())?;
         let stop = registration.admission().begin(&owner, RequestId::new(), review.id, Vec::new())?;
         assert!(matches!(host.request_location(PrimaryLocationCommand::Change { request: request.clone() }).await, PrimaryLocationResponse::Rejected { .. }));
         assert!(matches!(host.request_location(PrimaryLocationCommand::Inspect { operation: pending.operation }).await, PrimaryLocationResponse::State { record } if record.state == LocationChangeState::Pending));

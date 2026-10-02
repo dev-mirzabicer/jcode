@@ -11,6 +11,24 @@ use std::path::{Path, PathBuf};
 const MARKER: &[u8] = b"jcode-runtime-lifecycle-v1\n";
 
 pub mod admission;
+pub mod recovery;
+pub mod turns;
+
+/// Verified planned transition whose interrupted turns continue automatically
+/// in the replacement incarnation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlannedTransition {
+    Reload { reload: String },
+    Restart { operation: OperationId },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReloadHandoff {
+    runtime: String,
+    reload: String,
+    recorded_at: String,
+}
 
 #[derive(Clone)]
 pub struct RuntimeStopStore {
@@ -205,6 +223,15 @@ impl RuntimeStopStore {
         &self.namespace
     }
 
+    /// Read-only inspection of recovery items while no coordinator answers.
+    /// Resolution belongs to the live coordinator that delivers continuation.
+    pub fn recoveries(&self) -> Result<Vec<RecoveryItem>> {
+        if !self.exists()? {
+            return Ok(Vec::new());
+        }
+        recovery::RecoveryStore::new(&self.directory).list()
+    }
+
     pub fn owner_is_live(&self) -> Result<bool> {
         if !self.exists()? {
             return Ok(false);
@@ -383,7 +410,7 @@ impl RuntimeStopOwner {
             .context("Unknown runtime operation")?;
         ensure!(
             tx.journal.current == Some(id)
-                && tx.journal.desired_stopped
+                && tx.journal.desired_stopped == op.records_intentional_stop()
                 && op.review.runtime == self.identity
                 && if forced {
                     op.phase == ShutdownPhase::Forced && op.force_requested && !op.issues.is_empty()
@@ -416,6 +443,117 @@ impl RuntimeStopOwner {
 
     pub fn identity(&self) -> &str {
         &self.identity
+    }
+
+    /// Durable admission records for this runtime's primary turns.
+    pub fn turns(&self) -> turns::TurnJournal {
+        turns::TurnJournal::new(&self.store.directory, &self.identity)
+    }
+
+    pub fn recovery(&self) -> recovery::RecoveryStore {
+        recovery::RecoveryStore::new(&self.store.directory)
+    }
+
+    /// Record that this incarnation reached verified quiescence and checkpoints
+    /// for a planned reload, immediately before replacing its process image.
+    /// Turns it interrupted are then planned continuations, not crash evidence.
+    pub fn record_reload_handoff(&self, reload: &str) -> Result<()> {
+        let receipt = ReloadHandoff {
+            runtime: self.identity.clone(),
+            reload: reload.into(),
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+        };
+        crate::storage::write_json_secret(
+            &self.store.directory.join("reload-handoff.json"),
+            &receipt,
+        )?;
+        File::open(&self.store.directory)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Classify turns that a previous incarnation admitted but never settled.
+    /// A verified planned transition (reload handoff receipt or a Stopped
+    /// restart operation of that same incarnation) yields a planned
+    /// continuation, persisted by `plan` before its record is removed. Anything
+    /// else becomes a durable recovery item that waits for a trusted decision.
+    /// Runs once after claim, before admission; every step is repeatable.
+    pub fn reconcile_interrupted_turns(
+        &self,
+        mut plan: impl FnMut(&turns::TurnRecord, PlannedTransition) -> Result<()>,
+    ) -> Result<Vec<RecoveryItem>> {
+        let journal = self.turns();
+        let leftovers = journal.leftovers()?;
+        if leftovers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operations = self.store.transaction()?.journal.operations;
+        let handoff = match open_file(
+            &self.store.directory.join("reload-handoff.json"),
+            false,
+            false,
+        ) {
+            Ok(file) => Some(
+                serde_json::from_reader::<_, ReloadHandoff>(file)
+                    .context("Reload handoff receipt is damaged")?,
+            ),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let mut unexpected = Vec::new();
+        for record in &leftovers {
+            let owned = |op: &&ShutdownOperation| op.review.runtime == record.runtime;
+            let planned = if let Some(handoff) = handoff
+                .as_ref()
+                .filter(|handoff| handoff.runtime == record.runtime)
+            {
+                Some(PlannedTransition::Reload {
+                    reload: handoff.reload.clone(),
+                })
+            } else {
+                operations
+                    .iter()
+                    .filter(owned)
+                    .find(|op| {
+                        op.phase == ShutdownPhase::Stopped
+                            && op.origin.is_reviewed()
+                            && op.review.options.destination == RuntimeDestination::Restart
+                    })
+                    .map(|op| PlannedTransition::Restart { operation: op.id })
+            };
+            match planned {
+                Some(planned) => {
+                    plan(record, planned)?;
+                    journal.remove(record)?;
+                }
+                None => unexpected.push(record.clone()),
+            }
+        }
+        let recorded = self.recovery().adopt(&unexpected, |record| {
+            let ops = operations
+                .iter()
+                .filter(|op| op.review.runtime == record.runtime)
+                .collect::<Vec<_>>();
+            if ops.iter().any(|op| op.phase == ShutdownPhase::Forced) {
+                RecoveryCause::ForcedExit
+            } else if ops
+                .iter()
+                .any(|op| op.origin == ShutdownOrigin::ExternalSignal)
+            {
+                RecoveryCause::ExternalSignal
+            } else {
+                RecoveryCause::UnexpectedExit
+            }
+        })?;
+        for record in &unexpected {
+            journal.remove(record)?;
+        }
+        Ok(recorded)
     }
 
     pub fn status(&self) -> Result<RuntimeStatus> {
@@ -479,6 +617,10 @@ impl RuntimeStopOwner {
                     ),
                 "Only the current waiting or blocked revision can be reviewed for replacement"
             );
+            ensure!(
+                prior.origin.is_reviewed(),
+                "An external-signal shutdown cannot be replaced by a reviewed change"
+            );
         } else {
             ensure!(
                 !tx.journal.operations.iter().any(|op| !op.phase.terminal()),
@@ -506,6 +648,27 @@ impl RuntimeStopOwner {
         request: RequestId,
         review: ReviewId,
         work: Vec<RuntimeWork>,
+    ) -> Result<ShutdownOperation> {
+        self.begin_with_origin(request, review, work, ShutdownOrigin::Reviewed)
+    }
+
+    /// An external termination signal is not reviewed user intent. Its
+    /// internally created review uses Interrupt and never records desired Stop.
+    pub fn begin_external_signal(
+        &self,
+        request: RequestId,
+        review: ReviewId,
+        work: Vec<RuntimeWork>,
+    ) -> Result<ShutdownOperation> {
+        self.begin_with_origin(request, review, work, ShutdownOrigin::ExternalSignal)
+    }
+
+    fn begin_with_origin(
+        &self,
+        request: RequestId,
+        review: ReviewId,
+        work: Vec<RuntimeWork>,
+        origin: ShutdownOrigin,
     ) -> Result<ShutdownOperation> {
         validate_work(&work)?;
         let mut tx = self.store.transaction()?;
@@ -544,6 +707,13 @@ impl RuntimeStopOwner {
             "Shutdown review is stale: new work or changed owners require review"
         );
         let mut cancellation_closed = review.options.strategy == StopStrategy::Interrupt;
+        ensure!(
+            origin.is_reviewed()
+                || (review.options.strategy == StopStrategy::Interrupt
+                    && review.options.destination.is_stopped()
+                    && review.replaces.is_none()),
+            "External-signal shutdown must be a fresh interrupting exit"
+        );
         if let Some(target) = &review.replaces {
             ensure!(
                 tx.journal.current == Some(target.operation),
@@ -586,9 +756,10 @@ impl RuntimeStopOwner {
             remaining: work,
             preserved: Vec::new(),
             issues: Vec::new(),
+            origin,
         };
         tx.journal.current = Some(op.id);
-        tx.journal.desired_stopped = true;
+        tx.journal.desired_stopped = op.records_intentional_stop();
         tx.journal.operations.push(op.clone());
         tx.commit()?;
         Ok(op)
