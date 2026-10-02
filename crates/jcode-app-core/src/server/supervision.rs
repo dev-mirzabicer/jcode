@@ -385,46 +385,33 @@ pub(crate) fn carry_supervision(command: &mut std::process::Command) {
     }
 }
 
-/// The binary a supervised launcher route resolved to when this process
-/// started. A service process that waited behind another runtime may have been
+/// A supervised process's launcher route and the executable it is actually
+/// running. A service process that waited behind another runtime may have been
 /// loaded long before it takes over; it must serve the route's current target,
 /// not the image it loaded while waiting.
 #[cfg(unix)]
 pub(crate) struct LauncherImage {
     route: std::path::PathBuf,
-    target: std::path::PathBuf,
-    identity: (u64, u64),
+    running: std::path::PathBuf,
 }
 
 #[cfg(unix)]
 impl LauncherImage {
     pub(crate) fn capture() -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
         let route = std::path::PathBuf::from(std::env::args_os().next()?);
         if !route.is_absolute() {
             return None;
         }
-        let target = std::fs::canonicalize(&route).ok()?;
-        let metadata = std::fs::metadata(&target).ok()?;
         Some(Self {
             route,
-            target,
-            identity: (metadata.dev(), metadata.ino()),
+            running: std::fs::canonicalize(running_executable()?).ok()?,
         })
     }
 
     pub(crate) fn changed(&self) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::canonicalize(&self.route) {
-            Ok(target) => {
-                target != self.target
-                    || std::fs::metadata(&target)
-                        .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) != self.identity)
-            }
-            // A missing route keeps the loaded image; launchd reports the
-            // broken route on the next start.
-            Err(_) => false,
-        }
+        // A missing route keeps the loaded image; launchd reports the broken
+        // route on the next start.
+        std::fs::canonicalize(&self.route).is_ok_and(|target| target != self.running)
     }
 
     /// Replace this process with the route's current target, keeping the PID
@@ -435,5 +422,39 @@ impl LauncherImage {
         carry_supervision(&mut command);
         anyhow::Error::from(crate::platform::replace_process(&mut command))
             .context("Supervised runtime could not load its launcher's current binary")
+    }
+}
+
+/// The executable file of this process as the kernel records it, not the
+/// possibly symlinked path it was started through.
+#[cfg(target_os = "macos")]
+fn running_executable() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: the buffer is valid for its full length, which is passed as the
+    // size; proc_pidpath writes at most that many bytes and returns the length.
+    let length = unsafe {
+        libc::proc_pidpath(
+            std::process::id() as libc::c_int,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    (length > 0)
+        .then(|| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..length as usize])))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn running_executable() -> Option<std::path::PathBuf> {
+    std::fs::read_link("/proc/self/exe").ok()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod launcher_tests {
+    #[test]
+    fn running_executable_is_this_test_binary() {
+        let running = super::running_executable().expect("kernel executable path");
+        let expected = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(std::fs::canonicalize(running).unwrap(), expected);
     }
 }
