@@ -1219,3 +1219,21 @@ keeps it. Tests: `jcode-session-types`
 `jcode-provider-core` `only_opus_5_5_has_a_superseded_default_effort`, the
 runtime's `the_runtime_reports_the_superseded_default_of_its_model`, and
 app-core `a_session_stored_before_intents_migrates_by_the_models_defaults`.
+
+**Follow-up activation.** A coordinated `selfdev build-reload` built
+`3f956e02c` and the shared server reloaded into
+`3f956e02c-dirty-3a6e2e379bf2` (v0.75.519-dev) at 2026-10-02T05:45Z. The
+request came from a short-lived self-dev session the new server did not load
+(`session_bat_1790919846541_f745a51a82abb77f`; never resume it). On the
+activated server an owned headless session
+(`session_jaguar_1790919945775_1ed225f2aa3f13d0`, Claude OAuth, Opus 5.5) ran
+one MCP tool turn with thinking: both requests were accepted, the second read
+exactly what the first wrote (22,144 tokens), and the log shows no `INV-1`
+warning or input transformation. The pending activation was then completed
+with `jcode_build_support::complete_pending_activation_for_session` after a
+manifest backup. Running, current and shared-server channels are equal and
+the canary is `passed`. The follow-up's checks: session-types 26,
+provider-core 164, provider-openai 15, the OpenAI runtime 121 (2 ignored), the
+Anthropic runtime 83 (1 ignored), the app-core effort, provider-control and
+append-only harness tests, scoped `cargo fmt --check`, and strict Clippy on
+the seven touched crates.
