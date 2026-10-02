@@ -154,11 +154,44 @@ pub enum PrimaryLocationCommand {
     Inspect {
         operation: OperationId,
     },
+    /// Read the Session's committed placement, cwd and unfinished changes.
+    /// Requires `session_inspection_version`. Changes nothing.
+    InspectSession {
+        session: String,
+    },
+}
+
+/// Committed Session location, as the Session owner persisted it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLocationState {
+    pub placement: Placement,
+    pub cwd: PathBuf,
+    pub initial_cwd: PathBuf,
+    pub revision: Revision,
+}
+
+/// A trusted client's view for move and adoption review. `location` absent
+/// means a legacy Session; `legacy_working_dir` is then its recorded directory,
+/// which adoption must name exactly.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLocationView {
+    pub session: String,
+    pub location: Option<SessionLocationState>,
+    pub legacy_working_dir: Option<PathBuf>,
+    pub isolated_child: bool,
+    /// Unfinished location changes in FIFO order.
+    pub pending: Vec<LocationChangeRecord>,
+    pub catalog_revision: Option<Revision>,
+    /// Why catalog facts are absent, for example an uninitialized catalog.
+    pub catalog_issue: Option<crate::Issue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PrimaryLocationResponse {
     State { record: Box<LocationChangeRecord> },
+    Session { view: Box<SessionLocationView> },
     Rejected { issue: crate::Issue },
 }

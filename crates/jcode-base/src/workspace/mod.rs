@@ -16,6 +16,9 @@ mod context_scope;
 mod grants;
 pub use context_scope::ContextScopePlan;
 mod native_mutation;
+mod operations;
+#[cfg(all(test, target_os = "macos"))]
+mod operations_tests;
 pub use grants::WorkspaceClientAuthority;
 pub use native_mutation::WorkspaceMutationPermit;
 mod organization;

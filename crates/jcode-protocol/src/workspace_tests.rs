@@ -58,6 +58,7 @@ fn workspace_catalog_control_is_session_independent_and_roundtrips() {
         permissions_version: Some(1),
         checkout_version: Some(1),
         closeout_version: Some(1),
+        management_version: Some(1),
         managed_rollout: false,
     };
     let bytes = serde_json::to_vec(&capabilities).unwrap();
@@ -299,5 +300,84 @@ fn clone_source_trust_review_and_approval_require_exact_clone_revision_and_revie
             "action":"review_clone_trust", "clone":clone
         }))
         .is_err()
+    );
+}
+
+#[test]
+fn management_reads_roundtrip_and_older_servers_negotiate_absence() {
+    use jcode_workspace_types::*;
+    let query = OperationQuery {
+        target: Some(EntityId::Location(LocationId::new())),
+        session: Some("session_synthetic".into()),
+        kinds: vec![OperationKind::Clone, OperationKind::Closeout],
+        unfinished_only: true,
+    };
+    let request = Request::Workspace {
+        id: 7,
+        request: Box::new(WorkspaceRequest::Operations {
+            query: query.clone(),
+            after: None,
+            limit: 50,
+        }),
+    };
+    let decoded: Request = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+    let Request::Workspace { request, .. } = decoded else {
+        panic!("workspace request")
+    };
+    assert!(
+        matches!(*request, WorkspaceRequest::Operations { query: ref q, limit: 50, .. } if *q == query)
+    );
+    let plans = Request::Workspace {
+        id: 8,
+        request: Box::new(WorkspaceRequest::StartupCopyPlans {
+            source: "/synthetic/source".into(),
+            target: LocationId::new(),
+        }),
+    };
+    let bytes = serde_json::to_vec(&plans).unwrap();
+    assert!(serde_json::from_slice::<Request>(&bytes).is_ok());
+    let old = serde_json::json!({"type":"workspace_capabilities","id":1,"catalog_version":1,"managed_rollout":false});
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(old).unwrap(),
+        ServerEvent::WorkspaceCapabilities {
+            management_version: None,
+            ..
+        }
+    ));
+    let old = serde_json::json!({"type":"primary_control_capabilities","id":1,"input_version":1,"location_version":1,"location_enabled":false});
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(old).unwrap(),
+        ServerEvent::PrimaryControlCapabilities {
+            session_inspection_version: None,
+            ..
+        }
+    ));
+    let inspect = PrimaryLocationCommand::InspectSession {
+        session: "session_synthetic".into(),
+    };
+    let value = serde_json::to_value(&inspect).unwrap();
+    assert_eq!(value["action"], "inspect_session");
+    assert_eq!(
+        serde_json::from_value::<PrimaryLocationCommand>(value).unwrap(),
+        inspect
+    );
+    let view = PrimaryLocationResponse::Session {
+        view: Box::new(SessionLocationView {
+            session: "session_synthetic".into(),
+            location: None,
+            legacy_working_dir: Some("/synthetic/legacy".into()),
+            isolated_child: false,
+            pending: vec![],
+            catalog_revision: None,
+            catalog_issue: Some(Issue {
+                code: IssueCode::RecoveryRequired,
+                detail: "Workspace is not initialized".into(),
+            }),
+        }),
+    };
+    let bytes = serde_json::to_vec(&view).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<PrimaryLocationResponse>(&bytes).unwrap(),
+        view
     );
 }

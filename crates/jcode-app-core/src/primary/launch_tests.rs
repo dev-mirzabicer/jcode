@@ -117,6 +117,13 @@ fn primary_location_idle_notice_prefix_and_missing_cwd_repair() -> Result<()> {
         assert_eq!(after.messages.len(),before.messages.len()+1);
         let again = host.request_location(PrimaryLocationCommand::Change { request }).await;
         assert!(matches!(again,PrimaryLocationResponse::State{record:ref replay} if **replay == *record));
+        let inspected = host.request_location(PrimaryLocationCommand::InspectSession { session: launch.session.clone() }).await;
+        let PrimaryLocationResponse::Session { view } = inspected else { anyhow::bail!("session inspection failed: {inspected:?}"); };
+        let state = view.location.as_ref().expect("managed location");
+        assert_eq!((state.placement, state.cwd.as_path(), state.initial_cwd.as_path()), (Placement::Standalone(roots[1].0), roots[1].1.as_path(), roots[0].1.as_path()));
+        assert_eq!(state.revision, after.location.as_ref().unwrap().revision);
+        assert!(view.pending.is_empty() && view.legacy_working_dir.is_none() && view.catalog_issue.is_none());
+        assert_eq!(Session::load(&launch.session)?.messages.len(), after.messages.len(), "inspection appends nothing");
         assert!(matches!(host.request_location(PrimaryLocationCommand::Cancel { operation:record.operation }).await,PrimaryLocationResponse::Rejected{..}));
         assert_eq!(Session::load(&launch.session)?.messages.len(),after.messages.len());
         std::fs::write(crate::config::Config::path().unwrap(), "[features]\nmanaged_primary_launch = false\n")?;

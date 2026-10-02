@@ -690,3 +690,39 @@ mod tests {
         );
     }
 }
+
+impl WorkspaceService {
+    /// A trusted client's read of committed Session location. The Session owns
+    /// placement and cwd; the catalog contributes only its unfinished changes.
+    /// Catalog unavailability is reported beside the Session facts, not hidden.
+    pub fn session_location_view(&self, session: &crate::session::Session) -> SessionLocationView {
+        let catalog = self
+            .status()
+            .and_then(|status| Ok((status.revision, self.pending_location_changes(&session.id)?)));
+        let (catalog_revision, pending, catalog_issue) = match catalog {
+            Ok((revision, pending)) => (Some(revision), pending, None),
+            Err(error) => (None, Vec::new(), Some(error)),
+        };
+        SessionLocationView {
+            session: session.id.clone(),
+            location: session
+                .location
+                .as_ref()
+                .map(|location| SessionLocationState {
+                    placement: location.placement,
+                    cwd: location.cwd.observed_path().to_path_buf(),
+                    initial_cwd: location.initial_cwd.clone(),
+                    revision: location.revision,
+                }),
+            legacy_working_dir: session
+                .location
+                .is_none()
+                .then(|| session.working_dir.as_ref().map(PathBuf::from))
+                .flatten(),
+            isolated_child: session.isolated_child.is_some(),
+            pending,
+            catalog_revision,
+            catalog_issue,
+        }
+    }
+}

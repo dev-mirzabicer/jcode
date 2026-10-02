@@ -640,3 +640,41 @@ fn validate_target(
     }
     Ok(())
 }
+
+impl WorkspaceService {
+    /// Current plan revisions a reviewer binds before requesting a copy review.
+    /// Read-only: validates the same physical roots as review, changes nothing.
+    pub fn startup_copy_plans(
+        &self,
+        source: PathBuf,
+        target: LocationId,
+    ) -> Result<StartupCopyPlans> {
+        let _lease = self.lease(false)?;
+        let connection = self.connection()?;
+        let catalog_revision = storage::status(&connection)?.revision;
+        let (location, target_binding) = bound_target(&connection, target)?;
+        validate_target(&self.resolver, &location, &target_binding)?;
+        let source_binding = self.resolver.bind_directory(&source).map_err(io)?;
+        let engine = self.startup_engine()?;
+        let source_project = engine
+            .resolve_project(source_binding.observed_path())
+            .map_err(io)?;
+        let target_project = engine
+            .resolve_project(target_binding.observed_path())
+            .map_err(io)?;
+        if source_project.active_root() != source_binding.observed_path() {
+            return Err(issue(
+                IssueCode::InvalidInput,
+                "Select the source's physical Git or directory root",
+            ));
+        }
+        let source_plan = engine.load_project_plan(&source_project).map_err(io)?;
+        let target_plan = engine.load_project_plan(&target_project).map_err(io)?;
+        Ok(StartupCopyPlans {
+            catalog_revision,
+            source_revision: source_plan.plan().revision(),
+            target_revision: target_plan.plan().revision(),
+            source_entries: source_plan.plan().entries().len() as u64,
+        })
+    }
+}

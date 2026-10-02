@@ -57,6 +57,9 @@ impl PrimaryHost {
         self: &Arc<Self>,
         command: PrimaryLocationCommand,
     ) -> PrimaryLocationResponse {
+        if let PrimaryLocationCommand::InspectSession { session } = command {
+            return inspect_session_location(session).await;
+        }
         if !launch_enabled()
             && matches!(
                 &command,
@@ -113,6 +116,9 @@ impl PrimaryHost {
         match command {
             PrimaryLocationCommand::Inspect { operation } => {
                 Ok(workspace.inspect_location_change(operation)?)
+            }
+            PrimaryLocationCommand::InspectSession { .. } => {
+                anyhow::bail!("Session inspection returns a view, not a location change")
             }
             PrimaryLocationCommand::Cancel { operation } => {
                 let record = workspace.inspect_location_change(operation)?;
@@ -179,5 +185,33 @@ impl PrimaryHost {
                 Ok(workspace.inspect_location_change(record.operation)?)
             }
         }
+    }
+}
+
+/// Read-only. Loads only the Session's startup metadata, never a live Agent.
+async fn inspect_session_location(session: String) -> PrimaryLocationResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let stored =
+            crate::session::Session::load_startup_stub(&session).map_err(|error| Issue {
+                code: IssueCode::InvalidIdentity,
+                detail: format!("Read authoritative Session {session}: {error:#}"),
+            })?;
+        Ok::<_, Issue>(
+            WorkspaceService::new(&crate::storage::durable_state_dir())
+                .session_location_view(&stored),
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(view)) => PrimaryLocationResponse::Session {
+            view: Box::new(view),
+        },
+        Ok(Err(issue)) => PrimaryLocationResponse::Rejected { issue },
+        Err(error) => PrimaryLocationResponse::Rejected {
+            issue: Issue {
+                code: IssueCode::RecoveryRequired,
+                detail: format!("Session inspection worker stopped: {error}"),
+            },
+        },
     }
 }

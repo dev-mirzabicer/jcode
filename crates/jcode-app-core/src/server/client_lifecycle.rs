@@ -786,6 +786,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             permissions_version: Some(1),
                             checkout_version: Some(1),
                             closeout_version: cfg!(target_os = "macos").then_some(2),
+                            management_version: Some(1),
                             managed_rollout: false,
                         },
                     )
@@ -3750,6 +3751,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     permissions_version: Some(1),
                     checkout_version: Some(1),
                     closeout_version: cfg!(target_os = "macos").then_some(2),
+                    management_version: Some(1),
                     managed_rollout: false,
                 });
             }
@@ -4847,6 +4849,7 @@ fn primary_control_read(request: &Request) -> Option<ServerEvent> {
             location_enabled: crate::primary::launch_enabled(),
             legacy_adoption_version: Some(1),
             context_scope_version: Some(1),
+            session_inspection_version: Some(1),
         }),
         Request::PrimaryInputRead { id, session, input } => {
             let result = (|| -> Result<_> {

@@ -1228,6 +1228,9 @@ pub enum ServerEvent {
         legacy_adoption_version: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_scope_version: Option<u32>,
+        /// Read-only `inspect_session` location view for trusted management.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_inspection_version: Option<u32>,
     },
     #[serde(rename = "scoped_context_created")]
     ScopedContextCreated {
@@ -1289,6 +1292,9 @@ pub enum ServerEvent {
         checkout_version: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         closeout_version: Option<u32>,
+        /// Read-only operation discovery and Startup Context copy plan revisions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        management_version: Option<u32>,
         managed_rollout: bool,
     },
     #[serde(rename = "workspace_response")]

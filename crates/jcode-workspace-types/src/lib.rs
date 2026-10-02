@@ -8,7 +8,9 @@ mod checkout;
 pub use checkout::*;
 mod closeout;
 pub mod filesystem_path;
+mod operations;
 pub use closeout::*;
+pub use operations::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -540,6 +542,17 @@ pub enum WorkspaceRequest {
     InspectStartupCopy {
         request: RequestId,
     },
+    /// Current plan revisions for a copy review. Read-only; changes nothing.
+    StartupCopyPlans {
+        source: PathBuf,
+        target: LocationId,
+    },
+    /// Durable operations, newest first. Read-only.
+    Operations {
+        query: OperationQuery,
+        after: Option<Cursor>,
+        limit: u32,
+    },
     Permissions {
         request: PermissionRequest,
     },
@@ -611,6 +624,8 @@ pub enum WorkspaceResponse {
     Rebind(RebindRecord),
     StartupCopyReview(StartupCopyReview),
     StartupCopy(StartupCopyRecord),
+    StartupCopyPlans(StartupCopyPlans),
+    Operations(OperationPage),
     Permissions(Box<PermissionResponse>),
     Status(CatalogStatus),
     Page(Page),

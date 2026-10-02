@@ -954,6 +954,9 @@ impl JcodeClient {
             | jcode_harness_api::PrimaryLocationCommand::Cancel { operation } => {
                 operation.to_string()
             }
+            jcode_harness_api::PrimaryLocationCommand::InspectSession { session } => {
+                session.clone()
+            }
         };
         match self
             .request_ok(ApiRequest::PrimaryLocation {
@@ -968,6 +971,9 @@ impl JcodeClient {
                             && expected_session
                                 .as_ref()
                                 .is_none_or(|session| record.input.session == *session)
+                    }
+                    jcode_harness_api::PrimaryLocationResponse::Session { view } => {
+                        view.session == expected
                     }
                     jcode_harness_api::PrimaryLocationResponse::Rejected { .. } => true,
                 } =>

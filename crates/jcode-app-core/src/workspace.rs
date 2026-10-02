@@ -117,6 +117,8 @@ pub fn dispatch_with(
             | WorkspaceRequest::InspectClone { .. }
             | WorkspaceRequest::InspectRebind { .. }
             | WorkspaceRequest::InspectStartupCopy { .. }
+            | WorkspaceRequest::StartupCopyPlans { .. }
+            | WorkspaceRequest::Operations { .. }
             | WorkspaceRequest::CancelClone { .. }
     ) || matches!(&request, WorkspaceRequest::Permissions { request } if matches!(request,
         PermissionRequest::ImportedGrants { .. } | PermissionRequest::ContextScopeStatus { .. } |
@@ -205,6 +207,16 @@ fn dispatch_admitted(
         WorkspaceRequest::InspectStartupCopy { request } => service
             .inspect_startup_copy(request)
             .map(Response::StartupCopy),
+        WorkspaceRequest::StartupCopyPlans { source, target } => service
+            .startup_copy_plans(source, target)
+            .map(Response::StartupCopyPlans),
+        WorkspaceRequest::Operations {
+            query,
+            after,
+            limit,
+        } => service
+            .operations(query, after, limit)
+            .map(Response::Operations),
         WorkspaceRequest::ApplyStartupCopy { .. } => Err(Issue {
             code: IssueCode::UnsupportedCapability,
             detail: "Startup Context copy requires the runtime-owned plan editor coordinator"
