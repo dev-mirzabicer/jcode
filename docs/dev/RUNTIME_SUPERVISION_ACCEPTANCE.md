@@ -11,11 +11,13 @@ acceptance fixture.
 ## Exercised boundary
 
 Implementation commits `f1adfcde9`, `5380d9dc4`, `d1e04b08e`, `2991a9456`,
-`b7e479043`, `405f7cc94`, `9ec4375fe`, `598d45c86` on
-`mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`. Native journeys ran
-against an immutable copy of the `598d45c86` selfdev build (v0.75.532-dev,
-SHA-256 `eae5a2072e33f02bd2db03432689c314b98bca2c4cfbdb65114f09edd99477d7`).
-Activation identity is recorded in the completion report.
+`b7e479043`, `405f7cc94`, `9ec4375fe`, `598d45c86`, `3998243e3` on
+`mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`. Supervision journeys
+ran against an immutable copy of the `3998243e3` selfdev build (v0.75.534-dev,
+SHA-256 `1acf77372beae5cf703427123c758d7166a38e84ef16260f39c443ef5306729e`); the
+WP-08 regression last ran on the `598d45c86` build, which differs only in the
+service plan's environment selection. Activation identity is recorded in the
+completion report.
 
 Journeys: `scripts/run_isolated_test.py python3 scripts/test_runtime_supervision.py
 --binary <image> --artifact-dir <dir>` (all stages passed, exit 0, every fixture
@@ -53,7 +55,7 @@ background Stop, background survival).
 
 | Subcriterion | Evidence | Disposition |
 |---|---|---|
-| Reviewed, digest-bound, credential-free plan | `runtime_service` plan tests; journey checks label/definition/program/arguments, no credential variables, carried `HOME`/`JCODE_HOME` | Verified |
+| Reviewed, digest-bound, credential-free plan | `runtime_service` plan tests (including that a private installer `TMPDIR` is not carried, found while reviewing the real plan from a tool shell); journey checks label/definition/program/arguments, no credential variables, carried `HOME`/`JCODE_HOME` | Verified |
 | Install beside an unmanaged runtime; takeover by reviewed restart | Journey `service_waits_behind_unmanaged`, `restart_handoff_to_service` (unmanaged exits 0, supervised runtime reports `supervised`, interrupted turn continues once) | Verified |
 | No competing daemon; concurrent Start | Journey: a direct `serve` exits nonzero while supervised; two concurrent `runtime start` succeed without a second runtime | Verified |
 | Crash relaunch | Journey `service_crash_relaunch` (SIGKILL → launchd relaunch, new PID, serving, not desired-stopped) | Verified |
