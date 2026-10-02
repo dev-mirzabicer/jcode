@@ -76,7 +76,8 @@ pub use selection::{
     provider_label, strip_own_model_prefix,
 };
 pub use tool_name_policy::{
-    ANTHROPIC_TOOL_NAME_POLICY, ProviderToolNameEntry, ProviderToolNamePolicy,
+    ANTHROPIC_TOOL_NAME_POLICY, ANTHROPIC_TOOL_NAME_RULE, OPENAI_TOOL_NAME_RULE,
+    ProviderToolNameEntry, ProviderToolNamePolicy, ToolNameRule,
 };
 pub use usage_accounting::effective_context_tokens_from_usage;
 
@@ -492,6 +493,24 @@ pub trait Provider: Send + Sync {
     /// dispatch to.
     fn renders_tool_changes(&self) -> bool {
         false
+    }
+
+    /// Client-identity text this runtime itself places in the request prefix
+    /// on its current route, outside the session's system prompt (the Claude
+    /// OAuth billing header). `None` when it adds none. A session records the
+    /// text it last sent, so a later change (a client-version sync) is a
+    /// named prefix transition (INT-01/WP-06 R27).
+    fn client_identity_text(&self) -> Option<String> {
+        None
+    }
+
+    /// Why this runtime's wire API would reject a tool named `name`, or
+    /// `None` when it accepts it or states no rule (INT-01/WP-06 R26). The
+    /// name is checked as the runtime would send it, after its declared name
+    /// policy. Callers never advertise a rejected tool on this runtime.
+    /// Orchestrators delegate to the runtime they would dispatch to.
+    fn tool_name_violation(&self, _name: &str) -> Option<String> {
+        None
     }
 
     /// This runtime's identity for a stored replayable reasoning block, in the

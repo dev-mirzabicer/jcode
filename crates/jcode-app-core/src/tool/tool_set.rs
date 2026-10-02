@@ -142,6 +142,38 @@ pub fn recorded_tools(record: &StoredToolSet, inline: bool) -> Vec<ToolDefinitio
     tools
 }
 
+/// Remove the tools `provider`'s wire API would reject by name
+/// (INT-01/WP-06 R26), returning each with the reason. One such name makes a
+/// provider reject the whole request, so the tool is not advertised there.
+pub fn withhold_rejected_tool_names(
+    tools: &mut Vec<ToolDefinition>,
+    provider: &dyn crate::provider::Provider,
+) -> Vec<(String, String)> {
+    let mut withheld = Vec::new();
+    tools.retain(|tool| match provider.tool_name_violation(&tool.name) {
+        Some(reason) => {
+            withheld.push((tool.name.clone(), reason));
+            false
+        }
+        None => true,
+    });
+    withheld
+}
+
+/// The notice a person sees when tools are withheld for their names.
+pub fn withheld_tools_notice(withheld: &[(String, String)]) -> Option<String> {
+    let (_, reason) = withheld.first()?;
+    let names: Vec<String> = withheld
+        .iter()
+        .map(|(name, _)| format!("`{}`", crate::util::truncate_str(name, 80)))
+        .collect();
+    Some(format!(
+        "{} tool(s) are not offered to this model because of their names ({reason}): {}",
+        withheld.len(),
+        names.join(", ")
+    ))
+}
+
 /// The announced changes a provider's projected history still carries, in
 /// order: those of the session's tool-set deliveries whose exact text is
 /// still a message of `projected`. Each notice's text is unique in its

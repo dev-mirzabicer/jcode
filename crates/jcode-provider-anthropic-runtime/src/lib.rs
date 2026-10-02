@@ -1520,6 +1520,16 @@ impl Provider for AnthropicProvider {
         jcode_provider_core::anthropic_conversation_caps(&self.model()).inline_tool_changes
     }
 
+    fn client_identity_text(&self) -> Option<String> {
+        self.expected_oauth_route()
+            .then(|| jcode_provider_anthropic::OAUTH_BILLING_HEADER.to_string())
+    }
+
+    fn tool_name_violation(&self, name: &str) -> Option<String> {
+        jcode_provider_core::ANTHROPIC_TOOL_NAME_RULE
+            .violation(jcode_provider_core::ANTHROPIC_TOOL_NAME_POLICY.wire_name(name))
+    }
+
     fn replayed_reasoning_invalidations(
         &self,
         messages: &[Message],

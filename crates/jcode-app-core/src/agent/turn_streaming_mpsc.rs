@@ -129,6 +129,9 @@ impl Agent {
             self.require_native_scope_provider()?;
             self.session.require_published_primary()?;
             let tools = self.tool_definitions().await?;
+            if let Some(detail) = self.take_tool_name_notice() {
+                let _ = event_tx.send(ServerEvent::StatusDetail { detail });
+            }
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split()?;
             // Replayed reasoning that no longer matches this request's prefix

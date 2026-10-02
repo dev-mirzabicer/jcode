@@ -72,7 +72,7 @@ pub use jcode_tool_types::{ToolImage, ToolOutput};
 pub(crate) use session_search::spawn_recent_index_warmup;
 pub use tool_set::{
     TOOL_SET_TRANSITION, ToolSetPlan, plan_tool_set, recorded_tools, tool_changes_in_view,
-    tool_set_notice, tool_set_notice_count,
+    tool_set_notice, tool_set_notice_count, withheld_tools_notice, withhold_rejected_tool_names,
 };
 
 pub(crate) fn parsed_patch_file_paths(tool_name: &str, patch_text: &str) -> Result<Vec<String>> {

@@ -694,6 +694,10 @@ impl Provider for OpenAIProvider {
             && !is_chatgpt_web_model(&self.model())
     }
 
+    fn tool_name_violation(&self, name: &str) -> Option<String> {
+        jcode_provider_core::OPENAI_TOOL_NAME_RULE.violation(name)
+    }
+
     fn on_auth_changed(&self) {
         self.reload_credentials_now();
     }

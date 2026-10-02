@@ -178,7 +178,7 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let request_payload = crate::context::request_payload_pressure(send_messages);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
-            self.last_status_detail = reasoning_notice;
+            self.last_status_detail = reasoning_notice.or_else(|| self.take_tool_name_notice());
             let provider_ingress =
                 crate::execution::ProviderCaptureScope::new(self.session.id.clone());
             let mut stream = match self

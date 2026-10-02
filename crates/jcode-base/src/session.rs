@@ -334,6 +334,11 @@ pub struct Session {
     /// a new provider history starts without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_set: Option<jcode_session_types::StoredToolSet>,
+    /// The client-identity text the runtime last placed in this session's
+    /// request prefix (the Claude OAuth billing header), so a change is a
+    /// recorded transition (INT-01/WP-06 R27).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_client_identity: Option<String>,
     /// Metadata-only startup projection. Full session loads leave this empty.
     #[serde(skip)]
     system_prompt_metadata: Option<StoredSystemPromptMetadata>,
@@ -897,6 +902,28 @@ impl Session {
         }
     }
 
+    /// Note the client-identity text the next request carries. Returns the
+    /// previous and the new text when a request of this session carried a
+    /// different one before (INT-01/WP-06 R27). A runtime that adds none
+    /// leaves the record as it is.
+    pub fn note_provider_client_identity(
+        &mut self,
+        current: Option<String>,
+    ) -> Option<(String, String)> {
+        let current = current?;
+        match self.provider_client_identity.replace(current.clone()) {
+            Some(previous) if previous != current => {
+                self.persist_state.force_snapshot = true;
+                Some((previous, current))
+            }
+            Some(_) => None,
+            None => {
+                self.persist_state.force_snapshot = true;
+                None
+            }
+        }
+    }
+
     /// Persist the session's tool set (INT-01/WP-06, D15).
     pub fn set_tool_set(&mut self, tool_set: jcode_session_types::StoredToolSet) {
         if self.tool_set.as_ref() == Some(&tool_set) {
@@ -1352,6 +1379,7 @@ impl Session {
         self.swarm_routing_prompt = parent.swarm_routing_prompt.clone();
         self.delegation_guidance = parent.delegation_guidance.clone();
         self.tool_set = parent.tool_set.clone();
+        self.provider_client_identity = parent.provider_client_identity.clone();
         self.system_prompt_metadata = parent.system_prompt_metadata.clone();
         self.active_skill_metadata = parent.active_skill_metadata.clone();
         self.compaction = parent.compaction.clone();
@@ -2194,6 +2222,7 @@ impl Session {
             swarm_routing_prompt: None,
             delegation_guidance: None,
             tool_set: None,
+            provider_client_identity: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,
@@ -2274,6 +2303,7 @@ impl Session {
             swarm_routing_prompt: None,
             delegation_guidance: None,
             tool_set: None,
+            provider_client_identity: None,
             system_prompt_metadata: None,
             active_skill_metadata: None,
             compaction: None,

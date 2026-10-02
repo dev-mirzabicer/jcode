@@ -28,12 +28,16 @@ struct Recorded {
 struct RecorderState {
     script: VecDeque<Reply>,
     requests: Vec<Recorded>,
+    /// The client-identity text the runtime adds to its prefix.
+    identity: Option<String>,
 }
 
 #[derive(Clone, Default)]
 struct RecordingProvider {
     /// Whether the runtime takes tool changes inside a message.
     inline: bool,
+    /// The wire rule for tool names, when the runtime states one.
+    name_rule: Option<jcode_provider_core::ToolNameRule>,
     state: Arc<StdMutex<RecorderState>>,
 }
 
@@ -89,6 +93,14 @@ impl Provider for RecordingProvider {
 
     fn renders_tool_changes(&self) -> bool {
         self.inline
+    }
+
+    fn tool_name_violation(&self, name: &str) -> Option<String> {
+        self.name_rule?.violation(name)
+    }
+
+    fn client_identity_text(&self) -> Option<String> {
+        self.state.lock().unwrap().identity.clone()
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -496,6 +508,161 @@ async fn a_change_whose_notice_was_rewound_is_announced_again() -> Result<()> {
     assert_eq!(
         crate::tool::tool_set_notice_count(&agent.session.messages),
         1
+    );
+    Ok(())
+}
+
+/// INT-01/WP-06 R26: a dynamically named tool the runtime's wire API would
+/// reject is never advertised there, on either production builder, and the
+/// person is told once. One such name would fail every request.
+#[tokio::test]
+async fn tools_a_provider_would_reject_by_name_are_withheld_with_a_notice() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = super::tests::AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = super::tests::AgentTestEnvRestore::set_path(
+        "JCODE_RUNTIME_DIR",
+        &home.path().join("runtime"),
+    );
+    crate::config::invalidate_config_cache();
+    let spaced: &'static str = "mcp__fixture__has space";
+    let dotted: &'static str = "mcp__fixture__dotted.name";
+    let hundred: &'static str = format!("mcp__fixture__{}", "a".repeat(86)).leak();
+    let overlong: &'static str = format!("mcp__fixture__{}", "b".repeat(120)).leak();
+    assert_eq!((hundred.len(), overlong.len()), (100, 134));
+    let named = |name: &'static str| FixtureTool {
+        name,
+        description: "A dynamically named tool",
+        property: "x",
+    };
+
+    for (rule, withheld) in [
+        (
+            jcode_provider_core::ANTHROPIC_TOOL_NAME_RULE,
+            vec![spaced, dotted, overlong],
+        ),
+        (
+            jcode_provider_core::OPENAI_TOOL_NAME_RULE,
+            vec![spaced, dotted, hundred, overlong],
+        ),
+    ] {
+        let provider = RecordingProvider {
+            name_rule: Some(rule),
+            ..Default::default()
+        };
+        let mut session = crate::session::Session::create(None, None);
+        let session_id = session.id.clone();
+        session.save()?;
+        let mut agent = restart(
+            &provider,
+            &session_id,
+            vec![
+                mcp(),
+                named(spaced),
+                named(dotted),
+                named(hundred),
+                named(overlong),
+            ],
+            false,
+        )
+        .await?;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        agent
+            .run_once_streaming_mpsc("first", Vec::new(), None, tx.clone())
+            .await?;
+        agent
+            .run_once_streaming_mpsc("second", Vec::new(), None, tx)
+            .await?;
+
+        let state = provider.state.lock().unwrap();
+        for request in &state.requests {
+            for name in &withheld {
+                assert!(tool(request, name).is_none(), "{}: {name}", rule.provider);
+            }
+            assert!(tool(request, MCP).is_some());
+            assert_eq!(
+                tool(request, hundred).is_some(),
+                !withheld.contains(&hundred),
+                "{}",
+                rule.provider
+            );
+            // What each production builder would put on the wire.
+            let (anthropic, openai) = built_tools(request);
+            for built in [anthropic, openai] {
+                for sent in built.as_array().unwrap() {
+                    let name = sent["name"].as_str().unwrap();
+                    assert!(rule.accepts(name), "{}: {name}", rule.provider);
+                }
+            }
+        }
+        drop(state);
+
+        // One notice for the person, naming the rule; not repeated.
+        let mut notices = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::protocol::ServerEvent::StatusDetail { detail } = event
+                && detail.contains("not offered")
+            {
+                notices.push(detail);
+            }
+        }
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains(rule.provider), "{}", notices[0]);
+        // Nothing was announced to the model: it never had these tools.
+        assert!(announced(&agent).is_empty());
+    }
+    Ok(())
+}
+
+/// INT-01/WP-06 R27: when the client-identity text a runtime adds to the
+/// prefix changes between two requests of a session (a client-version sync
+/// shipped in a new binary), that is a named, journaled prefix transition.
+/// It is recorded once, and survives a restart.
+#[tokio::test]
+async fn a_client_identity_sync_is_a_recorded_transition() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = super::tests::AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = super::tests::AgentTestEnvRestore::set_path(
+        "JCODE_RUNTIME_DIR",
+        &home.path().join("runtime"),
+    );
+    crate::config::invalidate_config_cache();
+    let provider = RecordingProvider::default();
+    let identify = |text: &str| provider.state.lock().unwrap().identity = Some(text.to_string());
+    let journaled = |since: std::time::Instant| {
+        crate::cache_invalidation::recorded_since(since)
+            .iter()
+            .filter(|entry| entry.source == crate::context::CLIENT_IDENTITY_TRANSITION)
+            .count()
+    };
+    let mut session = crate::session::Session::create(None, None);
+    let session_id = session.id.clone();
+    session.save()?;
+
+    let since = std::time::Instant::now();
+    identify("cc_version=1");
+    let mut agent = restart(&provider, &session_id, Vec::new(), false).await?;
+    turn(&mut agent, "first").await?;
+    turn(&mut agent, "second").await?;
+    assert_eq!(journaled(since), 0, "the first identity is not a change");
+
+    // A new binary with a synced client version.
+    identify("cc_version=2");
+    let mut agent = restart(&provider, &session_id, Vec::new(), false).await?;
+    assert_eq!(
+        agent.session.provider_client_identity.as_deref(),
+        Some("cc_version=1")
+    );
+    turn(&mut agent, "third").await?;
+    assert_eq!(journaled(since), 1);
+    turn(&mut agent, "fourth").await?;
+    let mut agent = restart(&provider, &session_id, Vec::new(), false).await?;
+    turn(&mut agent, "fifth").await?;
+    assert_eq!(journaled(since), 1, "recorded once");
+    assert_eq!(
+        agent.session.provider_client_identity.as_deref(),
+        Some("cc_version=2")
     );
     Ok(())
 }

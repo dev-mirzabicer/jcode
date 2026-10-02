@@ -934,6 +934,8 @@ pub struct App {
     provider_reported_reasoning: Vec<crate::context::ProviderReportedReasoning>,
     /// Consecutive local requests the runtime handed back to be planned again.
     provider_replans: u32,
+    /// Tools withheld from the local runtime for their names, as last shown.
+    withheld_tool_names: Vec<String>,
     // Accumulated session cost + cached per-model pricing.
     cost: CostState,
     // Context limit and authoritative request-pressure state.

@@ -32,6 +32,17 @@ impl App {
     /// registry, each change announced once and persisted before the request.
     pub(super) async fn local_tool_definitions(&mut self) -> anyhow::Result<Vec<ToolDefinition>> {
         let mut live = self.registry.definitions(None).await;
+        // A tool the runtime would reject by name is not advertised
+        // (INT-01/WP-06 R26); the person is told when that set changes.
+        let withheld = crate::tool::withhold_rejected_tool_names(&mut live, self.provider.as_ref());
+        let names: Vec<String> = withheld.iter().map(|(name, _)| name.clone()).collect();
+        if names != self.withheld_tool_names {
+            self.withheld_tool_names = names;
+            if let Some(notice) = crate::tool::withheld_tools_notice(&withheld) {
+                crate::logging::warn(&notice);
+                self.push_display_message(crate::tui::DisplayMessage::system(notice));
+            }
+        }
         crate::tool::instruction_guidance::preview(&self.session, &mut live)?;
         let in_view = if !self.provider.renders_tool_changes() {
             None
@@ -138,6 +149,15 @@ impl App {
         system: &str,
         tools: &[ToolDefinition],
     ) -> Result<Option<String>, String> {
+        if let Some((from, to)) = self
+            .session
+            .note_provider_client_identity(self.provider.client_identity_text())
+        {
+            self.record_local_prefix_transition(
+                crate::context::CLIENT_IDENTITY_TRANSITION,
+                format!("the runtime's client identity text changed from `{from}` to `{to}`"),
+            );
+        }
         let prefix = ContextRequestPrefix {
             system: system.to_string(),
             tools: tools.to_vec(),

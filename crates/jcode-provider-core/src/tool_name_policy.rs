@@ -189,3 +189,74 @@ mod tests {
         }
     }
 }
+
+/// The tool-name rule of a provider's wire API (INT-01/WP-06 R26).
+///
+/// Built-in tools satisfy every rule and the parity guard checks them.
+/// Dynamically named tools (MCP servers name their own) may not: one name a
+/// provider rejects makes it reject the whole request. A tool whose wire name
+/// breaks the dispatching runtime's rule is therefore never advertised
+/// there. A rename that makes it acceptable is a declared
+/// [`ProviderToolNamePolicy`] entry, never an ad-hoc edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolNameRule {
+    /// The provider, as shown in the notice about a withheld tool.
+    pub provider: &'static str,
+    /// Longest accepted name, in bytes. Names are ASCII letters, digits,
+    /// `_` and `-`.
+    pub max_len: usize,
+}
+
+/// Anthropic Messages API: `^[a-zA-Z0-9_-]{1,128}$` (API reference; Gate 0
+/// G0.1 accepted every registry name).
+pub const ANTHROPIC_TOOL_NAME_RULE: ToolNameRule = ToolNameRule {
+    provider: "Anthropic",
+    max_len: 128,
+};
+
+/// OpenAI Responses function tools: `^[a-zA-Z0-9_-]{1,64}$` (API reference).
+pub const OPENAI_TOOL_NAME_RULE: ToolNameRule = ToolNameRule {
+    provider: "OpenAI",
+    max_len: 64,
+};
+
+impl ToolNameRule {
+    pub fn accepts(&self, wire_name: &str) -> bool {
+        (1..=self.max_len).contains(&wire_name.len())
+            && wire_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    }
+
+    /// Why `wire_name` is not accepted, for a notice; `None` when it is.
+    pub fn violation(&self, wire_name: &str) -> Option<String> {
+        (!self.accepts(wire_name)).then(|| {
+            format!(
+                "{} tool names are 1 to {} characters of letters, digits, `_` and `-`",
+                self.provider, self.max_len
+            )
+        })
+    }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+
+    #[test]
+    fn each_provider_rule_bounds_length_and_characters() {
+        for rule in [ANTHROPIC_TOOL_NAME_RULE, OPENAI_TOOL_NAME_RULE] {
+            assert!(rule.accepts("mcp__server__tool-name_2"));
+            assert!(rule.accepts(&"a".repeat(rule.max_len)));
+            assert!(!rule.accepts(&"a".repeat(rule.max_len + 1)));
+            for invalid in ["", "has space", "dotted.name", "slash/name", "ünïcode"] {
+                assert!(!rule.accepts(invalid), "{invalid:?}");
+                assert!(rule.violation(invalid).is_some());
+            }
+            assert_eq!(rule.violation("bash"), None);
+        }
+        let between = "a".repeat(100);
+        assert!(ANTHROPIC_TOOL_NAME_RULE.accepts(&between));
+        assert!(!OPENAI_TOOL_NAME_RULE.accepts(&between));
+    }
+}

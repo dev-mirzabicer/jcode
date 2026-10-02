@@ -391,6 +391,10 @@ pub struct Agent {
     /// How many times in a row a runtime handed a request back to be planned
     /// again without a completed response in between.
     provider_replans: u32,
+    /// Tools withheld from the current runtime because it would reject their
+    /// names, as last told to the person, and the notice still to show.
+    withheld_tool_names: Vec<String>,
+    pending_tool_name_notice: Option<String>,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
     /// Whether memory features are enabled for this session
@@ -460,6 +464,8 @@ impl Agent {
             pending_prefix_transitions: Vec::new(),
             provider_reported_reasoning: Vec::new(),
             provider_replans: 0,
+            withheld_tool_names: Vec::new(),
+            pending_tool_name_notice: None,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
@@ -1194,6 +1200,15 @@ impl Agent {
         system: &str,
         tools: &[ToolDefinition],
     ) -> Result<Option<String>> {
+        if let Some((from, to)) = self
+            .session
+            .note_provider_client_identity(self.provider.client_identity_text())
+        {
+            self.record_prefix_transition(
+                crate::context::CLIENT_IDENTITY_TRANSITION,
+                format!("the runtime's client identity text changed from `{from}` to `{to}`"),
+            );
+        }
         let prefix = crate::context::ContextRequestPrefix {
             system: system.to_string(),
             tools: tools.to_vec(),

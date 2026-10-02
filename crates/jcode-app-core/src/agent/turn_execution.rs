@@ -988,6 +988,8 @@ impl Agent {
             self.registry.register_selfdev_tools().await;
         }
         let mut live = self.build_filtered_tool_definitions().await;
+        let withheld = crate::tool::withhold_rejected_tool_names(&mut live, self.provider.as_ref());
+        self.note_withheld_tools(withheld);
         crate::tool::instruction_guidance::preview(&self.session, &mut live)?;
         let in_view = self.tool_changes_in_view()?;
         let plan = crate::tool::plan_tool_set(
@@ -1036,6 +1038,26 @@ impl Agent {
             );
         }
         Ok(plan.tools)
+    }
+
+    /// Keep a notice for the person when the set of tools withheld for their
+    /// names changes (INT-01/WP-06 R26). The model is told through the
+    /// tool-set notice when a tool it had is withheld after a route change.
+    fn note_withheld_tools(&mut self, withheld: Vec<(String, String)>) {
+        let names: Vec<String> = withheld.iter().map(|(name, _)| name.clone()).collect();
+        if names == self.withheld_tool_names {
+            return;
+        }
+        self.withheld_tool_names = names;
+        if let Some(notice) = crate::tool::withheld_tools_notice(&withheld) {
+            logging::warn(&notice);
+            self.pending_tool_name_notice = Some(notice);
+        }
+    }
+
+    /// The notice about withheld tools still to show, once.
+    pub(super) fn take_tool_name_notice(&mut self) -> Option<String> {
+        self.pending_tool_name_notice.take()
     }
 
     /// For a provider that takes tool changes inside a message, the announced
@@ -1090,6 +1112,7 @@ impl Agent {
             });
         }
         Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        crate::tool::withhold_rejected_tool_names(&mut tools, self.provider.as_ref());
         crate::tool::instruction_guidance::preview(&self.session, &mut tools)
             .map_err(|error| crate::protocol::ContextServiceError::Runtime(error.to_string()))?;
         Ok(tools)

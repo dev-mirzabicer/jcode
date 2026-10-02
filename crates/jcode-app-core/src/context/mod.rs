@@ -26,6 +26,13 @@ pub use curator::*;
 pub use draft::*;
 pub use history::*;
 pub use preflight::*;
+/// The label of a client-identity sync (the Claude OAuth billing header
+/// version) in the cache-invalidation journal and as a cause of reasoning it
+/// invalidates (INT-01/WP-06 R27). Probe G6.6 measured that the API neither
+/// caches nor binds that block today, and the binding digest hashes it as
+/// fixed text, so a sync currently invalidates nothing; the record keeps the
+/// change attributable if that stops being true.
+pub const CLIENT_IDENTITY_TRANSITION: &str = "OAuth client identity sync";
 mod operator_notice;
 pub use operator_notice::with_operator_notices;
 pub use reasoning_invalidation::{

@@ -602,10 +602,7 @@ fn anthropic_effort_caps(model: &str) -> AnthropicReasoningCaps {
 /// Whether `name` satisfies the Messages API tool-name rule
 /// `^[a-zA-Z0-9_-]{1,128}$`.
 pub fn anthropic_tool_name_is_valid(name: &str) -> bool {
-    (1..=128).contains(&name.len())
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    crate::ANTHROPIC_TOOL_NAME_RULE.accepts(name)
 }
 
 pub fn anthropic_stainless_arch() -> &'static str {
