@@ -1090,4 +1090,3 @@ Deviations from the WP-06 specification, recorded for the closeout:
 - **Tool-set transition name.** The former `late MCP tool registration`,
   `MCP tool set reload` and `Swarm globally disabled` journal labels are one
   label, `tool set change`; the notice names the tools.
-

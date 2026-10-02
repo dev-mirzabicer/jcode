@@ -3979,19 +3979,26 @@ async fn each_late_mcp_wave_is_announced_once_and_joins_the_array() {
     }
 }
 
-/// Without any newly-registered MCP tools, the locked snapshot must be returned
-/// verbatim on every turn (no rebuild, no cache invalidation). Guards the #206
-/// fix against re-snapshotting on turns where nothing changed.
+/// With an unchanged registry the frozen tool set is returned verbatim on
+/// every turn: no notice, no record change, no cache invalidation (#206).
+/// Any registry change, MCP or not, is a tool-set change announced once
+/// (INT-01/WP-06, D15, which replaces "only MCP arrivals are picked up").
 #[tokio::test]
-async fn tool_snapshot_is_stable_without_new_mcp_tools() {
+async fn tool_snapshot_is_stable_without_registry_changes() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(ImmediateEmptyProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
 
     let first = agent.tool_definitions().await.unwrap();
-    // Register a NON-mcp tool after locking — this should NOT trigger a rebuild,
-    // because the cache-stability optimization only yields to MCP arrival.
+    let record = agent.session.tool_set.clone();
+    let messages = agent.session.messages.len();
+    for _ in 0..3 {
+        assert_eq!(agent.tool_definitions().await.unwrap(), first);
+    }
+    assert_eq!(agent.session.tool_set, record);
+    assert_eq!(agent.session.messages.len(), messages);
+
     agent
         .registry
         .register(
@@ -4002,15 +4009,14 @@ async fn tool_snapshot_is_stable_without_new_mcp_tools() {
         )
         .await;
     let second = agent.tool_definitions().await.unwrap();
-    let first_names: Vec<String> = first.iter().map(|t| t.name.clone()).collect();
-    let second_names: Vec<String> = second.iter().map(|t| t.name.clone()).collect();
+    assert_eq!(second[..first.len()], first[..]);
     assert_eq!(
-        first_names, second_names,
-        "non-MCP registry changes must not invalidate the locked tool snapshot"
+        second.last().map(|tool| tool.name.as_str()),
+        Some("not_an_mcp_tool")
     );
-    assert!(
-        !second_names.iter().any(|n| n == "not_an_mcp_tool"),
-        "non-MCP tool registered after lock must not leak into the snapshot"
+    assert_eq!(
+        crate::tool::tool_set_notice_count(&agent.session.messages),
+        1
     );
 }
 
