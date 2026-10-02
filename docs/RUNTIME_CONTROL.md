@@ -144,8 +144,8 @@ jcode runtime service uninstall
 Install first prints the exact plan without writing anything: the namespaced
 LaunchAgent label and definition path, the stable launcher
 (`~/.jcode/builds/shared-server/jcode serve --socket SOCKET`), its environment
-(the installer's existing absolute PATH entries, socket and state-root variables;
-no credentials), log file, restart throttle and exit timeout. Installing writes and
+(the installer's existing absolute PATH entries, socket, and the home, state and
+configuration path variables that locate its stores; no credentials), log file, restart throttle and exit timeout. Installing writes and
 loads exactly the confirmed plan. The service starts the runtime at login unless
 it was intentionally stopped, restarts it after an unexpected exit (exit-based, so
 an intentional Stop is never undone), and leaves surviving native task processes

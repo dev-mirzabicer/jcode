@@ -143,9 +143,11 @@ definition in `~/Library/LaunchAgents` (override with `JCODE_LAUNCH_AGENTS_DIR`
 for isolated tests). The plan is deterministic and digest-bound:
 `ProgramArguments` are the stable shared-server launcher plus `serve --socket`;
 the environment carries filtered absolute PATH, the socket, the supervised
-marker, deferred auth bootstrap and the installer's existing `JCODE_HOME`,
-`JCODE_RUNTIME_DIR`, `XDG_RUNTIME_DIR` and `TMPDIR` (which determine the namespace
-and durable state root). No credential is copied. `RunAtLoad`,
+marker, deferred auth bootstrap and the installer's existing path selectors
+(`HOME`, `JCODE_HOME`, `JCODE_RUNTIME_DIR`, `TMPDIR` and the `XDG_*` runtime,
+config, data, state and cache directories), so the service resolves the same
+namespace, durable state, configuration and credential stores as the installing
+shell. No credential is copied. `RunAtLoad`,
 `KeepAlive { SuccessfulExit = false }`, `AbandonProcessGroup`, `ExitTimeOut 45`,
 `ThrottleInterval 10`.
 
