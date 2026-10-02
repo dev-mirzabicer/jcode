@@ -10,13 +10,11 @@ acceptance fixture.
 
 ## Exercised boundary
 
-Implementation commits `f1adfcde9`, `5380d9dc4`, `d1e04b08e`, `2991a9456`,
-`b7e479043`, `405f7cc94`, `9ec4375fe`, `598d45c86`, `3998243e3`, `cdcf64ecf`,
-`fe0aa3f32` on `mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`.
-Supervision journeys and the WP-08 regression ran against an immutable copy of
-the `fe0aa3f32` selfdev build (v0.75.537-dev, SHA-256
-`446f85203bce8f5b3718694615cfb6e265d514edab7e2fb43eb93392d1aaea3c`). Activation
-identity is recorded in the completion report.
+Implementation commits from `f1adfcde9` through `05d4d9c6a` on
+`mirza/sp58-c01-wp09-runtime-supervision` from `ceb39d99d`. Supervision journeys
+and the WP-08 regression ran against an immutable copy of the `05d4d9c6a` selfdev
+build (SHA-256 `3714e4df518ec7fdfe262c98206d9e1f740b24cfd920014e655d3e3710758a71`).
+Activation identity is recorded in the completion report.
 
 Journeys: `scripts/run_isolated_test.py python3 scripts/test_runtime_supervision.py
 --binary <image> --artifact-dir <dir>` (all stages passed, exit 0, every fixture
@@ -62,6 +60,9 @@ background Stop, background survival).
 | Intentional Stop survives login-equivalent bootstrap | Journey `service_desired_stop_and_start` (reviewed Stop not relaunched; `launchctl kickstart` exits cleanly while stopped; explicit Start runs it) | Verified |
 | SIGTERM through launchd | Journey `service_sigterm_then_login_start` (graceful exit not relaunched; next login-equivalent start runs) | Verified |
 | Uninstall refused while supervised runtime runs | Journey | Verified |
+| A service that waited serves its launcher's current binary | Found after the real handoff (the supervised runtime served the image loaded at install). Journey `takeover_serves_current_launcher_target`: the launcher is retargeted while the service waits; after the handoff the same launchd PID runs the new binary (kernel executable path). Red on the pre-fix build | Verified |
+| The supervision marker is not inherited by tools | Found because tool subprocesses of the live supervised runtime believed they were supervised. Journey `supervision_marker_not_inherited` (a shell run by the supervised runtime sees no marker); image replacements carry it (live reload stays `supervised`) | Verified |
+| A restarted incarnation is never sealed by its predecessor's receipt | Found in an isolated journey: a rejected stale Begin sealed admission after a restart, so SIGTERM was ignored and launchd killed the process. `admission::tests::restarted_incarnation_is_not_sealed_by_its_predecessors_receipt` (red without the fix); journey `stale_begin_does_not_seal_restarted_runtime` | Verified |
 | Real activation | Separately reviewed procedure, see completion report | Recorded at activation |
 
 ## R35: power follows runtime work
