@@ -229,7 +229,7 @@ impl RuntimeLifecycle {
         }
     }
 
-    pub(crate) async fn work(&self) -> Result<Vec<RuntimeWork>> {
+    async fn work(&self) -> Result<Vec<RuntimeWork>> {
         let mut work = self
             .registration
             .admission()
@@ -245,6 +245,28 @@ impl RuntimeLifecycle {
             work.insert(item.id.clone(), item);
         }
         Ok(work.into_values().collect())
+    }
+
+    /// Work that is actually executing now, for power policy: admitted work,
+    /// runtime-owned background tasks and running executions. Unlike the Stop
+    /// inventory it excludes historical rows whose owners are gone.
+    pub(crate) async fn active_work(&self) -> Result<usize> {
+        let mut active = self
+            .registration
+            .admission()
+            .work()?
+            .into_iter()
+            .map(|work| work.id)
+            .collect::<BTreeSet<_>>();
+        for item in self
+            .background
+            .runtime_owned_work(self.owner.identity())
+            .await
+        {
+            active.insert(item.id);
+        }
+        active.extend(self.executions.running().await?);
+        Ok(active.len())
     }
 
     pub async fn request(&self, request: RuntimeRequest) -> Result<RuntimeResponse> {

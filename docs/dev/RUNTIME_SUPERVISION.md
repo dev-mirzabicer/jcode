@@ -167,9 +167,11 @@ the supervised runtime runs. Other platforms report the service as unsupported.
 ## Power
 
 `supervision::spawn_power_monitor` reconciles one `PowerInhibitor` every five
-seconds from `RuntimeLifecycle::work()` (admitted primary turns, executions,
-preparations, legacy background tasks). An observation failure keeps the
-assertion. Clients, idle sessions and human waits do not count. The command
+seconds from `RuntimeLifecycle::active_work()`: admitted primary turns and
+preparations, runtime-owned background tasks, and inventoried executions whose
+originating runtime or current owner still holds its live lease. A historical
+row whose owner is gone stays visible to Stop review but runs nothing, so it does
+not keep the machine awake. An observation failure keeps the assertion. Clients, idle sessions and human waits do not count. The command
 worker holds its own inhibitor while its command runs (first after five seconds),
 so a command preserved across Stop keeps the machine awake until it settles; it
 is released when the worker finalizes. Both read

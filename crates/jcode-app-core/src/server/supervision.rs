@@ -314,8 +314,8 @@ pub(crate) fn spawn_power_monitor(
         loop {
             interval.tick().await;
             let active_work = if let Some(lifecycle) = lifecycle.upgrade() {
-                match lifecycle.work().await {
-                    Ok(work) => work.len(),
+                match lifecycle.active_work().await {
+                    Ok(active) => active,
                     Err(error) => {
                         // Uncertain observation keeps the machine awake rather
                         // than releasing an assertion under unseen work.

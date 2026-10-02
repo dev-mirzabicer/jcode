@@ -158,8 +158,9 @@ login-service supervision as unsupported.
 
 With `power.prevent_sleep_while_streaming` enabled (the default), the runtime
 holds a system-sleep assertion while it owns active work: primary turns,
-executions, preparations and background tasks. Attached clients, idle sessions and
-human waits do not count. A native command that runs longer than a few seconds
+running executions, preparations and background tasks. Attached clients, idle
+sessions, human waits and historical execution records whose owner is gone do not
+count. A native command that runs longer than a few seconds
 holds its own assertion, so a command that survives a runtime Stop still keeps the
 machine awake until it settles. The switch is read on every reconcile.
 `JCODE_DISABLE_POWER_INHIBIT` disables it. Explicit sleep, shutdown and power loss

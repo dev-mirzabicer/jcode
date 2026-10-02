@@ -85,6 +85,35 @@ impl OwnedExecutions {
         Ok((record, view))
     }
 
+    /// Inventoried executions that are actually running now: their originating
+    /// runtime or current owner (a handed-off native worker) still holds its
+    /// live lease. A historical row whose owners are gone stays in the Stop
+    /// inventory but runs nothing. Unknown lease state counts as running.
+    pub async fn running(&self) -> Result<Vec<String>> {
+        let inventory = self.inventory().await?;
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            let lease_live = |owner: &str| match store.runtime_endpoint(owner) {
+                Ok(Some(endpoint)) => endpoint.has_live_lease().unwrap_or(true),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            Ok(inventory
+                .into_iter()
+                .filter(|item| {
+                    lease_live(&item.owner)
+                        || match store.inspect(&item.id) {
+                            Ok(Some(run)) => run.owner != item.owner && lease_live(&run.owner),
+                            Ok(None) => false,
+                            Err(_) => true,
+                        }
+                })
+                .map(|item| item.id)
+                .collect())
+        })
+        .await?
+    }
+
     pub async fn inventory(&self) -> Result<Vec<RuntimeWork>> {
         let store = self.store.clone();
         let records = tokio::task::spawn_blocking(move || store.unresolved_runs()).await??;
