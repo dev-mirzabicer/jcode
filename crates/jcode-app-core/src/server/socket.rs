@@ -215,7 +215,8 @@ pub(super) fn acquire_daemon_lock() -> Result<DaemonLockGuard> {
 /// by the supervised launcher; the lock itself remains the single authority
 /// that prevents two runtimes from serving one namespace.
 #[cfg(unix)]
-pub(super) async fn wait_for_daemon_lock() -> Result<DaemonLockGuard> {
+/// Returns the lock and whether this process had to wait for another runtime.
+pub(super) async fn wait_for_daemon_lock() -> Result<(DaemonLockGuard, bool)> {
     let path = daemon_lock_path();
     let mut announced = false;
     loop {
@@ -229,7 +230,7 @@ pub(super) async fn wait_for_daemon_lock() -> Result<DaemonLockGuard> {
                 && super::reload_process_alive(state.pid)
         });
         if !reloading && let Some(lock) = try_acquire_daemon_lock(&path)? {
-            return Ok(lock);
+            return Ok((lock, announced));
         }
         if !announced {
             crate::logging::info(&format!(

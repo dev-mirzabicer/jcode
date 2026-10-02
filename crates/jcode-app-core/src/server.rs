@@ -2328,9 +2328,22 @@ impl Server {
         // A supervised launch waits for the namespace's daemon lock instead of
         // competing with (or failing beside) a live unmanaged runtime; it takes
         // over when that runtime exits. Unsupervised starts keep failing fast.
+        self::supervision::adopt_supervision_marker();
         #[cfg(unix)]
         let _daemon_lock = if self::supervision::supervised() {
-            wait_for_daemon_lock().await?
+            let launcher = self::supervision::LauncherImage::capture();
+            let (lock, waited) = wait_for_daemon_lock().await?;
+            if waited && let Some(launcher) = launcher.filter(|launcher| launcher.changed()) {
+                // Taking over after a wait: serve the launcher's current binary,
+                // not the image loaded while waiting. The lock is released
+                // across exec; the replacement acquires it again.
+                crate::logging::info(
+                    "Supervised runtime waited behind another runtime and its launcher changed; loading the current binary",
+                );
+                drop(lock);
+                return Err(launcher.replace_self());
+            }
+            lock
         } else {
             acquire_daemon_lock()?
         };
@@ -2521,9 +2534,17 @@ impl Server {
     /// continues them.
     #[cfg(unix)]
     fn replace_after_restart(&self, operation: crate::workspace::OperationId) -> ! {
-        if !self::supervision::supervised()
-            && crate::runtime_service::registered_for_socket(&self.socket_path).unwrap_or(false)
-        {
+        let registered = if self::supervision::supervised() {
+            false
+        } else {
+            crate::runtime_service::registered_for_socket(&self.socket_path).unwrap_or_else(|error| {
+                crate::logging::warn(&format!(
+                    "Restart {operation}: login-service registration could not be read; restarting in place: {error:#}"
+                ));
+                false
+            })
+        };
+        if registered {
             // The registered job may have exited earlier (for example at login
             // under a then-intentional Stop); ask launchd to run it so it waits
             // for this incarnation's daemon lock, then release ownership.

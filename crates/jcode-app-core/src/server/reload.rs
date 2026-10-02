@@ -244,6 +244,7 @@ pub(super) fn replace_runtime_process_with(
 ) -> std::io::Error {
     let mut cmd = std::process::Command::new(binary);
     cmd.args(arguments);
+    super::supervision::carry_supervision(&mut cmd);
     // Auto provider detection is dominated by credential-file probes.
     // The replacement process is the same trusted daemon with the same
     // environment, so carry the already-resolved, non-secret status

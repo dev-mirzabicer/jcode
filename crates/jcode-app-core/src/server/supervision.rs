@@ -353,7 +353,87 @@ pub(crate) fn spawn_power_monitor(
     });
 }
 
+static SUPERVISION_MARKER: std::sync::OnceLock<Option<std::ffi::OsString>> =
+    std::sync::OnceLock::new();
+
+/// Take ownership of the login service's marker. Called before the runtime
+/// starts work: the marker describes this process only, so it is removed from
+/// the environment that tools, command workers and any spawned `serve` would
+/// otherwise inherit (they are not supervised). Our own image replacements
+/// pass it on explicitly through [`carry_supervision`].
+pub(crate) fn adopt_supervision_marker() {
+    SUPERVISION_MARKER.get_or_init(|| {
+        let marker = std::env::var_os(crate::runtime_service::SUPERVISED_ENV);
+        if marker.is_some() {
+            crate::env::remove_var(crate::runtime_service::SUPERVISED_ENV);
+        }
+        marker
+    });
+}
+
 /// The process was started by the namespaced login service.
 pub(crate) fn supervised() -> bool {
-    std::env::var_os(crate::runtime_service::SUPERVISED_ENV).is_some()
+    SUPERVISION_MARKER
+        .get_or_init(|| std::env::var_os(crate::runtime_service::SUPERVISED_ENV))
+        .is_some()
+}
+
+/// Keep supervision across a replacement of this same process image.
+pub(crate) fn carry_supervision(command: &mut std::process::Command) {
+    if let Some(Some(marker)) = SUPERVISION_MARKER.get() {
+        command.env(crate::runtime_service::SUPERVISED_ENV, marker);
+    }
+}
+
+/// The binary a supervised launcher route resolved to when this process
+/// started. A service process that waited behind another runtime may have been
+/// loaded long before it takes over; it must serve the route's current target,
+/// not the image it loaded while waiting.
+#[cfg(unix)]
+pub(crate) struct LauncherImage {
+    route: std::path::PathBuf,
+    target: std::path::PathBuf,
+    identity: (u64, u64),
+}
+
+#[cfg(unix)]
+impl LauncherImage {
+    pub(crate) fn capture() -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let route = std::path::PathBuf::from(std::env::args_os().next()?);
+        if !route.is_absolute() {
+            return None;
+        }
+        let target = std::fs::canonicalize(&route).ok()?;
+        let metadata = std::fs::metadata(&target).ok()?;
+        Some(Self {
+            route,
+            target,
+            identity: (metadata.dev(), metadata.ino()),
+        })
+    }
+
+    pub(crate) fn changed(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::canonicalize(&self.route) {
+            Ok(target) => {
+                target != self.target
+                    || std::fs::metadata(&target)
+                        .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) != self.identity)
+            }
+            // A missing route keeps the loaded image; launchd reports the
+            // broken route on the next start.
+            Err(_) => false,
+        }
+    }
+
+    /// Replace this process with the route's current target, keeping the PID
+    /// launchd supervises. Returns only on failure.
+    pub(crate) fn replace_self(&self) -> anyhow::Error {
+        let mut command = std::process::Command::new(&self.route);
+        command.args(std::env::args_os().skip(1));
+        carry_supervision(&mut command);
+        anyhow::Error::from(crate::platform::replace_process(&mut command))
+            .context("Supervised runtime could not load its launcher's current binary")
+    }
 }
