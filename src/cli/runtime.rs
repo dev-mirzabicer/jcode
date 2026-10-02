@@ -822,7 +822,8 @@ fn print_service_plan(plan: &crate::runtime_service::ServicePlan) {
         plan.throttle_interval_seconds
     );
     println!(
-        "  On logout or unload the runtime receives SIGTERM and quiesces for up to {}s; interrupted turns wait for your recovery decision.",
+        "  On logout or unload the runtime receives SIGTERM and quiesces for up to {}s (launchd allows {}s before killing it); interrupted turns wait for your recovery decision.",
+        crate::server::shutdown::EXTERNAL_SIGNAL_QUIESCENCE_SECONDS,
         plan.exit_timeout_seconds
     );
     println!("Nothing was written. Install exactly this plan with:");
