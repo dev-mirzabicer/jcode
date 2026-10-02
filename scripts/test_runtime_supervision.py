@@ -52,13 +52,20 @@ def text_of(message):
 def provider(self):
     body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
     messages = body.get('messages', [])
-    users = [text_of(m) for m in messages if m.get('role') == 'user']
-    last = users[-1] if users else ''
+    # Everything the model has not answered yet: the user/context messages
+    # after the last assistant reply (shell records may follow the prompt).
+    pending = []
+    for message in reversed(messages):
+        if message.get('role') == 'assistant':
+            break
+        if message.get('role') == 'user':
+            pending.insert(0, text_of(message))
+    last = '\n'.join(pending)
     f.posts.append({'last': last, 'body': json.dumps(body)})
     (f.ROOT / 'posts.json').write_text(json.dumps(f.posts, indent=2))
     self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
     if 'HOLD:' in last:
-        tag = last.split('HOLD:', 1)[1].split()[0]
+        tag = last.rsplit('HOLD:', 1)[1].split()[0]
         limit = time.monotonic() + 120
         while not (f.ROOT / ('release-' + tag)).exists() and time.monotonic() < limit:
             time.sleep(0.05)
@@ -134,6 +141,10 @@ class Client:
         ident = self.send('subscribe', working_dir=str(f.project), selfdev=False, target_session_id=session)
         self.until(lambda e: e.get('id') == ident and e['type'] == 'done')
         return [e for e in self.events if e['type'] == 'history'][-1]
+    def execution(self, action, run, **fields):
+        event = self.rpc('execution', request={'action': action, 'run_id': run, **fields})
+        assert event['type'] == 'execution_response', event
+        return event['response']
     def close(self):
         if self in clients:
             clients.remove(self)
@@ -256,6 +267,21 @@ try:
     # R33: SIGKILL leaves interrupted turns for explicit selection. The daemon
     # comes back, inference does not; automatic wakes wait; two clients race.
     progress('crash')
+    # An independent native command that outlives the crash under its own
+    # owner is reported as live, so the user does not repeat it.
+    effects = f.ROOT / 'live-effects'
+    live_cmd = f.ROOT / 'live.py'
+    live_cmd.write_text("import pathlib,sys,time\nroot=pathlib.Path(sys.argv[1])\nwith open(root/'live-effects','a') as e: e.write('x')\n(root/'live-ready').write_text('ready')\nwhile not (root/'live-release').exists(): time.sleep(0.1)\nprint('LIVE_DONE')\n")
+    import sqlite3
+    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
+        before_runs = {row[0] for row in db.execute('SELECT id FROM runs')}
+    shell_client = Client(); shell_client.subscribe(worker)
+    shell_client.send('input_shell', command=f'{sys.executable} {live_cmd} {f.ROOT}')
+    wait(lambda: (f.ROOT / 'live-ready').exists(), 'live command ready')
+    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
+        live_run = ({row[0] for row in db.execute("SELECT id FROM runs WHERE tool='input_shell'")} - before_runs).pop()
+    assert shell_client.execution('background', live_run)['accepted']
+    shell_client.close()
     base = len(f.posts)
     submit(worker, 'HOLD:crash-a work'); submit(peer, 'HOLD:crash-b work')
     settle_posts(base + 2, 1)
@@ -269,6 +295,13 @@ try:
     time.sleep(3)
     assert input_state(peer, wake) == 'accepted' and len(f.posts) == base + 2, 'automatic wake deferred'
     worker_item = next(item for item in items if item['session'] == worker)
+    live = [e for e in worker_item.get('executions', []) if e['id'] == live_run]
+    assert live and live[0]['live_owner'], worker_item
+    (f.ROOT / 'live-release').write_text('release')
+    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
+        wait(lambda: db.execute('SELECT state FROM runs WHERE id=?', (live_run,)).fetchone()[0] == 'completed', 'live command completes under its own owner')
+    assert effects.read_text() == 'x', 'the surviving command ran exactly once'
+    outcomes['crash_reports_live_native_owner'] = live_run
     results = []
     def decide():
         results.append(run('runtime', 'recover', 'continue', worker_item['id'], '--revision', str(worker_item['revision']), '--json', success=False))
@@ -361,7 +394,52 @@ try:
         (f.ROOT / 'pmset-released.txt').write_text(subprocess.run(['pmset', '-g', 'assertions'], capture_output=True, text=True).stdout)
         outcomes['power_follows_runtime_work'] = {'held': held}
 
+        # R35: the user switch is reread on every reconcile.
+        progress('power-switch')
+        original = (f.home / 'config.toml').read_text()
+        (f.home / 'config.toml').write_text(original + '\n[power]\nprevent_sleep_while_streaming=false\n')
+        time.sleep(8)
+        count = len(f.posts)
+        submit(worker, 'HOLD:switch work')
+        settle_posts(count + 1, 1)
+        time.sleep(8)
+        assert not caffeinate_children(pid), 'disabled switch holds no assertion'
+        power = status()['supervision']['power']
+        assert not power['enabled'] and not power['active'] and power['active_work'] >= 1, power
+        (f.ROOT / 'release-switch').write_text('release')
+        (f.home / 'config.toml').write_text(original)
+        settle_posts(count + 1, 3)
+        outcomes['power_switch_respected'] = power
+
+        # R35: a native command preserved across a reviewed Stop keeps its own
+        # assertion after the runtime exits and releases it when it settles.
+        progress('survivor-power')
+        survivor = f.ROOT / 'survivor.py'
+        survivor.write_text("import pathlib,sys,time\nroot=pathlib.Path(sys.argv[1])\n(root/'survivor-ready').write_text('ready')\nwhile not (root/'survivor-release').exists(): time.sleep(0.1)\nprint('SURVIVOR_DONE')\n")
+        shell_client = Client(); shell_client.subscribe(worker)
+        shell_client.send('input_shell', command=f'{sys.executable} {survivor} {f.ROOT}')
+        wait(lambda: (f.ROOT / 'survivor-ready').exists(), 'survivor command ready')
+        def worker_assertions():
+            rows = subprocess.run(['ps', '-axo', 'pid=,ppid=,command='], capture_output=True, text=True).stdout.splitlines()
+            workers = {row.split()[0] for row in rows if '__jcode-command-worker' in row}
+            return [row for row in rows if 'caffeinate' in row and row.split()[1] in workers]
+        held = wait(worker_assertions, 'native worker assertion', 20)
+        operation = reviewed('stop', '--strategy', 'interrupt', '--tasks', 'keep-supported')
+        cli('wait', operation['id'], '--timeout-seconds', '60')
+        try: shell_client.close()
+        except Exception: pass
+        wait(lambda: service_pid() is None and not connectable(), 'runtime stopped with the survivor preserved', 30)
+        assert worker_assertions(), 'preserved command keeps its own assertion after the runtime exits'
+        (f.ROOT / 'pmset-survivor.txt').write_text(subprocess.run(['pmset', '-g', 'assertions'], capture_output=True, text=True).stdout)
+        (f.ROOT / 'survivor-release').write_text('release')
+        wait(lambda: not worker_assertions(), 'survivor assertion released when the command settles', 30)
+        cli('start')
+        wait(service_pid, 'service started again', 20)
+        outcomes['survivor_power'] = {'held': held}
+
         progress('service-crash')
+        pid = wait(service_pid, 'current supervised runtime')
+        wait(connectable, 'supervised runtime serves', 30)
         os.kill(pid, signal.SIGKILL)
         relaunched = wait(lambda: (lambda p: p if p and p != pid else None)(service_pid()), 'launchd relaunches after an unexpected exit', 40)
         wait(connectable, 'relaunched runtime serves', 30)
@@ -397,7 +475,9 @@ except Exception:
 finally:
     signal.alarm(180)
     progress('cleanup')
-    for tag in ['failed-reload', 'reload', 'restart', 'crash-a', 'crash-b', 'sigterm', 'handoff', 'power']:
+    (f.ROOT / 'survivor-release').write_text('cleanup release')
+    (f.ROOT / 'live-release').write_text('cleanup release')
+    for tag in ['failed-reload', 'reload', 'restart', 'crash-a', 'crash-b', 'sigterm', 'handoff', 'power', 'switch']:
         (f.ROOT / ('release-' + tag)).write_text('cleanup release')
     for client in list(clients):
         try: client.close()
