@@ -588,3 +588,47 @@ fn historical_rows_whose_owner_is_gone_neither_run_nor_block_stop() -> Result<()
         Ok(())
     })
 }
+
+/// The replacement runtime reconciles lost owners when it claims the
+/// namespace, so a Finish review does not wait on work that cannot finish.
+#[test]
+fn runtime_startup_settles_lost_owner_rows() -> Result<()> {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let out = sandbox.root().join("lost-run-id");
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "execution::shutdown::tests::lost_owner_fixture",
+                "--nocapture",
+            ])
+            .env("JCODE_WP09_LOST_OWNER", &out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?;
+        ensure!(status.success(), "Earlier runtime fixture failed: {status}");
+        let id = std::fs::read_to_string(&out)?;
+        let root = sandbox.root();
+        let lifecycle = crate::server::shutdown::RuntimeLifecycle::new(
+            root,
+            &root.join("shutdown-fixture.sock"),
+            Arc::new(crate::primary::PrimaryHost::default()),
+            crate::background::BackgroundTaskManager::with_output_dir(root.join("background")),
+        )
+        .await?;
+        let store = ExecutionStore::open(root)?;
+        ensure!(
+            store.inspect(&id)?.context("row")?.state == crate::execution::RunState::Interrupted,
+            "Startup did not settle the lost-owner row"
+        );
+        let RuntimeResponse::Status(status) = lifecycle.request(RuntimeRequest::Status {}).await?
+        else {
+            anyhow::bail!("status");
+        };
+        ensure!(
+            !status.work.iter().any(|work| work.id == id),
+            "A settled row must not hold a Finish review open"
+        );
+        Ok(())
+    })
+}

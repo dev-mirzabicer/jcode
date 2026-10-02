@@ -47,6 +47,15 @@ store); the record is removed only after that succeeds. Recovery items are adopt
 into `recovery.json` before their records are removed. Each step is repeatable
 after a crash in the middle of startup.
 
+The same claim reconciles lost execution owners: `OwnedExecutions::settle_lost_owners`
+publishes the established evidence-based interruption receipt
+(`ExecutionStore::recover_lost_owner`) for unresolved rows of this namespace whose
+earlier owner image is gone. Nothing is replayed or signalled, and a still-live
+owner such as a handed-off native worker is left alone. Without this, a row left
+by an earlier image would hold a Finish review open forever and block Stop. A row
+that cannot be settled stays in the Stop inventory, and `OwnedExecutions::stop`
+applies the same receipt rather than controlling an endpoint that cannot answer.
+
 ## Planned continuation
 
 Startup (and a failed reload in the still-running runtime) calls

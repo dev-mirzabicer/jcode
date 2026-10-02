@@ -114,6 +114,30 @@ impl OwnedExecutions {
         .await?
     }
 
+    /// Settle unresolved executions left by earlier runtime images of this
+    /// namespace whose owner process is gone, publishing the established
+    /// evidence-based lost-owner receipt. Nothing is replayed or signalled; a
+    /// still-live owner (a handed-off native worker) is left alone. Returns the
+    /// settled IDs and per-row failures, which stay visible to Stop review.
+    pub async fn settle_lost_owners(&self) -> Result<(Vec<String>, Vec<String>)> {
+        let mut settled = Vec::new();
+        let mut failures = Vec::new();
+        for item in self.inventory().await? {
+            let Some(record) = self.store.inspect(&item.id)? else {
+                continue;
+            };
+            if record.state.terminal() || record.owner == self.runtime.endpoint.id {
+                continue;
+            }
+            match self.store.recover_lost_owner(&item.id).await {
+                Ok(Some(record)) if record.state.terminal() => settled.push(item.id),
+                Ok(_) => {}
+                Err(error) => failures.push(format!("{}: {error:#}", item.id)),
+            }
+        }
+        Ok((settled, failures))
+    }
+
     pub async fn inventory(&self) -> Result<Vec<RuntimeWork>> {
         let store = self.store.clone();
         let records = tokio::task::spawn_blocking(move || store.unresolved_runs()).await??;

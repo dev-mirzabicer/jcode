@@ -84,6 +84,27 @@ impl RuntimeLifecycle {
             Some(owner.namespace().into()),
         )?;
         let executions = OwnedExecutions::bind(root, &owner).await?;
+        // Reconcile lost owners before admitting work: rows from earlier images
+        // whose process is gone can never finish, so they would otherwise hold
+        // a Finish review open and a Stop blocked. Failures stay reviewable.
+        match executions.settle_lost_owners().await {
+            Ok((settled, failures)) => {
+                if !settled.is_empty() {
+                    crate::logging::info(&format!(
+                        "Runtime startup settled {} execution(s) whose earlier owner is gone",
+                        settled.len()
+                    ));
+                }
+                for failure in failures {
+                    crate::logging::warn(&format!(
+                        "Lost-owner execution remains unresolved for review: {failure}"
+                    ));
+                }
+            }
+            Err(error) => crate::logging::warn(&format!(
+                "Lost-owner reconciliation was not completed; rows remain reviewable: {error:#}"
+            )),
+        }
         primaries.bind_runtime_admission(registration.admission().clone())?;
         let lifecycle = Arc::new(Self {
             owner,
