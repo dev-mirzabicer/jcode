@@ -257,7 +257,7 @@ export type ApiRequest =
   | { req: "ping" };
 
 export type ApiEvent =
-  | {ev: "runtime_capabilities"; version:number|null}
+  | {ev: "runtime_capabilities"; version:number|null; supervision?:number|null}
   | {ev: "runtime_control"; response:RuntimeControlResponse}
   | {ev: "closeout_capabilities"; version: number | null}
   | {ev: "closeout"; reply: CloseoutReply}

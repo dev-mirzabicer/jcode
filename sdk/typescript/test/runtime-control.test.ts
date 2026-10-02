@@ -28,8 +28,8 @@ test("runtime controls require bridge and exact native support before mutation",
 
 test("runtime socket client validates every control and creates no Session",async()=> {
   for (const item of cases) {
-    const server=await startMockHarness({capabilities:["runtime_lifecycle_v1"],onRequest(request,send) {
-      if (request.req === "runtime_probe") {send({v:1,reply_to:request.id,ev:"runtime_capabilities",version:1});return;}
+    const server=await startMockHarness({capabilities:["runtime_lifecycle_v1","runtime_supervision_v1"],onRequest(request,send) {
+      if (request.req === "runtime_probe") {send({v:1,reply_to:request.id,ev:"runtime_capabilities",version:1,supervision:1});return;}
       assert.equal(request.req,"runtime_control");
       assert.deepEqual(request.request,item.request);
       send({v:1,reply_to:request.id,ev:"runtime_control",response:item.response});
@@ -61,4 +61,23 @@ test("runtime caller settings freeze before capability wait and unsafe revisions
     const unsafeReply=structuredClone(item.response);unsafeReply.value.revision=Number.MAX_SAFE_INTEGER+1;
     assert.equal(matchesRuntimeResponse(expected,unsafeReply),false);
   } finally {client.close();await server.close();}
+});
+
+test("restart and recovery never reach a runtime without supervision",async()=> {
+  const restart=structuredClone(cases.find((item:{name:string})=>item.name === "review restart valid").request);
+  const recover=cases.find((item:{name:string})=>item.name === "recover valid").request;
+  for (const [capabilities,supervision] of [[["runtime_lifecycle_v1"],1],[["runtime_lifecycle_v1","runtime_supervision_v1"],undefined]] as const) {
+    let controls=0;
+    const server=await startMockHarness({capabilities:[...capabilities],onRequest(request,send) {
+      if (request.req === "runtime_probe") send({v:1,reply_to:request.id,ev:"runtime_capabilities",version:1,supervision});
+      else controls++;
+    }});
+    const client=await JcodeClient.connect({socketPath:server.socketPath,ensureRuntime:false});
+    try {
+      for (const request of [restart,recover,{action:"supervision"}]) {
+        await assert.rejects(()=>client.runtimeControl(request), (error:unknown)=>error instanceof HarnessError && error.code === "unsupported_capability");
+      }
+      assert.equal(controls,0);
+    } finally {client.close();await server.close();}
+  }
 });
