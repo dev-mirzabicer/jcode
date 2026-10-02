@@ -53,9 +53,39 @@ impl App {
         self.context_transactions
             .invalidate_session_drafts(&session_id, "provider or model identity changed");
         self.context_protocol.invalidate_provider_identity();
+        // The effort follows the session's intent on the new model.
+        if !self.is_remote {
+            self.session
+                .apply_reasoning_effort_intent(self.provider.as_ref());
+        }
         self.after_local_provider_context_changed(source, &detail)
             .map_err(anyhow::Error::msg)?;
         Ok(active_model)
+    }
+
+    /// Set what the local session asks for as its effort, as
+    /// `Agent::set_reasoning_effort` does for a server session: a level, or
+    /// `default` for the runtime's default of whichever model is current
+    /// (INT-01/WP-06 R24). The intent is persisted with the session.
+    pub(super) fn set_local_reasoning_effort(&mut self, requested: &str) -> anyhow::Result<()> {
+        use jcode_session_types::StoredReasoningEffortIntent as Intent;
+        if self.is_remote {
+            // The server's session owns the intent; a remote client's session
+            // is a shadow that is never saved.
+            return self.provider.set_reasoning_effort(requested);
+        }
+        match Intent::from_request(requested) {
+            Intent::Default => self.provider.reset_reasoning_effort()?,
+            Intent::Explicit { .. } => self.provider.set_reasoning_effort(requested)?,
+        }
+        self.session
+            .record_reasoning_effort_request(requested, self.provider.reasoning_effort());
+        if let Err(error) = self.session.save() {
+            crate::logging::warn(&format!(
+                "The session's reasoning effort could not be saved: {error}"
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn apply_local_model_selection(
@@ -713,7 +743,7 @@ impl App {
             return;
         }
 
-        match self.provider.set_reasoning_effort(next_effort) {
+        match self.set_local_reasoning_effort(next_effort) {
             Ok(()) => {
                 let label = effort_display_label(next_effort);
                 let bar = effort_bar(next_index, len);
@@ -1223,7 +1253,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         }
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::EffortCycle);
         let level = level.trim();
-        match app.provider.set_reasoning_effort(level) {
+        match app.set_local_reasoning_effort(level) {
             Ok(()) => {
                 let new_effort = app.provider.reasoning_effort();
                 let label = new_effort

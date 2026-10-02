@@ -179,6 +179,9 @@ impl Agent {
         }
         self.session = next_session;
         self.reconcile_explicit_provider_pin_route();
+        // The effort follows the session's intent on the new model: its
+        // default, or the chosen level as that model takes it.
+        self.restore_reasoning_effort_from_session();
         let resolved_model = self.provider.model();
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
@@ -204,6 +207,7 @@ impl Agent {
         let model = self.provider.model();
         self.session.model = Some(model.clone());
         self.session.provider_session_id = None;
+        self.restore_reasoning_effort_from_session();
         self.session.save()?;
         self.provider_runtime_state
             .apply(crate::provider::ProviderStateEvent::RuntimeModelObserved { model });
@@ -240,16 +244,25 @@ impl Agent {
         self.provider_runtime_state.user_selected_after(generation)
     }
 
+    /// Make the provider follow the session's effort intent for the current
+    /// model (INT-01/WP-06 R24): after a restore, a resume and every model
+    /// switch. An isolated child keeps the concrete effort its alias resolved
+    /// to, exactly as stored (Phase 4).
     pub fn restore_reasoning_effort_from_session(&mut self) {
-        if let Some(effort) = self.session.reasoning_effort.clone() {
-            if let Err(e) = self.provider.set_reasoning_effort(&effort) {
-                crate::logging::error(&format!(
-                    "Failed to restore session reasoning effort '{}': {}",
-                    effort, e
-                ));
+        if self.session.isolated_child.is_some() {
+            if let Some(effort) = self.session.reasoning_effort.clone() {
+                if let Err(e) = self.provider.set_reasoning_effort(&effort) {
+                    crate::logging::error(&format!(
+                        "Failed to restore session reasoning effort '{}': {}",
+                        effort, e
+                    ));
+                }
+            } else {
+                self.session.reasoning_effort = self.provider.reasoning_effort();
             }
         } else {
-            self.session.reasoning_effort = self.provider.reasoning_effort();
+            self.session
+                .apply_reasoning_effort_intent(self.provider.as_ref());
         }
         // Mirror the effort into the deadlock-free side-table so server handlers
         // (e.g. the swarm seed handler) can learn this session's effort without
@@ -260,12 +273,23 @@ impl Agent {
         );
     }
 
+    /// Set what the session asks for as its effort: a level, or `default`
+    /// for the runtime's default of whichever model is current. Returns the
+    /// effective effort.
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         if crate::prompt::is_swarm_effort(effort) {
             crate::config::require_swarm()?;
         }
         let previous = self.provider.reasoning_effort();
-        self.provider.set_reasoning_effort(effort)?;
+        let intent = jcode_session_types::StoredReasoningEffortIntent::from_request(effort);
+        match &intent {
+            jcode_session_types::StoredReasoningEffortIntent::Default => {
+                self.provider.reset_reasoning_effort()?
+            }
+            jcode_session_types::StoredReasoningEffortIntent::Explicit { .. } => {
+                self.provider.set_reasoning_effort(effort)?
+            }
+        }
         let current = self.provider.reasoning_effort();
         // The swarm effort directive is a static-prompt section (INT-01, D8),
         // so entering, leaving or changing swarm mode is a recorded transition.
@@ -284,7 +308,8 @@ impl Agent {
                 ),
             );
         }
-        self.session.reasoning_effort = current.clone();
+        self.session
+            .record_reasoning_effort_request(effort, current.clone());
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");

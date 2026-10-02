@@ -402,6 +402,12 @@ impl App {
             if restored_model || self.session.model.is_none() {
                 self.session.model = Some(active_model.clone());
             }
+            // The restored session's effort intent decides the effort on the
+            // restored model (INT-01/WP-06 R24).
+            if !self.is_remote {
+                self.session
+                    .apply_reasoning_effort_intent(self.provider.as_ref());
+            }
             self.update_context_limit_for_model(&active_model);
             // Mark session as active now that it's being used again
             self.session.mark_active();

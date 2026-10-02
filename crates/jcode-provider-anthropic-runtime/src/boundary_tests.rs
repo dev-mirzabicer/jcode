@@ -825,7 +825,7 @@ async fn the_reasoning_self_heal_keeps_the_binding_control() {
     assert!(events.iter().all(Result::is_ok), "{events:?}");
     let requests = fixture.requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0]["output_config"], json!({"effort": "medium"}));
+    assert_eq!(requests[0]["output_config"], json!({"effort": "high"}));
     assert!(requests[1].get("output_config").is_none());
     assert_eq!(
         requests[1]["thinking"],

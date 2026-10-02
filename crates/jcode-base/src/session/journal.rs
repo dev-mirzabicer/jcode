@@ -32,6 +32,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) model: Option<String>,
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) reasoning_effort_intent: Option<jcode_session_types::StoredReasoningEffortIntent>,
     pub(super) subagent_model: Option<String>,
     pub(super) improve_mode: Option<SessionImproveMode>,
     pub(super) autoreview_enabled: Option<bool>,
@@ -118,6 +120,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.context_view != current.context_view
         || prev.provider_key != current.provider_key
         || prev.reasoning_effort != current.reasoning_effort
+        || prev.reasoning_effort_intent != current.reasoning_effort_intent
         || prev.subagent_model != current.subagent_model
         || prev.improve_mode != current.improve_mode
         || prev.autoreview_enabled != current.autoreview_enabled

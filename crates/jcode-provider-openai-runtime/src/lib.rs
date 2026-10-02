@@ -778,11 +778,7 @@ impl OpenAIProvider {
             None => None,
         };
         let max_output_tokens = Self::load_max_output_tokens();
-        let reasoning_effort = jcode_base::config::config()
-            .provider
-            .openai_reasoning_effort
-            .as_deref()
-            .and_then(Self::normalize_reasoning_effort);
+        let reasoning_effort = Self::configured_reasoning_effort();
         let service_tier = Self::load_service_tier(
             jcode_base::config::config()
                 .provider
@@ -941,6 +937,16 @@ impl OpenAIProvider {
 
     fn should_prefer_websocket(model: &str) -> bool {
         !model.trim().is_empty()
+    }
+
+    /// The effort the configuration selects, when it selects one. Without it
+    /// each model's default applies.
+    fn configured_reasoning_effort() -> Option<String> {
+        jcode_base::config::config()
+            .provider
+            .openai_reasoning_effort
+            .as_deref()
+            .and_then(Self::normalize_reasoning_effort)
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {

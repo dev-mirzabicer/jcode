@@ -94,6 +94,8 @@ fn create_visible_spawn_session(
         // provider/model) by `restore_reasoning_effort_from_session` when the
         // headed client attaches to this session.
         session.reasoning_effort = Some(effort.to_string());
+        session.reasoning_effort_intent =
+            Some(jcode_session_types::StoredReasoningEffortIntent::from_request(effort));
     }
     if selfdev_requested {
         session.set_canary("self-dev");

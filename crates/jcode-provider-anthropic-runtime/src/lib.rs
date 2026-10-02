@@ -636,12 +636,7 @@ impl AnthropicProvider {
         let max_tokens_override = std::env::var("JCODE_ANTHROPIC_MAX_TOKENS")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok());
-        let reasoning_effort = jcode_base::config::config()
-            .provider
-            .anthropic_reasoning_effort
-            .as_deref()
-            .and_then(Self::normalize_reasoning_effort)
-            .map(|effort| Self::store_effort_for_model(&model, &effort));
+        let reasoning_effort = Self::configured_reasoning_effort(&model);
 
         Self {
             client: jcode_provider_core::shared_http_client(),
@@ -698,6 +693,17 @@ impl AnthropicProvider {
 
     fn model_supports_reasoning_effort(model: &str) -> bool {
         jcode_provider_core::anthropic_reasoning_caps(model).supports_reasoning_effort()
+    }
+
+    /// The effort the configuration selects for `model`, when it selects one.
+    /// Without it the model's default applies.
+    fn configured_reasoning_effort(model: &str) -> Option<String> {
+        jcode_base::config::config()
+            .provider
+            .anthropic_reasoning_effort
+            .as_deref()
+            .and_then(Self::normalize_reasoning_effort)
+            .map(|effort| Self::store_effort_for_model(model, &effort))
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {
@@ -1358,6 +1364,15 @@ impl Provider for AnthropicProvider {
         // Surface the *effective* effort so the UI/status reflects the Opus
         // default (e.g. `xhigh`) when the user has not picked one explicitly.
         self.effort_for_model(&model)
+    }
+
+    fn reset_reasoning_effort(&self) -> Result<()> {
+        let configured = Self::configured_reasoning_effort(&self.model());
+        match self.reasoning_effort.write() {
+            Ok(mut guard) => *guard = configured,
+            Err(poisoned) => *poisoned.into_inner() = configured,
+        }
+        Ok(())
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {

@@ -515,6 +515,14 @@ pub trait Provider: Send + Sync {
         ))
     }
 
+    /// Drop any effort a caller selected, so the runtime resolves its own
+    /// default for the current model again: its configured default, else the
+    /// model's (INT-01/WP-06 R24). A session whose effort intent is `Default`
+    /// is restored this way, never with a stored level.
+    fn reset_reasoning_effort(&self) -> Result<()> {
+        self.set_reasoning_effort("")
+    }
+
     /// Get ordered list of available reasoning effort levels.
     fn available_efforts(&self) -> Vec<&'static str> {
         vec![]

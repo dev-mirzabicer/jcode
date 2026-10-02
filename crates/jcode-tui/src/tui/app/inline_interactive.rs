@@ -3582,7 +3582,7 @@ impl App {
                             }
                         }
                         if let Some(effort) = effort {
-                            let _ = self.provider.set_reasoning_effort(&effort);
+                            let _ = self.set_local_reasoning_effort(&effort);
                         }
                         if !route_detail.is_empty() {
                             self.push_display_message(DisplayMessage::system(format!(

@@ -1,5 +1,5 @@
 /// Quality-first default for Claude-capable routes.
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 /// Quality-first default for OpenAI-capable routes.
 pub const GPT_5_6_SOL_MODEL: &str = "gpt-5.6-sol";
@@ -30,7 +30,7 @@ pub const DEFAULT_OPENAI_MODEL: &str = GPT_5_6_SOL_MODEL;
 /// used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
     DEFAULT_CLAUDE_MODEL,
-    "claude-opus-5-5",
+    "claude-opus-5",
     "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-4-8",

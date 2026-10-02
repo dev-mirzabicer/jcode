@@ -1504,6 +1504,9 @@ mod tests;
 #[path = "agent/context_delivery_tests.rs"]
 mod context_delivery_tests;
 #[cfg(test)]
+#[path = "agent/effort_intent_tests.rs"]
+pub(crate) mod effort_intent_tests;
+#[cfg(test)]
 mod reasoning_invalidation_tests;
 #[cfg(test)]
 #[path = "agent/request_replan_tests.rs"]

@@ -2482,6 +2482,30 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn reset_reasoning_effort(&self) -> Result<()> {
+        match self.active_provider() {
+            ActiveProvider::Claude if !self.use_claude_cli => self
+                .anthropic_provider()
+                .ok_or_else(|| anyhow::anyhow!("Anthropic provider not available"))?
+                .reset_reasoning_effort(),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
+                .reset_reasoning_effort(),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .ok_or_else(|| anyhow::anyhow!("Copilot provider not available"))?
+                .reset_reasoning_effort(),
+            ActiveProvider::OpenRouter => self
+                .active_openrouter_execution_provider()
+                .ok_or_else(|| anyhow::anyhow!("OpenAI-compatible provider not available"))?
+                .reset_reasoning_effort(),
+            _ => Err(anyhow::anyhow!(
+                "Reasoning effort is only supported for OpenAI, Anthropic, and compatible reasoning models"
+            )),
+        }
+    }
+
     fn available_efforts(&self) -> Vec<&'static str> {
         match self.active_provider() {
             ActiveProvider::Claude if !self.use_claude_cli => self

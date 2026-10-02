@@ -267,6 +267,7 @@ fn prepare_fresh_context(
     child.provider_key = parent.provider_key.clone();
     child.route_api_method = parent.route_api_method.clone();
     child.reasoning_effort = parent.reasoning_effort.clone();
+    child.reasoning_effort_intent = parent.reasoning_effort_intent.clone();
     child.subagent_model = parent.subagent_model.clone();
     child.improve_mode = parent.improve_mode;
     child.autoreview_enabled = parent.autoreview_enabled;

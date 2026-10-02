@@ -1850,6 +1850,94 @@ mod tests {
         ));
     }
 
+    /// INT-01/WP-06 R24 through the handlers a remote client drives: the
+    /// client asks for the default, switches the model, and each reply
+    /// reports the effective effort of the current model; the session keeps
+    /// the intent, so a server restart resumes at the new model's default.
+    #[tokio::test]
+    async fn a_remote_default_effort_follows_the_model_and_survives_a_restart() {
+        use crate::agent::effort_intent_tests::{MODEL_A, MODEL_B, ModelDefaultsProvider};
+        use jcode_session_types::StoredReasoningEffortIntent as Intent;
+        let _guard = crate::storage::lock_test_env();
+        let _runtime = IsolatedRuntimeDir::new();
+        let home = tempfile::tempdir().expect("home");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let start = |session: crate::session::Session| async {
+            let provider: Arc<dyn Provider> = Arc::new(ModelDefaultsProvider::default());
+            let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
+            (
+                Arc::clone(&provider),
+                Arc::new(Mutex::new(Agent::new_with_session(
+                    provider, registry, session, None,
+                ))),
+            )
+        };
+        let mut session = crate::session::Session::create(None, None);
+        session.model = Some(MODEL_A.to_string());
+        let session_id = session.id.clone();
+        let (provider, agent) = start(session).await;
+        let (events, mut replies) = mpsc::unbounded_channel();
+        let events: crate::client_delivery::ClientEventSender = events.into();
+        let context_transactions = Arc::new(crate::context::ContextTransactionService::new());
+
+        handle_set_reasoning_effort(1, "high".to_string(), &agent, &events).await;
+        handle_set_reasoning_effort(2, "default".to_string(), &agent, &events).await;
+        handle_set_model(
+            3,
+            MODEL_B.to_string(),
+            &agent,
+            &context_transactions,
+            &events,
+        )
+        .await;
+        let mut reported = Vec::new();
+        while let Ok(event) = replies.try_recv() {
+            match event {
+                ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
+                    assert!(error.is_none(), "{error:?}");
+                    reported.push(effort);
+                }
+                ServerEvent::ModelChanged {
+                    reasoning_effort,
+                    error,
+                    ..
+                } => {
+                    assert!(error.is_none(), "{error:?}");
+                    reported.push(reasoning_effort.and_then(|report| report.effort));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            reported,
+            vec![
+                Some("high".to_string()),
+                Some("low".to_string()),
+                Some("high".to_string())
+            ],
+            "the chosen level, model A's default, then model B's default"
+        );
+        assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+        // Each handler persisted its change; nothing else is saved here.
+        drop(agent);
+
+        for _ in 0..2 {
+            let session = crate::session::Session::load(&session_id).expect("load");
+            assert_eq!(session.reasoning_effort_intent, Some(Intent::Default));
+            let (provider, agent) = start(session).await;
+            assert_eq!(provider.model(), MODEL_B);
+            assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+            drop(agent);
+        }
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
     #[tokio::test]
     async fn set_service_tier_does_not_wait_for_busy_agent_lock() {
         let _guard = crate::storage::lock_test_env();

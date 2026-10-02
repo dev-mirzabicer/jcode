@@ -372,8 +372,9 @@ fn unconfigured_efforts_follow_the_default_table() {
         )
     };
 
+    // D18 (INT-01/WP-06): the default model runs at `high`.
     let (thinking, output_config, temperature) = parts("claude-opus-5-5");
-    assert_eq!(output_config.expect("effort").effort, "medium");
+    assert_eq!(output_config.expect("effort").effort, "high");
     assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
     assert_eq!(temperature, None);
 
@@ -2767,7 +2768,7 @@ fn an_unconfigured_effort_is_the_model_default_not_none() {
     }
     // A jcode default is surfaced as itself.
     use_model(&provider, "claude-opus-5-5");
-    assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
 }
 
 /// INT-01/WP-06 D17: the production request renders an operator notice from
@@ -2819,4 +2820,49 @@ fn operator_notices_follow_each_models_capability() {
         assert_eq!(betas, None, "{model}");
     }
     assert!(provider.renders_operator_notices());
+}
+
+/// INT-01/WP-06 R24: resetting the effort drops a chosen level, so the
+/// runtime resolves its default for the current model again.
+#[test]
+fn resetting_the_effort_returns_to_the_runtime_default_for_the_model() {
+    let provider = AnthropicProvider::new();
+    for model in ["claude-opus-5-5", "claude-opus-5"] {
+        use_model(&provider, model);
+        *provider.reasoning_effort.write().unwrap() = None;
+        let default = provider.reasoning_effort();
+        provider.set_reasoning_effort("max").unwrap();
+        assert_eq!(
+            provider.reasoning_effort().as_deref(),
+            Some("max"),
+            "{model}"
+        );
+        provider.reset_reasoning_effort().unwrap();
+        assert_eq!(
+            *provider.reasoning_effort.read().unwrap(),
+            AnthropicProvider::configured_reasoning_effort(model),
+            "{model}"
+        );
+        if AnthropicProvider::configured_reasoning_effort(model).is_none() {
+            assert_eq!(provider.reasoning_effort(), default, "{model}");
+        }
+    }
+}
+
+/// INT-01/WP-06 R25 (D18): a new Anthropic runtime selects Opus 5.5, and with
+/// nothing configured it runs at effort `high`.
+#[test]
+fn the_default_claude_model_is_opus_5_5_at_high_effort() {
+    assert_eq!(jcode_provider_core::DEFAULT_CLAUDE_MODEL, "claude-opus-5-5");
+    assert_eq!(DEFAULT_MODEL, "claude-opus-5-5");
+    assert_eq!(
+        jcode_provider_core::anthropic_default_reasoning_effort(DEFAULT_MODEL),
+        Some("high")
+    );
+    // Other models keep their defaults.
+    assert_eq!(
+        jcode_provider_core::anthropic_default_reasoning_effort("claude-opus-5"),
+        Some("low")
+    );
+    assert!(jcode_provider_core::ALL_CLAUDE_MODELS.contains(&"claude-opus-5"));
 }

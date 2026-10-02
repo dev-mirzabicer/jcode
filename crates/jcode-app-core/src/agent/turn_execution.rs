@@ -640,6 +640,7 @@ impl Agent {
         }
         new_session.route_api_method = self.session.route_api_method.clone();
         new_session.reasoning_effort = self.provider.reasoning_effort();
+        new_session.reasoning_effort_intent = self.session.reasoning_effort_intent.clone();
         new_session.location = self.session.location.clone().map(|mut location| {
             location.initial_cwd = location.cwd.observed_path().into();
             location.revision = 1;

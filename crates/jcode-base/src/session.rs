@@ -364,6 +364,12 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// What the session asked for as its effort: the default of whichever
+    /// model is current, or a chosen level (INT-01/WP-06 R24). The source of
+    /// truth; `reasoning_effort` above is the value last resolved from it.
+    /// `None` only in sessions stored before intents existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_intent: Option<jcode_session_types::StoredReasoningEffortIntent>,
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
@@ -902,6 +908,57 @@ impl Session {
         self.mark_memory_profile_dirty();
     }
 
+    /// Record what a person or caller asked for as the effort, with the
+    /// value the runtime resolved from it (INT-01/WP-06 R24).
+    pub fn record_reasoning_effort_request(&mut self, requested: &str, effective: Option<String>) {
+        self.reasoning_effort_intent =
+            Some(jcode_session_types::StoredReasoningEffortIntent::from_request(requested));
+        self.reasoning_effort = effective;
+        self.updated_at = Utc::now();
+    }
+
+    /// Make `provider` follow this session's effort intent for its current
+    /// model, and keep the resolved value (INT-01/WP-06 R24). Call it after a
+    /// restore and after every model switch.
+    ///
+    /// The runtime is first reset to its own default for the model. A session
+    /// stored before intents existed is classified against that default
+    /// (`StoredReasoningEffortIntent::migrated`). An explicit level the
+    /// current model does not offer leaves the default in force while that
+    /// model is current; the intent keeps the level.
+    pub fn apply_reasoning_effort_intent(&mut self, provider: &dyn crate::provider::Provider) {
+        use jcode_session_types::StoredReasoningEffortIntent as Intent;
+        if let Err(error) = provider.reset_reasoning_effort()
+            && !provider.available_efforts().is_empty()
+        {
+            crate::logging::warn(&format!(
+                "Could not reset the reasoning effort of session {}: {error}",
+                self.id
+            ));
+        }
+        let runtime_default = provider.reasoning_effort();
+        let intent = self.reasoning_effort_intent.clone().unwrap_or_else(|| {
+            Intent::migrated(self.reasoning_effort.as_deref(), runtime_default.as_deref())
+        });
+        if let Intent::Explicit { level } = &intent
+            && let Err(error) = provider.set_reasoning_effort(level)
+        {
+            crate::logging::info(&format!(
+                "Session {} asks for reasoning effort '{level}', which model '{}' does not take ({error}); its default applies while this model is current",
+                self.id,
+                provider.model()
+            ));
+        }
+        let effective = provider.reasoning_effort();
+        if self.reasoning_effort_intent.as_ref() != Some(&intent)
+            || self.reasoning_effort != effective
+        {
+            self.reasoning_effort_intent = Some(intent);
+            self.reasoning_effort = effective;
+            self.updated_at = Utc::now();
+        }
+    }
+
     pub fn set_delegation_guidance(&mut self, text: String) {
         self.delegation_guidance = Some(text);
         self.updated_at = Utc::now();
@@ -1304,6 +1361,7 @@ impl Session {
         self.model = parent.model.clone();
         self.route_api_method = parent.route_api_method.clone();
         self.reasoning_effort = parent.reasoning_effort.clone();
+        self.reasoning_effort_intent = parent.reasoning_effort_intent.clone();
         self.subagent_model = parent.subagent_model.clone();
         self.improve_mode = parent.improve_mode;
         self.autoreview_enabled = parent.autoreview_enabled;
@@ -1570,6 +1628,7 @@ impl Session {
             provider_key: self.provider_key.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort_intent: self.reasoning_effort_intent.clone(),
             subagent_model: self.subagent_model.clone(),
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
@@ -1889,6 +1948,7 @@ impl Session {
         self.provider_key = meta.provider_key;
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
+        self.reasoning_effort_intent = meta.reasoning_effort_intent;
         self.subagent_model = meta.subagent_model;
         self.improve_mode = meta.improve_mode;
         self.autoreview_enabled = meta.autoreview_enabled;
@@ -2143,6 +2203,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            reasoning_effort_intent: None,
             subagent_model: None,
             improve_mode: None,
             autoreview_enabled: None,
@@ -2222,6 +2283,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            reasoning_effort_intent: None,
             subagent_model: None,
             improve_mode: None,
             autoreview_enabled: None,

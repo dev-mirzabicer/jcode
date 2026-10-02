@@ -451,7 +451,9 @@ pub fn anthropic_default_reasoning_effort(model: &str) -> Option<&'static str> {
     let version = version?;
     match family {
         Some("opus") => match version {
-            (5, 5) => Some("medium"),
+            // Mirza's decision D18 (INT-01/WP-06): the default model runs at
+            // `high`; the API's own default for it is `medium`.
+            (5, 5) => Some("high"),
             (5, 0) => Some("low"),
             (4, 7) | (4, 8) => Some("xhigh"),
             v if v < (4, 7) && anthropic_effort_caps(model).supports_reasoning_effort() => {
@@ -728,8 +730,8 @@ mod tests {
         // INT-01 DESIGN §7 (E1): Opus 5.5 is no longer caught by an Opus 5
         // prefix match.
         for (model, expected) in [
-            ("claude-opus-5-5", Some("medium")),
-            ("claude-opus-5-5[1m]", Some("medium")),
+            ("claude-opus-5-5", Some("high")),
+            ("claude-opus-5-5[1m]", Some("high")),
             ("claude-opus-5", Some("low")),
             ("claude-opus-4-8", Some("xhigh")),
             ("claude-opus-4-7", Some("xhigh")),

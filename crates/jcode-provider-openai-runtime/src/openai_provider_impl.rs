@@ -909,6 +909,15 @@ impl Provider for OpenAIProvider {
             .or_else(|| Self::default_reasoning_effort_for_model(&self.model()))
     }
 
+    fn reset_reasoning_effort(&self) -> Result<()> {
+        let configured = Self::configured_reasoning_effort();
+        match self.reasoning_effort.write() {
+            Ok(mut guard) => *guard = configured,
+            Err(poisoned) => *poisoned.into_inner() = configured,
+        }
+        Ok(())
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         let requested = effort.trim().to_ascii_lowercase();
         if !requested.is_empty()
