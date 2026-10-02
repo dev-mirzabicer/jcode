@@ -1237,3 +1237,99 @@ provider-core 164, provider-openai 15, the OpenAI runtime 121 (2 ignored), the
 Anthropic runtime 83 (1 ignored), the app-core effort, provider-control and
 append-only harness tests, scoped `cargo fmt --check`, and strict Clippy on
 the seven touched crates.
+
+## INT-01 closeout (2026-10-01 to 2026-10-02, UTC)
+
+The closeout reconciled R01–R28 against the combined source, arranged two
+independent reviews, repaired what it found itself, and reviewed WP-06 in
+place of Mirza (decision D14). Branch `mirza/int01-closeout`.
+
+**Independent reviews.** Two read-only reviewers ran in jcode on the activated
+build, each from its own scratch directory: GPT-6.1 Sol (effort `xhigh`) and
+Claude Opus 5.5 (effort `max`, 123 requests to about 480K tokens of context on
+the reviewed Claude path, with exact cache continuity and no binding event).
+Their reports and the closeout's assessment are in the program dossier
+(`interventions/INT-01-claude-oauth-parity/reviews/`). Their verified
+findings became WP-06 (R17–R28).
+
+**Closeout repairs and additions** (before WP-06):
+- `a148ff7da` adds GPT-6.1 Sol as a built-in OpenAI option on the GPT-6
+  context policy (1,000,000-token window, no `[1m]` profile), at Mirza's
+  request. Live: one request over OpenAI OAuth answered on the activated build.
+- `a310324a4` removes the one-release legacy OAuth tool-name decoder. No
+  response built by the pre-WP-01 release can exist any more, and upstream's
+  `resolve_tool_name` aliases still resolve a Claude Code name at execution.
+- `00a285797` fixes a defect the closeout journey found: after a request-time
+  invalidation (a skill activation, a model switch, a tool-set transition),
+  a summary over the affected range was refused as shadowing jcode's managed
+  set, in the editor and in authorized emergency recovery. The managed set is
+  recomputed at every transition and is no longer treated as a person's
+  operation. Test:
+  `a_summary_over_thinking_jcode_suppressed_does_not_shadow_the_managed_set`
+  (fails without the fix).
+- `6bd062bd6` adds `closeout_journeys_live` (`src/cli/closeout_live_tests.rs`),
+  one script for ACCEPTANCE journeys 1 to 3 on any route: a `batch` turn, a
+  `subagent` delegation, a skill activation with a reminder, a real summary,
+  a reload into a fresh Agent that resumes with a reminder-only turn, and
+  continued work.
+
+**Final live legs** on source `f266c2215`, runtime
+`3f956e02c-dirty-3a6e2e379bf2`, 2026-10-02 from 05:48Z, each 17 requests with
+a real `subagent` delegation (alias `fast-worker`):
+
+| Leg | Route, effort | Session | Result |
+|---|---|---|---|
+| Opus 5.5 | Claude OAuth, `high`, `error` | `session_horse_1790920129123_1e25e261e74dc09d` | Passed. No binding events; 8 bound blocks stored, 5 replayed, summary staged 2 and restored 1; 97–100% cache reads on every request outside the skill activation and the summary apply, the first request after the reload included |
+| Sonnet 5.5 | Claude OAuth, model default, `error` | `session_humpback_1790920199256_7825716efd363f41` | Passed, same shape (6 stored, 3 replayed) |
+| GPT-5.6 Sol | OpenAI OAuth, `xhigh`, `developer` notices (default) | `session_tiger_1790920263406_d89826286f7dda80`, repeated as `session_guppy_1790920389529_a8fc73264e50de68` | Passed twice. 12 reasoning items stored; both reminders sent as `developer` items; 87–97% cached on steady requests |
+
+Probe G6.3 is the first GPT run with the rendering switched on by environment
+(`session_boar_1790918888358_86c23e8b599e2d85`, 05:28Z), which passed and led
+to the default being turned on.
+
+OpenAI observation: in both final GPT runs the first request after the reload
+read nothing from cache, and the following request read the same 12,032-token
+prefix that was cached before the reload. The request prefix is therefore
+unchanged across the reload; the miss is cache routing on a new connection
+(the OAuth route sends no cache key). The earlier G6.3 run hit at the same
+step. Recorded, not a parity defect.
+
+**Activated-server smoke** (production `drop_block`, real `bash` through the
+server's command worker, 05:55Z): an Opus 5.5 session and a GPT-5.6 Terra
+session each ran a `read`, `bash`, `write` turn and wrote the correct value.
+The Claude requests read 21,947, 22,094 and 22,485 tokens, each exactly the
+previous read plus write; the log has no `INV-1` warning or transformation.
+
+**Journey 3 limit.** A real mid-turn server reload on the final build was not
+run: the debug `reload` republishes the binary and refuses when HEAD differs
+from the built commit (here by a documentation commit). Reload and resume rest
+on the deterministic harness (mid-turn reload included), the in-process live
+reload in all three legs above, and WP-06's real server-restart journey on
+Claude.
+
+**Regression on the final source.** Provider and contract crates green at
+`eeec6b209` (22 crates), at `318474b54` (13 crates plus the focused app-core
+modules) and at `f266c2215` (the six touched crates). The bounded app-core
+subset (`agent:: context:: server::context_control client_actions
+client_lifecycle primary provider_parity live_turn tool::tool_set
+server::provider_control`): 403 passed and 12 failed at `f266c2215`; the only
+four that fail alone are the stable pre-INT-01 failures (SDK receipt
+retention, managed scope, Swarm enabling, workflow split), as at `6bd062bd6`
+(369 passed, 13 failed, the same four alone). WP-06's TUI, base and root
+subsets are in its section above.
+
+**Carried items and their owners:**
+- Phase 10 (maintenance): subscription 429 and usage-window handling
+  (a limit ends the turn after about two minutes); manual-thinking
+  capabilities and output ceilings of 4.5-generation models; the remote
+  `/cache` TTL being client-local and the missing per-TTL usage split; the
+  128K output reserve on 1M windows and `model_context_window_exceeded`;
+  app-core tests that write fixture sessions into the real `~/.jcode/sessions`;
+  a session-stable cache key for the OpenAI OAuth route.
+- Not adopted, recorded as candidates: turn-scoped `clear_at` reminders (they
+  would change D2's "reminders stay in history") and per-message effort.
+- Excluded permanently: provider-side compaction (context control forbids
+  native compaction).
+- A real delegated Claude child was not run live: no model-roster alias
+  reaches a usable Claude route on this account. Children share the runtime
+  and loop that WP-02 exercised.
