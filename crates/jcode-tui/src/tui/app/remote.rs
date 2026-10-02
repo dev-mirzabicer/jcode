@@ -87,6 +87,7 @@ pub(super) enum RemoteEventOutcome {
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
     app.dispatch_remote_task_requests(remote).await;
+    app.dispatch_remote_workspace_requests(remote).await;
     app.dispatch_remote_instruction_request(remote).await;
     app.dispatch_remote_context_editor_actions(remote).await;
     app.dispatch_remote_startup_context_request(remote).await;
@@ -796,7 +797,9 @@ fn handle_terminal_event_while_disconnected(
         Some(Ok(Event::Key(key))) => {
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
-            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && !app.handle_workspace_key_disconnected(key.code, key.modifiers)
+            {
                 handle_disconnected_key_event(app, key)?;
             }
             needs_redraw = true;
@@ -1015,6 +1018,7 @@ pub(super) fn handle_disconnect(
     app.stream_message_ended = false;
     app.clear_visible_turn_started();
     state.disconnect_start = Some(Instant::now());
+    app.workspace_disconnected();
     state.reconnect_attempts = state.reconnect_attempts.max(1);
     state.reload_recovery_attempted = false;
     app.push_display_message(DisplayMessage {
@@ -2151,7 +2155,9 @@ fn handle_disconnected_key_internal(
             app.autocomplete();
         }
         KeyCode::Enter => {
-            queue_message_for_reconnect(app);
+            if !app.open_workspace_while_disconnected() {
+                queue_message_for_reconnect(app);
+            }
         }
         KeyCode::Up | KeyCode::PageUp => {
             let inc = if code == KeyCode::PageUp { 10 } else { 1 };
@@ -2272,3 +2278,49 @@ mod stall_guard_tests {
 }
 
 pub(super) use session_persistence::persist_remote_session_metadata;
+
+/// Create a new context through the existing Clear/Split/Transfer client flows
+/// with the reviewed grant-carry choice made in workspace management.
+pub(super) async fn start_scoped_context(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    kind: crate::workspace::NewContextKind,
+    choice: crate::workspace::GrantCarryChoice,
+) {
+    use crate::workspace::NewContextKind;
+    if app.is_processing {
+        app.push_display_message(DisplayMessage::error(
+            "Finish or stop the current turn before creating a new context.".to_string(),
+        ));
+        return;
+    }
+    match kind {
+        NewContextKind::Clear => {
+            if let Err(error) = remote.scoped_context(kind, choice).await {
+                app.push_display_message(DisplayMessage::error(format!("Clear failed: {error:#}")));
+                return;
+            }
+            key_handling::reset_after_remote_clear(app);
+        }
+        NewContextKind::Split | NewContextKind::Transfer => {
+            let label = if kind == NewContextKind::Split {
+                "Split"
+            } else {
+                "Transfer"
+            };
+            app.pending_split_label = Some(label.to_string());
+            app.push_display_message(DisplayMessage::system(format!(
+                "Preparing {} with the reviewed grant-carry choice...",
+                label.to_lowercase()
+            )));
+            begin_remote_split_launch(app, label);
+            if let Err(error) = remote.scoped_context(kind, choice).await {
+                finish_remote_split_launch(app);
+                app.pending_split_label = None;
+                app.push_display_message(DisplayMessage::error(format!(
+                    "{label} failed to send: {error:#}"
+                )));
+            }
+        }
+    }
+}

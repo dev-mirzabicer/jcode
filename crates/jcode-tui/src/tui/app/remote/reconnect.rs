@@ -289,6 +289,7 @@ async fn wait_for_reload_handoff_before_reconnect(
                 tokio::select! {
                     _ = &mut wait => break,
                     _ = redraw.tick() => {
+                        app.poll_workspace_local();
                         terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
                     }
                     event = event_stream.next() => {
@@ -397,6 +398,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
         tokio::select! {
             result = &mut connect => break result,
             _ = redraw.tick() => {
+                app.poll_workspace_local();
                 terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
             }
             event = event_stream.next() => {
@@ -554,6 +556,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
                 tokio::select! {
                     _ = &mut sleep => break,
                     _ = redraw.tick() => {
+                        app.poll_workspace_local();
                         terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
                     }
                     event = event_stream.next() => {
@@ -663,6 +666,7 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         .or_else(|| session_to_resume.map(str::to_string))
     {
         app.reconnect_task_monitor(&session);
+        app.reconnect_workspace_manager(&session);
     }
 
     let reload_ctx_available = hints.reload_ctx_for_session.is_some();

@@ -2120,11 +2120,10 @@ pub(crate) fn build(
                 .ok_or("This session has no managed location")?;
             let placement = parse_placement(form.value("placement"))?;
             let cwd = if text("cwd").is_empty() {
+                // A concrete root proposes itself; a project or work area, or
+                // the current placement, keeps the current cwd.
                 location_root(manager, placement)
-                    .filter(|_| {
-                        matches!(placement, Placement::Checkout(_))
-                            || location.placement == placement
-                    })
+                    .filter(|_| location.placement != placement)
                     .unwrap_or_else(|| location.cwd.clone())
             } else {
                 absolute(&text("cwd"), "Working directory")?

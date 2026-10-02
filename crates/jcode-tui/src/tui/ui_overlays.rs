@@ -320,6 +320,14 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Open a fresh session with only compacted context + copied todos",
     ));
     lines.push(help_entry(
+        "/workspace [section]",
+        "Manage projects, checkouts, sessions, permissions, closeout and backups",
+    ));
+    lines.push(help_entry(
+        "/runtime",
+        "Runtime status, reviewed stop/restart and interrupted-turn decisions",
+    ));
+    lines.push(help_entry(
         "/niri [status|on|off|add]",
         "Enable and manage Niri-style session rows",
     ));

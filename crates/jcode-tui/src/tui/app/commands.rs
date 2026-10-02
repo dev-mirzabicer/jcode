@@ -3629,6 +3629,9 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     if app.handle_task_command(trimmed) {
         return true;
     }
+    if app.handle_workspace_command(trimmed) {
+        return true;
+    }
     if app.handle_instruction_command(trimmed) {
         return true;
     }

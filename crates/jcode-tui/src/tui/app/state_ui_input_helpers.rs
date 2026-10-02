@@ -54,6 +54,14 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/tasks",
         "Inspect work, retained output and idle child context",
     ),
+    RegisteredCommand::public(
+        "/workspace",
+        "Manage projects, checkouts, sessions, permissions, closeout and backups",
+    ),
+    RegisteredCommand::public(
+        "/runtime",
+        "Runtime status, stop, restart and interrupted turns",
+    ),
     RegisteredCommand::public("/agent", "Select, replace, or inspect the primary agent"),
     RegisteredCommand::public(
         "/instructions",

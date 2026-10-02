@@ -412,7 +412,12 @@ impl WorkspaceManager {
     }
 
     fn render_footer(&mut self, frame: &mut Frame, area: Rect, styles: &Styles) {
+        // Help and Close come first so they stay visible when the section's
+        // actions overflow; `?` lists every action.
         let mut actions = actions::available(self);
+        actions.sort_by_key(|spec| {
+            !matches!(spec.action, actions::Action::Help | actions::Action::Close)
+        });
         if area.width < SPLIT_WIDTH {
             actions.insert(
                 0,

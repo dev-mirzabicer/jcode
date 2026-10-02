@@ -121,6 +121,7 @@ mod turn;
 mod turn_memory;
 mod turn_notify;
 mod ui_prefs;
+mod workspace_ui;
 
 pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
 
@@ -1258,6 +1259,7 @@ pub struct App {
     startup_context_ui: startup_context_ui::StartupContextUiState,
     instruction_ui: instruction_ui::InstructionUi,
     task_ui: task_ui::TaskUi,
+    workspace_ui: workspace_ui::WorkspaceUi,
     // Total session token usage (from server in remote mode)
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)

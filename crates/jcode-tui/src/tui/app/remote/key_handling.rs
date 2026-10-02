@@ -303,6 +303,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.handle_workspace_key(code, modifiers) {
+        app.dispatch_remote_workspace_requests(remote).await;
+        return Ok(());
+    }
+
     // Remote input has its own async key path so modal actions can dispatch
     // protocol requests immediately. Keep Startup Context beside the existing
     // Context Editor owner, before chat/global handling. Omitting it here lets
@@ -1117,6 +1122,10 @@ async fn handle_remote_key_internal(
                     app.dispatch_remote_task_requests(remote).await;
                     return Ok(());
                 }
+                if app.handle_workspace_command(trimmed) {
+                    app.dispatch_remote_workspace_requests(remote).await;
+                    return Ok(());
+                }
                 if app.handle_instruction_command(trimmed) {
                     app.dispatch_remote_instruction_request(remote).await;
                     return Ok(());
@@ -1791,24 +1800,7 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/clear" {
                     remote.clear().await?;
-                    app.clear_provider_messages();
-                    app.clear_display_messages();
-                    app.queued_messages.clear();
-                    app.pasted_contents.clear();
-                    app.pending_images.clear();
-                    app.clear_streaming_render_state();
-                    app.clear_live_usage_state();
-                    // Full transcript discard: diagrams and side panel pages
-                    // are both orphaned (same rationale as
-                    // reset_current_session; side panel is #605).
-                    crate::tui::mermaid::clear_active_diagrams();
-                    app.swarm_plan_items.clear();
-                    app.swarm_plan_version = None;
-                    app.swarm_plan_swarm_id = None;
-                    super::super::commands_review::clear_side_panel_for_new_session(app);
-                    app.is_processing = false;
-                    app.status = ProcessingStatus::Idle;
-                    app.set_status_notice("Session cleared");
+                    reset_after_remote_clear(app);
                     return Ok(());
                 }
 
@@ -2283,4 +2275,26 @@ async fn handle_remote_key_internal(
     }
 
     Ok(())
+}
+
+/// Local reset after the server replaced this client's attached context.
+pub(in crate::tui::app) fn reset_after_remote_clear(app: &mut App) {
+    app.clear_provider_messages();
+    app.clear_display_messages();
+    app.queued_messages.clear();
+    app.pasted_contents.clear();
+    app.pending_images.clear();
+    app.clear_streaming_render_state();
+    app.clear_live_usage_state();
+    // Full transcript discard: diagrams and side panel pages
+    // are both orphaned (same rationale as
+    // reset_current_session; side panel is #605).
+    crate::tui::mermaid::clear_active_diagrams();
+    app.swarm_plan_items.clear();
+    app.swarm_plan_version = None;
+    app.swarm_plan_swarm_id = None;
+    super::super::commands_review::clear_side_panel_for_new_session(app);
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.set_status_notice("Session cleared");
 }

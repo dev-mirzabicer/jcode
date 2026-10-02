@@ -642,6 +642,9 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     if app.handle_instruction_paste(&text) {
         return;
     }
+    if app.handle_workspace_paste(&text) {
+        return;
+    }
     paste_guard::note_paste();
     // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
     // terminal always deliver text. Checking clipboard_image() here caused a bug where
@@ -2538,6 +2541,9 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
     if app.handle_task_key(code, modifiers) {
+        return Ok(true);
+    }
+    if app.handle_workspace_key(code, modifiers) {
         return Ok(true);
     }
 

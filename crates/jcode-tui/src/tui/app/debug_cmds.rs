@@ -124,6 +124,9 @@ impl App {
                 serde_json::json!(self.task_ui.child.as_ref().map(|child| &child.target));
             return state.to_string();
         }
+        if cmd == "workspace-manager-state" {
+            return self.workspace_debug().to_string();
+        }
         if cmd == "context-editor-state" {
             return serde_json::to_string_pretty(&self.context_editor_debug_summary())
                 .unwrap_or_else(|_| "{}".to_string());

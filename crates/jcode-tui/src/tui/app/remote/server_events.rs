@@ -599,6 +599,10 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         event => event,
     };
+    let event = match app.reduce_workspace_event(event) {
+        Ok(accepted) => return accepted,
+        Err(event) => *event,
+    };
     let event = match app.reduce_task_event(event) {
         Ok(accepted) => return accepted,
         Err(event) => *event,
@@ -1706,7 +1710,7 @@ pub(in crate::tui::app) fn handle_server_event(
             });
             app.push_display_message(DisplayMessage {
                 role: "error".to_string(),
-                content: message.clone(),
+                content: workspace_error_guidance(&message),
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
@@ -2419,6 +2423,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 {
                     app.reconnect_task_monitor(&session_id);
                 }
+                app.retarget_workspace_manager(&session_id);
                 if session_changed {
                     app.clear_context_turn_state_for_session_change();
                 }
@@ -2626,7 +2631,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // it honors only an explicit directive from an older server.
             if let Some(item) = runtime_recovery.as_ref() {
                 app.push_display_message(DisplayMessage::system(format!(
-                    "This session's last turn was interrupted when the runtime stopped unexpectedly ({}). It was not continued automatically. Continue it with `jcode runtime recover continue {}`, leave it stopped with `jcode runtime recover leave {}`, or send a new message.",
+                    "This session's last turn was interrupted when the runtime stopped unexpectedly ({}). It was not continued automatically. Decide in /runtime, continue it with `jcode runtime recover continue {}`, leave it stopped with `jcode runtime recover leave {}`, or send a new message.",
                     match item.cause {
                         crate::workspace::runtime::RecoveryCause::UnexpectedExit => "unexpected exit",
                         crate::workspace::runtime::RecoveryCause::ForcedExit => "forced exit",
@@ -3362,6 +3367,27 @@ pub(in crate::tui::app) fn handle_server_event(
             app.set_status_notice(crate::message::input_shell_status_notice(&result));
             false
         }
+        ServerEvent::ScopedContextCreated {
+            source_session,
+            session_id,
+            kind,
+            ..
+        } => {
+            app.push_display_message(DisplayMessage::system(format!(
+                "Created {kind:?} context {session_id} from {source_session} with the reviewed grant-carry choice."
+            )));
+            false
+        }
+        ServerEvent::ScopedContextRejected { issue, .. } => {
+            finish_remote_split_launch(app);
+            app.pending_split_request = false;
+            app.pending_split_label = None;
+            app.push_display_message(DisplayMessage::error(format!(
+                "New context was not created ({:?}): {}. The source session is unchanged.",
+                issue.code, issue.detail
+            )));
+            true
+        }
         ServerEvent::SplitResponse {
             new_session_id,
             new_session_name,
@@ -3506,4 +3532,16 @@ fn runtime_activity_status_notice(message: &str) -> String {
         .trim()
         .trim_end_matches('.')
         .to_string()
+}
+
+/// Typed workspace codes reach this client as text through older error paths.
+/// Point at the human control that resolves them; the message is kept intact.
+fn workspace_error_guidance(message: &str) -> String {
+    if message.contains("NeedsGrantChoice") {
+        format!(
+            "{message}\nChoose whether direct grants carry over in /workspace → Sessions → n New context."
+        )
+    } else {
+        message.to_string()
+    }
 }

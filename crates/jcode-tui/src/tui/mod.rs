@@ -187,6 +187,9 @@ pub enum StartupContextAvailability {
 }
 
 pub trait TuiState {
+    fn draw_workspace_manager(&self, _frame: &mut Frame, _area: ratatui::layout::Rect) -> bool {
+        false
+    }
     fn draw_task_monitor(&self, _frame: &mut Frame, _area: ratatui::layout::Rect) -> bool {
         false
     }

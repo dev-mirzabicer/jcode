@@ -1324,6 +1324,42 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Send a workspace-management request whose ID was reserved and
+    /// correlated first. Administrative only: never a conversation turn.
+    pub async fn send_reserved_workspace_request(&self, request: Request) -> Result<()> {
+        if !matches!(
+            &request,
+            Request::WorkspaceProbe { .. }
+                | Request::Workspace { .. }
+                | Request::PrimaryControlProbe { .. }
+                | Request::PrimaryLocation { .. }
+                | Request::PrimaryLaunchProbe { .. }
+                | Request::PrimaryLaunch { .. }
+                | Request::RuntimeProbe { .. }
+                | Request::RuntimeControl { .. }
+        ) {
+            anyhow::bail!("Workspace sender rejected a non-management request");
+        }
+        self.send_request(request).await
+    }
+
+    /// Create a Clear/Split/Transfer context with a reviewed grant-carry choice.
+    pub async fn scoped_context(
+        &mut self,
+        kind: crate::workspace::NewContextKind,
+        grant_carry: crate::workspace::GrantCarryChoice,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ScopedContext {
+            id,
+            kind,
+            grant_carry,
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// Send a context-control request whose ID was reserved and correlated first.
     pub async fn send_reserved_context_request(&self, request: Request) -> Result<()> {
         if !matches!(
