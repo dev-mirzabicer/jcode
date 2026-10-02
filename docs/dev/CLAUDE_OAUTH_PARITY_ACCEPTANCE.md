@@ -927,8 +927,10 @@ changed the behavior below. The current-behavior reference is
   unlock are gone.
 - **Operator notices** (R23, D17). Deliveries store the authority they ask
   for. Anthropic renders operator deliveries as `role: "system"` messages
-  where the model and the placement allow, OpenAI as `developer` messages,
-  every other runtime as the stored user text.
+  where the model and the placement allow. OpenAI's `developer` rendering is
+  implemented and tested but off by default until probe G6.3 has run
+  (`JCODE_OPENAI_OPERATOR_MESSAGES=1` enables it); until then OpenAI, like
+  every other runtime, receives the stored user text.
 - **Effort intent** (R24). Sessions store `Default` or `Explicit(level)`;
   restore, resume, model switches and fallbacks apply it for the current
   model. Stored strings from before migrate without changing the effective
@@ -990,7 +992,11 @@ Decisions taken from the results:
   thinking.
 - **Pending for the closeout.** G6.3 (an OpenAI `developer` item on GPT-5.6
   Sol over OAuth) was not run in WP-06: no OpenAI live calls were allowed.
-  OpenAI's `developer` rendering is selected by its deterministic tests.
+  OpenAI's `developer` rendering is covered by its deterministic tests and
+  stays off by default, so no GPT session's wire form changed without the
+  probe. To run G6.3 and the GPT journey with it, set
+  `JCODE_OPENAI_OPERATOR_MESSAGES=1`; if they pass, set
+  `OPENAI_OPERATOR_MESSAGES_DEFAULT` to `true`.
 
 ## WP-06 deterministic evidence
 

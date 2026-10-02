@@ -99,11 +99,34 @@ fn orphan_tool_output_to_user_message(item: &Value, missing_output: &str) -> Opt
 }
 
 /// Whether jcode sends operator notices to OpenAI Responses routes as
-/// `developer` messages. The Responses API documents the role; acceptance and
-/// caching on the ChatGPT OAuth (Codex) backend are decided by live probe
-/// G6.3 (INT-01/WP-06). When this is `false`, OpenAI receives every notice as
-/// the stored user-role delivery text, as before WP-06.
-pub const OPENAI_OPERATOR_MESSAGES: bool = true;
+/// `developer` messages when nothing overrides it. The Responses API
+/// documents the role, but acceptance and caching on the ChatGPT OAuth
+/// (Codex) backend are decided by live probe G6.3 (INT-01/WP-06), which has
+/// not run yet. Until it has, the default is the stored user-role delivery
+/// text, exactly as before WP-06; set this to `true` once G6.3 passes.
+pub const OPENAI_OPERATOR_MESSAGES_DEFAULT: bool = false;
+
+/// The process switch for [`OPENAI_OPERATOR_MESSAGES_DEFAULT`]:
+/// `JCODE_OPENAI_OPERATOR_MESSAGES=1` turns the `developer` rendering on (for
+/// the probe and acceptance runs), `0` turns it off.
+pub const OPENAI_OPERATOR_MESSAGES_ENV: &str = "JCODE_OPENAI_OPERATOR_MESSAGES";
+
+/// Whether operator notices go to OpenAI Responses routes as `developer`
+/// messages in this process.
+pub fn openai_operator_messages() -> bool {
+    operator_messages_setting(std::env::var(OPENAI_OPERATOR_MESSAGES_ENV).ok().as_deref())
+}
+
+fn operator_messages_setting(value: Option<&str>) -> bool {
+    match value
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("1" | "true" | "on") => true,
+        Some("0" | "false" | "off") => false,
+        _ => OPENAI_OPERATOR_MESSAGES_DEFAULT,
+    }
+}
 
 pub fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     build_responses_input_with_logger(messages, |_, _| {})
@@ -927,6 +950,23 @@ mod tests {
     /// the bug was that this whole request got rejected, so the guarantee is
     /// worth asserting on the real tool payload, including after the strict
     /// pass runs on top.
+    #[test]
+    fn the_developer_rendering_follows_the_process_switch() {
+        // Without a recognized setting the default decides.
+        for unset in [None, Some("unexpected")] {
+            assert_eq!(
+                operator_messages_setting(unset),
+                OPENAI_OPERATOR_MESSAGES_DEFAULT
+            );
+        }
+        for on in ["1", "true", " ON "] {
+            assert!(operator_messages_setting(Some(on)), "{on}");
+        }
+        for off in ["0", "false", "off"] {
+            assert!(!operator_messages_setting(Some(off)), "{off}");
+        }
+    }
+
     #[test]
     fn an_operator_notice_is_a_developer_message_in_place() {
         let notice = ChatMessage {

@@ -69,7 +69,12 @@ renders it natively:
   after an assistant message, for example), and on every other model, the
   notice is the stored user-role text, exactly as before. Adjacent notices
   are adjacent system messages.
-- **OpenAI Responses.** A `developer` message in place.
+- **OpenAI Responses.** A `developer` message in place, once enabled. The
+  rendering is implemented and off by default
+  (`OPENAI_OPERATOR_MESSAGES_DEFAULT` in `jcode-provider-openai`) until the
+  live probe on the ChatGPT OAuth backend has run;
+  `JCODE_OPENAI_OPERATOR_MESSAGES=1` turns it on for a process. While it is
+  off, OpenAI receives the stored user-role text.
 - **Every other runtime.** The stored user-role `<system-reminder>` text.
 
 The rendering is a pure function of the stored history and the model's

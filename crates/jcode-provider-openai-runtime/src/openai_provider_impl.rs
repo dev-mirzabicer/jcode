@@ -690,7 +690,7 @@ impl Provider for OpenAIProvider {
     /// ChatGPT web conversation route has no such channel and keeps the
     /// stored user text.
     fn renders_operator_notices(&self) -> bool {
-        jcode_provider_openai::request::OPENAI_OPERATOR_MESSAGES
+        jcode_provider_openai::request::openai_operator_messages()
             && !is_chatgpt_web_model(&self.model())
     }
 
