@@ -24,6 +24,12 @@ A failed start remains a reported failure, not an optimistic Running result.
 
 Ordinary TUI, delegation, ACP and keepalive auto-spawn paths consult intentional
 Stop under the same spawn lock. They cannot undo it to deliver a notification.
+When the namespace has an installed login service (macOS), Start and automatic
+spawn ask that service to run instead of spawning a competing daemon.
+
+Status also reports, when the runtime supports `runtime_supervision_v1`, whether
+the login service launched it, the power assertion state and any turns awaiting a
+recovery decision, plus the login service registration on macOS.
 
 ## Review and confirm Stop
 
@@ -71,6 +77,94 @@ the runtime retries observation automatically. If the diagnostic itself cannot b
 persisted, live inspection reports the storage failure rather than healthy waiting.
 Repairing observation/storage does not replay a command or automatically escalate Stop.
 
+## Restart
+
+```sh
+jcode runtime restart
+jcode --socket PATH runtime confirm REVIEW_UUID --request REQUEST_UUID
+jcode runtime wait OPERATION_UUID --timeout-seconds 120
+```
+
+Restart uses the same review, options, confirmation and quiescence as Stop, then
+replaces the runtime instead of leaving it stopped. It never records an
+intentional Stop. Primary turns it interrupts continue once in the new runtime
+through ordinary durable input; idle and human-waiting sessions stay idle; no
+completed tool effect is replayed. Under the login service the process image is
+replaced in place. An unmanaged runtime with an installed service hands the
+namespace to that service; otherwise it replaces itself in place. Wait reports
+success only when a new runtime incarnation answers. `runtime change` keeps a
+restart a restart.
+
+Selfdev and `server reload` reloads use the same principle: before exec the
+runtime validates the replacement binary, interrupts every primary turn at a
+reload boundary, waits for actual terminal persistence, child/background
+quiescence and Session checkpoints, and records a durable handoff. A deadline or
+failure keeps the current runtime serving and continues the interrupted turns
+there; it is never permission to exec with unsettled work.
+
+## Recover after an unexpected exit
+
+If the runtime ends without a verified Stop, restart or reload (crash, SIGKILL,
+power loss, forced exit, or termination by the system), the next start does not
+resume interrupted turns on its own. Each interrupted primary turn becomes a
+recovery item:
+
+```sh
+jcode runtime recover
+jcode runtime recover continue RECOVERY_UUID
+jcode runtime recover leave RECOVERY_UUID
+```
+
+Listing shows the cause, the session and any unfinished execution of that session
+(including commands still running under their own owner, which must not be
+repeated). Continue delivers one continuation turn through ordinary durable input
+and tells the agent to check retained results before repeating any effect. Leave
+keeps the turn stopped. A decision binds to the item revision and is recorded
+exactly once; retry an uncertain reply with `--request UUID` from the first
+attempt. Sending a new message to the session also resolves its item: the message
+is delivered normally and no stale continuation follows it. While an item is
+unresolved, automatic wakes for that session (background completions, schedules)
+stay durable but are not delivered. Clients show the pending item; they never
+infer a continuation from the transcript.
+
+External SIGTERM (logout, service unload, `kill`) enters a graceful Interrupt that
+preserves supported native commands, bounded by 20 seconds. It does not record an
+intentional Stop, so the next login starts the runtime normally; its interrupted
+turns become recovery items.
+
+## Login service (macOS)
+
+```sh
+jcode runtime service status
+jcode runtime service install
+jcode runtime service install --confirm DIGEST
+jcode runtime service uninstall
+```
+
+Install first prints the exact plan without writing anything: the namespaced
+LaunchAgent label and definition path, the stable launcher
+(`~/.jcode/builds/shared-server/jcode serve --socket SOCKET`), its environment
+(the installer's existing absolute PATH entries, socket and state-root variables;
+no credentials), log file, restart throttle and exit timeout. Installing writes and
+loads exactly the confirmed plan. The service starts the runtime at login unless
+it was intentionally stopped, restarts it after an unexpected exit (exit-based, so
+an intentional Stop is never undone), and leaves surviving native task processes
+alone. An already running unmanaged runtime keeps serving; the service waits and
+takes over when it exits, for example after a reviewed restart. Uninstall is
+refused while the supervised runtime runs; stop it first. Other platforms report
+login-service supervision as unsupported.
+
+## Power
+
+With `power.prevent_sleep_while_streaming` enabled (the default), the runtime
+holds a system-sleep assertion while it owns active work: primary turns,
+executions, preparations and background tasks. Attached clients, idle sessions and
+human waits do not count. A native command that runs longer than a few seconds
+holds its own assertion, so a command that survives a runtime Stop still keeps the
+machine awake until it settles. The switch is read on every reconcile.
+`JCODE_DISABLE_POWER_INHIBIT` disables it. Explicit sleep, shutdown and power loss
+are not prevented.
+
 ## Cancel, change, retry and escalate
 
 Inspection returns the current operation revision. Controls bind to it:
@@ -117,17 +211,20 @@ intentionally stopped runtime. Inspection and result reading after explicit Star
 do not repeat the command. Foreign-runtime and legacy-unbound delivery provenance
 remain explicit rather than inferred from matching Session IDs or path strings.
 
-Login-service supervision, selected crash-inference recovery and stronger planned
-restart controls belong to the subsequent runtime-service work. External SIGTERM
-and temporary-server lifecycle policies are not this reviewed Stop command.
-[Activated-runtime evidence](dev/RUNTIME_SHUTDOWN_ACCEPTANCE.md) is recorded
+Temporary-server lifecycle policies are separate from these controls.
+[Activated-runtime evidence](dev/RUNTIME_SHUTDOWN_ACCEPTANCE.md) and
+[supervision evidence](dev/RUNTIME_SUPERVISION_ACCEPTANCE.md) are recorded
 separately from implementation approval and later full C01 client acceptance.
-See [the backend guide](dev/RUNTIME_SHUTDOWN.md) for ownership, journal, namespace,
-failure and verification details.
+See the [shutdown](dev/RUNTIME_SHUTDOWN.md) and
+[supervision](dev/RUNTIME_SUPERVISION.md) backend guides for ownership, journal,
+namespace, failure and verification details.
 
 ## Harness and SDK clients
 
-Harness v1.11 advertises `runtime_lifecycle_v1`. Rust `runtime_control` and
+Harness v1.12 advertises `runtime_lifecycle_v1` and `runtime_supervision_v1`.
+Restart reviews, `supervision` status and `recover` decisions require the latter
+and are refused before sending by clients connected to an older runtime. Rust
+`runtime_control` and
 TypeScript `runtimeControl` probe the native version before sending control and
 validate the returned review/request/operation identities, not just transport IDs.
 They require no Session attachment. Use `ensure_runtime: false` / `ensureRuntime:
