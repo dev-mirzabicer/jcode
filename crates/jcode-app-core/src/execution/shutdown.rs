@@ -313,6 +313,15 @@ impl OwnedExecutions {
         tokio::time::timeout(timeout, async {
             let (record, _) = self.owned(id)?;
             if record.state.terminal() { return self.require_terminal(id); }
+            // Work recorded by an earlier runtime image whose process is gone has
+            // no control endpoint to answer. Publish the established evidence-
+            // based interruption receipt instead of signalling a guessed target;
+            // a still-live owner (a handed-off native worker) is controlled below.
+            if record.owner != self.runtime.endpoint.id
+                && self.store.recover_lost_owner(id).await?.is_some_and(|record| record.state.terminal())
+            {
+                return self.require_terminal(id);
+            }
             if record.tool == "workspace_clone" {
                 let request = record.message_id.parse()?;
                 let workspace = crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());

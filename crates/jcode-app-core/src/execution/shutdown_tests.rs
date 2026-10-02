@@ -509,68 +509,81 @@ fn actual_predecessor_worker_survives_and_accepts_compatible_stop() -> Result<()
     Ok(())
 }
 
-/// Power policy must not hold an assertion for a historical row whose owner
-/// runtime is gone, while Stop review still accounts for it.
+/// Child-process fixture: an earlier runtime records an in-process execution
+/// and exits without settling it, like a runtime image replaced mid-tool.
+#[tokio::test]
+async fn lost_owner_fixture() -> Result<()> {
+    let Ok(out) = std::env::var("JCODE_WP09_LOST_OWNER") else {
+        return Ok(());
+    };
+    let root = crate::storage::jcode_dir()?;
+    let lifecycle = stop_store(&root)?;
+    let owner = lifecycle.claim()?;
+    let _owned = OwnedExecutions::bind(&root, &owner).await?;
+    let store = ExecutionStore::open(&root)?;
+    let endpoint = runtime::ensure_running(&store).await?;
+    let invocation = crate::execution::Invocation {
+        session_id: "historical-session".into(),
+        message_id: "fixture".into(),
+        call_path: vec!["historical".into()],
+        tool: "fixture".into(),
+        input: serde_json::json!({}),
+        working_dir: None,
+        received_result_digest: None,
+    };
+    let crate::execution::PreparedInvocation::New(record) =
+        store.prepare(&invocation, &endpoint.endpoint.id)?
+    else {
+        anyhow::bail!("Fixture replayed");
+    };
+    store.start(&record.id, &endpoint.endpoint.id)?;
+    std::fs::write(out, &record.id)?;
+    std::process::exit(0)
+}
+
+/// A historical row whose owner image is gone: power policy does not count it,
+/// Stop review accounts for it, and Stop settles it instead of blocking.
 #[test]
-fn running_excludes_historical_rows_whose_owner_is_gone() -> Result<()> {
+fn historical_rows_whose_owner_is_gone_neither_run_nor_block_stop() -> Result<()> {
     let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new()?;
     tokio::runtime::Runtime::new()?.block_on(async {
+        let out = sandbox.root().join("lost-run-id");
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "execution::shutdown::tests::lost_owner_fixture",
+                "--nocapture",
+            ])
+            .env("JCODE_WP09_LOST_OWNER", &out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?;
+        ensure!(status.success(), "Earlier runtime fixture failed: {status}");
+        let id = std::fs::read_to_string(&out)?;
         let lifecycle = stop_store(sandbox.root())?;
         let owner = lifecycle.claim()?;
         let owned = OwnedExecutions::bind(sandbox.root(), &owner).await?;
-        let store = crate::execution::ExecutionStore::open(sandbox.root())?;
-        let runtimes = store.root().join("runtimes");
-        crate::storage::ensure_dir(&runtimes)?;
-        let lease_path = runtimes.join("historical.lease");
-        let lease = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&lease_path)?;
-        lease.try_lock()?;
-        let previous = uuid::Uuid::new_v4().simple().to_string();
-        store.register_runtime(&crate::execution::RuntimeEndpoint::new(
-            previous.clone(),
-            runtimes.join("historical.sock"),
-            lease_path,
-            "c".repeat(64),
-        ))?;
-        store.bind_runtime_namespace(&previous, owner.namespace())?;
-        let invocation = crate::execution::Invocation {
-            session_id: "historical-session".into(),
-            message_id: "fixture".into(),
-            call_path: vec!["historical".into()],
-            tool: "fixture".into(),
-            input: serde_json::json!({}),
-            working_dir: None,
-            received_result_digest: None,
-        };
-        let crate::execution::PreparedInvocation::New(record) =
-            store.prepare(&invocation, &previous)?
-        else {
-            anyhow::bail!("Fixture replayed");
-        };
-        store.start(&record.id, &previous)?;
-        // While a previous owner still holds its lease the inventory refuses
-        // to acquire its work; power policy then keeps its assertion.
         ensure!(
-            owned.running().await.is_err(),
-            "A live previous owner's work must not be silently dropped"
-        );
-        // The previous runtime's process is gone: its lease is released while
-        // its row stays unresolved.
-        drop(lease);
-        ensure!(
-            owned
-                .inventory()
-                .await?
-                .iter()
-                .any(|work| work.id == record.id),
+            owned.inventory().await?.iter().any(|work| work.id == id),
             "Stop review must still account for the unresolved row"
         );
         ensure!(
-            !owned.running().await?.contains(&record.id),
+            !owned.running().await?.contains(&id),
             "A row whose owner is gone runs nothing"
+        );
+        // Stop settles it through the evidence-based lost-owner receipt; it
+        // does not block on an endpoint that can never answer.
+        owned.stop(&id, false, Duration::from_secs(10)).await?;
+        let store = ExecutionStore::open(sandbox.root())?;
+        let settled = store.inspect(&id)?.context("row")?;
+        ensure!(
+            settled.state == crate::execution::RunState::Interrupted,
+            "Lost-owner row was not settled as interrupted: {:?}",
+            settled.state
+        );
+        ensure!(
+            !owned.inventory().await?.iter().any(|work| work.id == id),
+            "A settled row leaves the Stop inventory"
         );
         Ok(())
     })

@@ -64,6 +64,19 @@ def provider(self):
     f.posts.append({'last': last, 'body': json.dumps(body)})
     (f.ROOT / 'posts.json').write_text(json.dumps(f.posts, indent=2))
     self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+    if 'FETCH:' in last:
+        # An in-process tool call held open by the fixture: a crash during it
+        # leaves an execution row whose owner image is gone.
+        tag = last.rsplit('FETCH:', 1)[1].split()[0]
+        call = {'index': 0, 'id': 'call_' + tag.replace('-', '_'), 'type': 'function', 'function': {
+            'name': 'webfetch', 'arguments': json.dumps({'url': f'http://127.0.0.1:{f.http.server_port}/hold/{tag}', 'timeout': 120})}}
+        try:
+            for delta, reason in [({'tool_calls': [call]}, None), ({}, 'tool_calls')]:
+                self.wfile.write(('data: ' + json.dumps({'id': 'fixture', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}) + '\n\n').encode())
+            self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
+        except OSError:
+            pass
+        return
     if 'HOLD:' in last:
         tag = last.rsplit('HOLD:', 1)[1].split()[0]
         limit = time.monotonic() + 120
@@ -76,6 +89,23 @@ def provider(self):
     except OSError:
         pass  # The interrupted runtime already closed this stream.
 f.FixtureProvider.do_POST = provider
+
+original_get = f.FixtureProvider.do_GET
+def held_get(self):
+    if not self.path.startswith('/hold/'):
+        return original_get(self)
+    tag = self.path.rsplit('/', 1)[1]
+    (f.ROOT / ('fetching-' + tag)).write_text('fetching')
+    limit = time.monotonic() + 120
+    while not (f.ROOT / ('release-' + tag)).exists() and time.monotonic() < limit:
+        time.sleep(0.05)
+    body = b'held fixture page'
+    try:
+        self.send_response(200); self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+    except OSError:
+        pass
+f.FixtureProvider.do_GET = held_get
 
 def wait(predicate, label_, seconds=40):
     limit = time.monotonic() + seconds
@@ -283,7 +313,8 @@ try:
     assert shell_client.execution('background', live_run)['accepted']
     shell_client.close()
     base = len(f.posts)
-    submit(worker, 'HOLD:crash-a work'); submit(peer, 'HOLD:crash-b work')
+    submit(worker, 'FETCH:crash-a work'); submit(peer, 'HOLD:crash-b work')
+    wait(lambda: (f.ROOT / 'fetching-crash-a').exists(), 'worker turn inside an in-process webfetch')
     settle_posts(base + 2, 1)
     p1.send_signal(signal.SIGKILL); p1.wait(timeout=10)
     (f.ROOT / 'release-crash-a').write_text('release'); (f.ROOT / 'release-crash-b').write_text('release')
@@ -302,6 +333,10 @@ try:
         wait(lambda: db.execute('SELECT state FROM runs WHERE id=?', (live_run,)).fetchone()[0] == 'completed', 'live command completes under its own owner')
     assert effects.read_text() == 'x', 'the surviving command ran exactly once'
     outcomes['crash_reports_live_native_owner'] = live_run
+    # The in-process webfetch died with its runtime image: listed, not live.
+    lost = [e for e in worker_item.get('executions', []) if e['tool'] == 'webfetch']
+    assert lost and not lost[0]['live_owner'], worker_item
+    lost_run = lost[0]['id']
     results = []
     def decide():
         results.append(run('runtime', 'recover', 'continue', worker_item['id'], '--revision', str(worker_item['revision']), '--json', success=False))
@@ -309,7 +344,7 @@ try:
     [t.start() for t in racers]; [t.join() for t in racers]
     assert sorted(r.returncode == 0 for r in results) == [False, True], [(r.returncode, r.stderr[-400:]) for r in results]
     settle_posts(base + 3)
-    assert 'the user chose to continue it' in f.posts[-1]['body'] and 'HOLD:crash-a' in f.posts[-1]['body']
+    assert 'the user chose to continue it' in f.posts[-1]['body'] and 'FETCH:crash-a' in f.posts[-1]['body']
     human, _ = submit(peer, 'human message after crash')
     wait(lambda: input_state(peer, human) == 'committed' and input_state(peer, wake) == 'committed', 'human then deferred wake delivered')
     peer_item = next(item for item in recoveries() if item['session'] == peer)
@@ -325,8 +360,14 @@ try:
     count = len(f.posts)
     submit(worker, 'HOLD:sigterm work')
     settle_posts(count + 1, 1)
+    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
+        lost_state = db.execute('SELECT state FROM runs WHERE id=?', (lost_run,)).fetchone()[0]
     p2.send_signal(signal.SIGTERM)
     assert p2.wait(timeout=40) == 0, 'graceful external termination exits successfully'
+    with sqlite3.connect(f'file:{f.home}/execution/index.sqlite?mode=ro', uri=True) as db:
+        settled = db.execute('SELECT state FROM runs WHERE id=?', (lost_run,)).fetchone()[0]
+    assert settled == 'interrupted', (lost_state, settled)
+    outcomes['shutdown_settles_lost_owner_row'] = {'before': lost_state, 'after': settled}
     (f.ROOT / 'release-sigterm').write_text('release')
     offline = status()
     assert not offline['response']['value']['desired_stopped'], offline
