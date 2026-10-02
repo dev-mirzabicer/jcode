@@ -134,10 +134,17 @@ pub fn plan(socket: &Path, program: &Path, path: &str) -> Result<ServicePlan> {
     );
     environment.insert(SUPERVISED_ENV.to_string(), label.clone());
     environment.insert("JCODE_DEFERRED_AUTH_BOOTSTRAP".to_string(), "1".to_string());
+    // Path selectors only: they decide the namespace, durable state, config
+    // and credential-store locations exactly as the installing shell does.
     for key in [
+        "HOME",
         "JCODE_HOME",
         "JCODE_RUNTIME_DIR",
         "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
         "TMPDIR",
     ] {
         if let Ok(value) = std::env::var(key)

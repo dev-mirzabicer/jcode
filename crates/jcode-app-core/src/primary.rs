@@ -392,7 +392,12 @@ impl PrimaryHost {
             "primary-restore",
             Some(session.into()),
         )?;
-        let owner = self.claim(session)?;
+        let (owner, acquired) = self.claim_tracked(session)?;
+        let release = || {
+            if acquired {
+                self.owners.lock().expect("primary owners").remove(session);
+            }
+        };
         let result: Result<_> = crate::runtime_lifecycle::admission::scope(permit.clone(), async {
             let stored = crate::session::Session::load_startup_stub(session)?;
             if location_repair {
@@ -427,7 +432,7 @@ impl PrimaryHost {
                 if !crate::runtime_lifecycle::admission::sync_scope(permit.clone(), || {
                     self.accepts_prepared_work()
                 }) {
-                    self.owners.lock().expect("primary owners").remove(session);
+                    release();
                     anyhow::bail!(
                         "Runtime stopped before restored primary publication; saved Session and input remain retained"
                     );
@@ -442,7 +447,7 @@ impl PrimaryHost {
                 Ok(Some(previous))
             }
             Err(error) => {
-                self.owners.lock().expect("primary owners").remove(session);
+                release();
                 Err(error)
             }
         }
@@ -547,14 +552,22 @@ impl PrimaryHost {
         self.claim(session).map(|_| ())
     }
     pub(crate) fn claim(&self, session: &str) -> Result<Arc<PrimaryLease>> {
+        self.claim_tracked(session).map(|(owner, _)| owner)
+    }
+
+    /// Claim the owner lease and report whether this call acquired it. Only
+    /// the acquiring caller may release a failed claim: another holder (for
+    /// example the input drain) keeps its lease, and removing its map entry
+    /// would make the next restore in this runtime contend with itself.
+    fn claim_tracked(&self, session: &str) -> Result<(Arc<PrimaryLease>, bool)> {
         let mut owners = self.owners.lock().expect("primary owners");
         if let Some(owner) = owners.get(session) {
-            return Ok(owner.clone());
+            return Ok((owner.clone(), false));
         }
         let owner = Arc::new(PrimaryLease::acquire(session)?);
         owner.host.store(self.ownership_id, Ordering::Release);
         owners.insert(session.into(), owner.clone());
-        Ok(owner)
+        Ok((owner, true))
     }
     pub(crate) fn adopt_owner(&self, agent: &Agent) -> Result<Arc<PrimaryLease>> {
         let session = agent.session_id();

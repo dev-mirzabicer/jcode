@@ -434,6 +434,21 @@ async fn fail_reload(
     }
 }
 
+/// Failed-reload handling without a runtime admission reservation, for
+/// mechanism tests of the local continuation path.
+#[cfg(test)]
+pub(super) async fn fail_reload_for_test(
+    signal: &crate::server::ReloadSignal,
+    sessions: &SessionAgents,
+    error: &anyhow::Error,
+) {
+    let admission = ReloadAdmission {
+        reservation: None,
+        sessions: Arc::downgrade(sessions),
+    };
+    fail_reload(signal, sessions, admission, error).await;
+}
+
 #[cfg(test)]
 #[path = "reload_tests.rs"]
 mod reload_tests;

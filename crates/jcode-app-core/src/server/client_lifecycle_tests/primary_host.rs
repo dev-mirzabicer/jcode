@@ -1659,3 +1659,96 @@ fn only_planned_transitions_retain_interrupted_turn_records() -> Result<()> {
         host.shutdown().await
     })
 }
+
+/// A reload that interrupted work and then could not replace the runtime keeps
+/// serving: it continues exactly the interrupted turn locally, once, through
+/// durable input, settles its record and creates no crash recovery.
+#[test]
+fn failed_reload_after_interruption_continues_the_turn_locally_once() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let recorder = Arc::new(DurableInputProvider::default());
+        let provider: Arc<dyn Provider> = recorder.clone();
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session = agent.lock().await.session_id().to_owned();
+        agent.lock().await.startup_context_session_mut().save()?;
+        let host = Arc::new(crate::primary::PrimaryHost::new(HashMap::from([(
+            session.clone(),
+            agent.clone(),
+        )])));
+        let (owner, _) = bind_recovery_fixture(&host, &session)?;
+        // Only the fixture's prior-incarnation item exists; resolve it so the
+        // session is eligible for planned continuation.
+        for item in owner.recovery().unresolved(&session)? {
+            owner.recovery().resolve(
+                item.id,
+                item.revision,
+                crate::workspace::RequestId::new(),
+                crate::workspace::runtime::RecoveryResolution::LeftStopped {},
+            )?;
+        }
+        host.configure_input_delivery(status_fixture(&session));
+        host.retain_interrupted_turns(true);
+        let admission = host.admit(&session, 9, agent.clone())?;
+        host.start(
+            admission,
+            |_| std::future::pending::<Result<Option<String>>>(),
+            |_| async {},
+        );
+        host.interrupt_runtime_with_cause(jcode_tool_types::StopCause::ReloadQuiescence)
+            .await?;
+        assert_eq!(host.retained_turn_records()?.len(), 1);
+        let signal = crate::server::ReloadSignal {
+            hash: "fixture".into(),
+            triggering_session: None,
+            prefer_selfdev_binary: false,
+            request_id: "reload-failed-fixture".into(),
+        };
+        crate::server::reload::fail_reload_for_test(
+            &signal,
+            &host,
+            &anyhow::anyhow!("checkpoint failed"),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if !recorder.snapshots.lock().unwrap().is_empty()
+                    && host.processing(&session).is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let calls = recorder.snapshots.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "exactly one local continuation");
+        let text = calls[0]
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("interrupted by a server reload"), "{text}");
+        assert!(
+            owner.turns().own_records()?.is_empty(),
+            "settled after the failed reload"
+        );
+        assert!(
+            owner.recovery().unresolved(&session)?.is_empty(),
+            "a failed reload is not a crash"
+        );
+        assert!(
+            crate::server::reload_recovery::pending_records()?.is_empty(),
+            "intent retired"
+        );
+        host.shutdown().await
+    })
+}
