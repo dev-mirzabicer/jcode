@@ -109,6 +109,11 @@ installed login service (unmanaged runtime: kickstart, then exit 0) or replaces
 its image with the shared-server candidate and its original arguments. Failure
 exits 43 with durable records intact. `runtime change` preserves the destination.
 
+
+Each claim of the namespace starts with no current operation: the previous
+incarnation's last operation (for example its `Stopped` restart receipt) stays
+inspectable by ID but cannot fence the new incarnation's admission, which a
+later reconcile (such as a rejected stale Begin) would otherwise seal.
 ## External signal
 
 Unix SIGTERM calls `RuntimeLifecycle::begin_external_signal`: one atomic
@@ -168,7 +173,14 @@ copied. `RunAtLoad`,
 
 A supervised launch waits for the daemon lock instead of failing beside a live
 unmanaged runtime, then exits 0 without starting if the journal records an
-intentional Stop. Intentional Stop and SIGTERM exits are successful, so launchd
+intentional Stop. A process that actually waited may have been loaded long
+before it takes over, so if its launcher route (the shared-server link) now
+resolves to a different binary it replaces itself with that binary, keeping the
+PID launchd supervises, before serving. The supervision marker
+(`JCODE_RUNTIME_SUPERVISED`) describes the runtime process only: it is read once
+and removed from the environment, so tools, command workers and any `serve`
+they start are unsupervised; the runtime's own image replacements (reload,
+restart, launcher refresh) pass it on explicitly. Intentional Stop and SIGTERM exits are successful, so launchd
 does not relaunch them; crashes and forced exits are unsuccessful and relaunch.
 Explicit Start clears desired Stop under the spawn lock, then kickstarts the
 registered job and waits for readiness; automatic spawn does the same only when

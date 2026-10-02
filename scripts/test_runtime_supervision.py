@@ -7,6 +7,7 @@ LaunchAgent with power-assertion observation. Every daemon, launchd job and
 file belongs to this fixture; nothing touches the real runtime or its service.
 Run via scripts/run_isolated_test.py with --binary and --artifact-dir.
 """
+import shutil
 import os
 if not os.environ.get('JCODE_TEST_STATE_ROOT'):
     raise SystemExit('Use scripts/run_isolated_test.py')
@@ -394,6 +395,12 @@ try:
         waiting = wait(service_pid, 'service process waiting for the daemon lock')
         assert p3.poll() is None and connectable(), 'install never stops the running runtime'
         outcomes['service_waits_behind_unmanaged'] = waiting
+        # A newer build lands on the launcher route while the service waits:
+        # the takeover must serve it, not the image loaded at install.
+        next_binary = channel / 'jcode-next'
+        shutil.copy2(f.BIN, next_binary)
+        retarget = channel / 'jcode.retarget'
+        os.symlink(next_binary, retarget); os.replace(retarget, broken_link)
         base = len(f.posts)
         submit(worker, 'HOLD:handoff work')
         settle_posts(base + 1, 1)
@@ -404,9 +411,34 @@ try:
         assert p3.wait(timeout=20) == 0, 'unmanaged runtime hands over and exits cleanly'
         supervised = status()
         assert supervised['supervision']['supervised'], supervised
+        assert service_pid() == waiting, 'the launchd job keeps its PID across the image refresh'
+        images = subprocess.run(['lsof', '-a', '-p', str(waiting), '-d', 'txt', '-Fn'], capture_output=True, text=True).stdout
+        assert f'n{next_binary.resolve()}' in images.splitlines()[:6] or f'n{next_binary}' in images.splitlines()[:6], images[:600]
+        outcomes['takeover_serves_current_launcher_target'] = str(next_binary)
         settle_posts(held_count + 1, 6)
         assert 'HOLD:handoff' in f.posts[-1]['body'] and 'interrupted' in f.posts[-1]['body']
         outcomes['restart_handoff_to_service'] = True
+        # The supervision marker describes the runtime process only; its tools
+        # and anything they spawn (including another `serve`) are unsupervised.
+        probe = Client(); probe.subscribe(worker)
+        probe.send('input_shell', command=f'printenv JCODE_RUNTIME_SUPERVISED > {f.ROOT}/marker-env.txt; echo done > {f.ROOT}/marker-done')
+        wait(lambda: (f.ROOT / 'marker-done').exists(), 'tool environment probe')
+        probe.close()
+        assert (f.ROOT / 'marker-env.txt').read_text().strip() == '', 'tools must not inherit the supervision marker'
+        outcomes['supervision_marker_not_inherited'] = True
+        # A review made stale by new work fails at confirmation. In the
+        # restarted incarnation that failure must not seal admission.
+        stale = cli('stop')
+        base = len(f.posts)
+        submit(worker, 'HOLD:stale work')
+        settle_posts(base + 1, 1)
+        refused = run('runtime', 'confirm', stale['response']['value']['id'], '--request', stale['confirm_request'], '--json', success=False)
+        assert refused.returncode != 0 and 'stale' in refused.stderr, refused.stderr[-400:]
+        (f.ROOT / 'release-stale').write_text('release')
+        follow, _ = submit(worker, 'after stale review')
+        wait(lambda: input_state(worker, follow) == 'committed', 'restarted runtime still admits work after a stale Begin')
+        assert not status()['response']['value']['desired_stopped']
+        outcomes['stale_begin_does_not_seal_restarted_runtime'] = True
 
         progress('service-competition')
         competitor = subprocess.run(f.args, env=f.env, capture_output=True, text=True, timeout=30)
@@ -516,24 +548,36 @@ finally:
     progress('cleanup')
     (f.ROOT / 'survivor-release').write_text('cleanup release')
     (f.ROOT / 'live-release').write_text('cleanup release')
-    for tag in ['failed-reload', 'reload', 'restart', 'crash-a', 'crash-b', 'sigterm', 'handoff', 'power', 'switch']:
+    for tag in ['failed-reload', 'reload', 'restart', 'crash-a', 'crash-b', 'sigterm', 'handoff', 'power', 'switch', 'stale']:
         (f.ROOT / ('release-' + tag)).write_text('cleanup release')
     for client in list(clients):
         try: client.close()
         except Exception: pass
-    try:
-        if connectable():
-            operation = reviewed('stop', '--strategy', 'interrupt')
-            cli('wait', operation['id'], '--timeout-seconds', '60')
-        if label:
+    # Each step runs independently: a failed reviewed Stop (for example a
+    # review made stale by new work) must never leave the fixture job loaded.
+    for attempt in range(3):
+        try:
+            if connectable():
+                operation = reviewed('stop', '--strategy', 'interrupt')
+                cli('wait', operation['id'], '--timeout-seconds', '60')
+            break
+        except Exception as error:
+            if attempt == 2:
+                cleanup.append({'error': 'reviewed stop: ' + repr(error)})
+            time.sleep(1)
+    if label:
+        try:
             launchctl('bootout', f'gui/{uid}/{label}')
             definition = agents_dir / f'{label}.plist'
             if definition.exists():
                 definition.unlink()
+            deadline = time.monotonic() + 60
+            while launchctl('print', f'gui/{uid}/{label}').returncode == 0 and time.monotonic() < deadline:
+                time.sleep(0.5)
             assert launchctl('print', f'gui/{uid}/{label}').returncode != 0, 'fixture job unloaded'
             cleanup.append({'service_removed': label})
-    except Exception as error:
-        cleanup.append({'error': repr(error)})
+        except Exception as error:
+            cleanup.append({'error': 'service removal: ' + repr(error)})
     for proc in daemons:
         if proc.poll() is None:
             try: proc.wait(timeout=10)
