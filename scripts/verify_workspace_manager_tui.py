@@ -448,9 +448,10 @@ try:
     keys(tid, '1')
     def cycle_visibility(predicate, label):
         for _ in range(6):
-            keys(tid, 'h'); time.sleep(0.4)
-            state = manager(tid)
-            if not state['pending'] and predicate(state): return state
+            keys(tid, 'h')
+            # Judge each visibility only after its page has arrived.
+            state = until(tid, lambda s: not s['pending'] and not s['queued'], 'visibility page', 60)
+            if predicate(state): return state
         raise TimeoutError(label)
     cycle_visibility(lambda s: any(r['text'].startswith('C  tool-default') and 'Closed' in r['text'] for r in s['rows']), 'closed checkout under a visibility filter')
     frame(tid, 'w11-closed-filter', 'tool-default')
