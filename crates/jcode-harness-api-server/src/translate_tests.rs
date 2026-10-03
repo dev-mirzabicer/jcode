@@ -2103,3 +2103,86 @@ fn runtime_bridge_preserves_all_typed_controls_and_refuses_foreign_replies() {
         );
     }
 }
+
+#[test]
+fn workspace_catalog_bridge_negotiates_correlates_and_keeps_closeout_separate() {
+    let mut bridge = BridgeState::default();
+    let outbound = bridge.api_request_to_legacy(&json!({"id":60,"req":"workspace_probe"}));
+    let Outbound::Legacy(wire) = &outbound[0] else {
+        panic!()
+    };
+    assert_eq!(wire["type"], "workspace_probe");
+    let reply = bridge.legacy_event_to_api(&json!({"id":wire["id"],"type":"workspace_capabilities","catalog_version":1,"permissions_version":1,"checkout_version":1,"closeout_version":2,"management_version":1,"managed_rollout":false}));
+    assert_eq!(reply[0].reply_to, Some(60));
+    let ApiEvent::WorkspaceCapabilities { versions } = &reply[0].event else {
+        panic!("{:?}", reply[0].event)
+    };
+    assert_eq!(versions.management_version, Some(1));
+    // An older runtime without management support decodes as absent.
+    let outbound = bridge.api_request_to_legacy(&json!({"id":61,"req":"workspace_probe"}));
+    let Outbound::Legacy(wire) = &outbound[0] else {
+        panic!()
+    };
+    let reply = bridge.legacy_event_to_api(
+        &json!({"id":wire["id"],"type":"workspace_capabilities","catalog_version":1,"managed_rollout":false}),
+    );
+    let ApiEvent::WorkspaceCapabilities { versions } = &reply[0].event else {
+        panic!()
+    };
+    assert_eq!(versions.management_version, None);
+
+    let project = "12a99e11-e967-4a1e-a47c-0000000000aa";
+    let outbound = bridge.api_request_to_legacy(&json!({"id":62,"req":"workspace","request":{"action":"inspect","target":{"kind":"project","id":project}}}));
+    let Outbound::Legacy(wire) = &outbound[0] else {
+        panic!()
+    };
+    assert_eq!(wire["type"], "workspace");
+    assert_eq!(wire["request"]["action"], "inspect");
+    assert!(bridge.session_id.is_none() && bridge.pending_attach.is_none());
+    let entity = |id: &str| json!({"type":"workspace_response","id":wire["id"],"response":{"kind":"entity","value":{"kind":"project","value":{"id":id,"name":"p","state":"active","revision":1}}}});
+    let foreign = bridge.legacy_event_to_api(&entity("12a99e11-e967-4a1e-a47c-0000000000bb"));
+    assert!(matches!(foreign[0].event, ApiEvent::Error { .. }));
+
+    let outbound = bridge.api_request_to_legacy(&json!({"id":63,"req":"workspace","request":{"action":"inspect","target":{"kind":"project","id":project}}}));
+    let Outbound::Legacy(wire) = &outbound[0] else {
+        panic!()
+    };
+    let response = json!({"type":"workspace_response","id":wire["id"],"response":{"kind":"entity","value":{"kind":"project","value":{"id":project,"name":"p","state":"active","revision":1}}}});
+    let replies = bridge.legacy_event_to_api(&response);
+    assert_eq!(replies[0].reply_to, Some(63));
+    assert!(matches!(replies[0].event, ApiEvent::Workspace { .. }));
+    assert!(bridge.legacy_event_to_api(&response).is_empty());
+
+    // Closeout keeps its own negotiated route and reply envelope.
+    let rejected = bridge.api_request_to_legacy(&json!({"id":64,"req":"workspace","request":{"action":"closeout","request":{"action":"history","location":project}}}));
+    assert!(
+        rejected
+            .iter()
+            .all(|item| !matches!(item, Outbound::Legacy(_)))
+    );
+    let invalid = bridge.api_request_to_legacy(
+        &json!({"id":65,"req":"workspace","request":{"action":"apply","trusted":true}}),
+    );
+    assert!(
+        invalid
+            .iter()
+            .all(|item| !matches!(item, Outbound::Legacy(_)))
+    );
+}
+
+#[test]
+fn primary_control_capabilities_carry_session_inspection_version() {
+    let mut bridge = BridgeState::default();
+    let outbound = bridge.api_request_to_legacy(&json!({"id":70,"req":"primary_control_probe"}));
+    let Outbound::Legacy(wire) = &outbound[0] else {
+        panic!()
+    };
+    let reply = bridge.legacy_event_to_api(&json!({"type":"primary_control_capabilities","id":wire["id"],"input_version":1,"location_version":1,"location_enabled":false,"session_inspection_version":1}));
+    assert!(matches!(
+        reply[0].event,
+        ApiEvent::PrimaryControlCapabilities {
+            session_inspection_version: Some(1),
+            ..
+        }
+    ));
+}

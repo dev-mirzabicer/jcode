@@ -1,0 +1,653 @@
+[
+  {
+    "accepted": true,
+    "name": "inspect exact entity",
+    "request": {
+      "action": "inspect",
+      "target": {
+        "id": "7cdfb1c9-5c8a-470a-930c-58f9496edf79",
+        "kind": "project"
+      }
+    },
+    "response": {
+      "kind": "entity",
+      "value": {
+        "kind": "project",
+        "value": {
+          "id": "7cdfb1c9-5c8a-470a-930c-58f9496edf79",
+          "name": "p",
+          "revision": 1,
+          "state": "active"
+        }
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "inspect foreign entity",
+    "request": {
+      "action": "inspect",
+      "target": {
+        "id": "7cdfb1c9-5c8a-470a-930c-58f9496edf79",
+        "kind": "project"
+      }
+    },
+    "response": {
+      "kind": "entity",
+      "value": {
+        "kind": "project",
+        "value": {
+          "id": "7a4734a6-a1bc-4fa1-ad37-7bc434700630",
+          "name": "p",
+          "revision": 1,
+          "state": "active"
+        }
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "apply receipt",
+    "request": {
+      "action": "apply",
+      "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+      "review": "40c66bce-7cc9-4ccd-848f-a1131628174e"
+    },
+    "response": {
+      "kind": "receipt",
+      "value": {
+        "issues": [],
+        "operation": "c53036c7-68da-44ef-9372-a7626fd5cd92",
+        "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+        "revision": 2,
+        "targets": []
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "apply foreign receipt",
+    "request": {
+      "action": "apply",
+      "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+      "review": "40c66bce-7cc9-4ccd-848f-a1131628174e"
+    },
+    "response": {
+      "kind": "receipt",
+      "value": {
+        "issues": [],
+        "operation": "d4616cd7-f3ab-4ce0-9a0a-1e982a0a416a",
+        "request": "b40f2ab6-b9cd-41b9-8fa5-b744fc5a0823",
+        "revision": 2,
+        "targets": []
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "domain rejection",
+    "request": {
+      "action": "apply",
+      "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+      "review": "40c66bce-7cc9-4ccd-848f-a1131628174e"
+    },
+    "response": {
+      "kind": "error",
+      "value": {
+        "code": "conflict",
+        "detail": "stale revision"
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "kind mismatch",
+    "request": {
+      "action": "status"
+    },
+    "response": {
+      "kind": "page",
+      "value": {
+        "items": [],
+        "next": null,
+        "revision": 1,
+        "total": 0
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "page within limit",
+    "request": {
+      "action": "list",
+      "after": null,
+      "limit": 2,
+      "query": {
+        "active_sessions_only": false,
+        "home": null,
+        "kind": null,
+        "project": null,
+        "repository": null,
+        "visibility": "current"
+      }
+    },
+    "response": {
+      "kind": "page",
+      "value": {
+        "items": [
+          {
+            "kind": "project",
+            "value": {
+              "id": "10ee40e1-a67e-4699-8759-ffd9e245359a",
+              "name": "p",
+              "revision": 1,
+              "state": "active"
+            }
+          },
+          {
+            "kind": "project",
+            "value": {
+              "id": "ba52abfb-d10c-4e8a-9253-d92f8c4f5760",
+              "name": "p",
+              "revision": 1,
+              "state": "active"
+            }
+          }
+        ],
+        "next": null,
+        "revision": 1,
+        "total": 2
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "page above limit",
+    "request": {
+      "action": "list",
+      "after": null,
+      "limit": 2,
+      "query": {
+        "active_sessions_only": false,
+        "home": null,
+        "kind": null,
+        "project": null,
+        "repository": null,
+        "visibility": "current"
+      }
+    },
+    "response": {
+      "kind": "page",
+      "value": {
+        "items": [
+          {
+            "kind": "project",
+            "value": {
+              "id": "26337171-959f-47b6-a23b-d993f4de8a54",
+              "name": "p",
+              "revision": 1,
+              "state": "active"
+            }
+          },
+          {
+            "kind": "project",
+            "value": {
+              "id": "e0c01aba-be19-401c-831d-618fdf8ca31a",
+              "name": "p",
+              "revision": 1,
+              "state": "active"
+            }
+          },
+          {
+            "kind": "project",
+            "value": {
+              "id": "c0a5fda5-7038-4334-982c-3993436ca89b",
+              "name": "p",
+              "revision": 1,
+              "state": "active"
+            }
+          }
+        ],
+        "next": null,
+        "revision": 1,
+        "total": 3
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "proposal for session and target",
+    "request": {
+      "action": "permissions",
+      "request": {
+        "action": "propose",
+        "reason": "edit",
+        "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+        "session": "session_matrix",
+        "target": {
+          "id": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+          "kind": "root"
+        }
+      }
+    },
+    "response": {
+      "kind": "permissions",
+      "value": {
+        "kind": "mutation",
+        "value": {
+          "grant": null,
+          "proposal": {
+            "id": "473b1b44-c537-4ad9-a929-804f6aca672d",
+            "reason": "edit",
+            "revision": 3,
+            "session": "session_matrix",
+            "state": "pending",
+            "target": {
+              "id": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+              "kind": "root"
+            }
+          },
+          "receipt": {
+            "issues": [],
+            "operation": "25b702fc-2c97-4a3e-97db-58815e5e6957",
+            "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+            "revision": 2,
+            "targets": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "proposal for another session",
+    "request": {
+      "action": "permissions",
+      "request": {
+        "action": "propose",
+        "reason": "edit",
+        "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+        "session": "session_matrix",
+        "target": {
+          "id": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+          "kind": "root"
+        }
+      }
+    },
+    "response": {
+      "kind": "permissions",
+      "value": {
+        "kind": "mutation",
+        "value": {
+          "grant": null,
+          "proposal": {
+            "id": "473b1b44-c537-4ad9-a929-804f6aca672d",
+            "reason": "edit",
+            "revision": 3,
+            "session": "other",
+            "state": "pending",
+            "target": {
+              "id": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+              "kind": "root"
+            }
+          },
+          "receipt": {
+            "issues": [],
+            "operation": "d443aa7e-e725-4618-b09f-7278c397adfd",
+            "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+            "revision": 2,
+            "targets": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "proposal without proposal body",
+    "request": {
+      "action": "permissions",
+      "request": {
+        "action": "propose",
+        "reason": "edit",
+        "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+        "session": "session_matrix",
+        "target": {
+          "id": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+          "kind": "root"
+        }
+      }
+    },
+    "response": {
+      "kind": "permissions",
+      "value": {
+        "kind": "mutation",
+        "value": {
+          "grant": null,
+          "proposal": null,
+          "receipt": {
+            "issues": [],
+            "operation": "fd51d392-3de8-4a7d-b477-1017bd49976e",
+            "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+            "revision": 2,
+            "targets": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "decision on exact proposal",
+    "request": {
+      "action": "permissions",
+      "request": {
+        "action": "decide_proposal",
+        "decision": "decline",
+        "expected_revision": 3,
+        "proposal": "473b1b44-c537-4ad9-a929-804f6aca672d",
+        "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec"
+      }
+    },
+    "response": {
+      "kind": "permissions",
+      "value": {
+        "kind": "mutation",
+        "value": {
+          "grant": null,
+          "proposal": {
+            "id": "473b1b44-c537-4ad9-a929-804f6aca672d",
+            "reason": "edit",
+            "revision": 3,
+            "session": "session_matrix",
+            "state": "pending",
+            "target": {
+              "id": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+              "kind": "root"
+            }
+          },
+          "receipt": {
+            "issues": [],
+            "operation": "2f259db5-ee62-4e74-bc9d-5efcc88a2bc6",
+            "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+            "revision": 2,
+            "targets": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "decision on another proposal",
+    "request": {
+      "action": "permissions",
+      "request": {
+        "action": "decide_proposal",
+        "decision": "decline",
+        "expected_revision": 3,
+        "proposal": "473b1b44-c537-4ad9-a929-804f6aca672d",
+        "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec"
+      }
+    },
+    "response": {
+      "kind": "permissions",
+      "value": {
+        "kind": "mutation",
+        "value": {
+          "grant": null,
+          "proposal": {
+            "id": "74cb52fb-d75e-41ee-b76b-0014c5109d55",
+            "reason": "edit",
+            "revision": 3,
+            "session": "session_matrix",
+            "state": "pending",
+            "target": {
+              "id": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+              "kind": "root"
+            }
+          },
+          "receipt": {
+            "issues": [],
+            "operation": "eea9a902-ea35-45c0-92c9-3ea9abe20970",
+            "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+            "revision": 2,
+            "targets": []
+          }
+        }
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "clone record",
+    "request": {
+      "action": "begin_clone",
+      "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+      "review": "e5e6b7cb-0bca-4a49-ab0c-2899b6d8bce1"
+    },
+    "response": {
+      "kind": "clone",
+      "value": {
+        "cancel_requested": false,
+        "discovered_sources": [],
+        "issue": null,
+        "location": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+        "operation": "6a93268d-f273-406e-ac1d-d8d163327efa",
+        "output_runs": [],
+        "pending_trust": [],
+        "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+        "review": {
+          "destination": "/tmp/clone",
+          "id": "462a333e-eddc-4350-9a20-4e673c4b0e45",
+          "issues": [],
+          "revision": 4,
+          "source_commit": "0000000000000000000000000000000000000000",
+          "spec": {
+            "base": {
+              "kind": "branch",
+              "name": "main"
+            },
+            "branch": {
+              "kind": "keep_name"
+            },
+            "destination": {
+              "kind": "custom",
+              "path": "/tmp/clone",
+              "volume_uuid": "VOLUME"
+            },
+            "home": {
+              "id": "7cdfb1c9-5c8a-470a-930c-58f9496edf79",
+              "kind": "project"
+            },
+            "lfs": true,
+            "name": "clone",
+            "remotes": [],
+            "repository": "07605fce-6cd2-45b7-b434-0a7e3761708e",
+            "source": {
+              "kind": "remote",
+              "url": "https://example.invalid/repo.git"
+            },
+            "submodules": true,
+            "trusted_lfs_urls": [],
+            "trusted_submodule_urls": []
+          },
+          "volume_uuid": "VOLUME"
+        },
+        "revision": 5,
+        "stage": null,
+        "state": "ready",
+        "trust_approvals": []
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "foreign clone record",
+    "request": {
+      "action": "begin_clone",
+      "request": "3291cbc2-e80c-4fe5-a0e4-ebf05aa8c0ec",
+      "review": "e5e6b7cb-0bca-4a49-ab0c-2899b6d8bce1"
+    },
+    "response": {
+      "kind": "clone",
+      "value": {
+        "cancel_requested": false,
+        "discovered_sources": [],
+        "issue": null,
+        "location": "5d21ca4d-4eca-4a61-bbb0-30023bbedae0",
+        "operation": "f060afe4-e4f6-4f37-94f5-ab489eca039f",
+        "output_runs": [],
+        "pending_trust": [],
+        "request": "aeeb363a-8ea7-4f9d-8d19-8f5f96b0d604",
+        "review": {
+          "destination": "/tmp/clone",
+          "id": "a70e8757-8960-47be-a095-59ddcf653419",
+          "issues": [],
+          "revision": 4,
+          "source_commit": "0000000000000000000000000000000000000000",
+          "spec": {
+            "base": {
+              "kind": "branch",
+              "name": "main"
+            },
+            "branch": {
+              "kind": "keep_name"
+            },
+            "destination": {
+              "kind": "custom",
+              "path": "/tmp/clone",
+              "volume_uuid": "VOLUME"
+            },
+            "home": {
+              "id": "7cdfb1c9-5c8a-470a-930c-58f9496edf79",
+              "kind": "project"
+            },
+            "lfs": true,
+            "name": "clone",
+            "remotes": [],
+            "repository": "07605fce-6cd2-45b7-b434-0a7e3761708e",
+            "source": {
+              "kind": "remote",
+              "url": "https://example.invalid/repo.git"
+            },
+            "submodules": true,
+            "trusted_lfs_urls": [],
+            "trusted_submodule_urls": []
+          },
+          "volume_uuid": "VOLUME"
+        },
+        "revision": 5,
+        "stage": null,
+        "state": "ready",
+        "trust_approvals": []
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "restore review",
+    "request": {
+      "action": "review_restore",
+      "snapshot": "ff8d7483-ed28-4105-aac3-8f0cf9b85693"
+    },
+    "response": {
+      "kind": "restore_review",
+      "value": {
+        "current_revision": 2,
+        "grants": [],
+        "id": "87f6a50a-f58f-411b-bd06-d9950c67df84",
+        "issues": [],
+        "snapshot": {
+          "automatic": false,
+          "id": "ff8d7483-ed28-4105-aac3-8f0cf9b85693",
+          "name": "named",
+          "path": "/tmp/snapshot",
+          "revision": 2,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "foreign restore review",
+    "request": {
+      "action": "review_restore",
+      "snapshot": "ff8d7483-ed28-4105-aac3-8f0cf9b85693"
+    },
+    "response": {
+      "kind": "restore_review",
+      "value": {
+        "current_revision": 2,
+        "grants": [],
+        "id": "5f06746f-28c3-42b1-b5ac-93d6405f21d3",
+        "issues": [],
+        "snapshot": {
+          "automatic": false,
+          "id": "f2e3bc69-ba93-429c-8d9c-23551aacd506",
+          "name": "named",
+          "path": "/tmp/snapshot",
+          "revision": 2,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    }
+  },
+  {
+    "accepted": true,
+    "name": "session scope",
+    "request": {
+      "action": "permissions",
+      "request": {
+        "action": "scope",
+        "session": "session_matrix"
+      }
+    },
+    "response": {
+      "kind": "permissions",
+      "value": {
+        "kind": "scope",
+        "value": {
+          "catalog_revision": 1,
+          "grants": [],
+          "placement": {
+            "id": "7cdfb1c9-5c8a-470a-930c-58f9496edf79",
+            "kind": "project"
+          },
+          "roots": [],
+          "session": "session_matrix",
+          "session_revision": 1
+        }
+      }
+    }
+  },
+  {
+    "accepted": false,
+    "name": "foreign session scope",
+    "request": {
+      "action": "permissions",
+      "request": {
+        "action": "scope",
+        "session": "session_matrix"
+      }
+    },
+    "response": {
+      "kind": "permissions",
+      "value": {
+        "kind": "scope",
+        "value": {
+          "catalog_revision": 1,
+          "grants": [],
+          "placement": {
+            "id": "7cdfb1c9-5c8a-470a-930c-58f9496edf79",
+            "kind": "project"
+          },
+          "roots": [],
+          "session": "other",
+          "session_revision": 1
+        }
+      }
+    }
+  }
+]

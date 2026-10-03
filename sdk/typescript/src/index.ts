@@ -12,6 +12,7 @@
  */
 
 export * from "./protocol.js";
+export {matchesWorkspaceResponse, requiredWorkspaceCapability, workspaceSupports} from "./workspace.js";
 export * from "./sockets.js";
 export * from "./framing.js";
 export { HarnessError } from "./errors.js";

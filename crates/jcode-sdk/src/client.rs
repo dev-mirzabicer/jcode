@@ -772,6 +772,57 @@ impl JcodeClient {
         }
     }
 
+    /// Native workspace contract versions. Absent fields mean the runtime
+    /// predates that contract; they are never assumed.
+    pub fn workspace_capabilities(&self) -> Result<jcode_harness_api::WorkspaceVersions> {
+        self.require_capability(jcode_harness_api::WORKSPACE_CATALOG_CAPABILITY)?;
+        match self.request_ok(ApiRequest::WorkspaceProbe)?.event {
+            ApiEvent::WorkspaceCapabilities { versions } => Ok(versions),
+            other => Err(unexpected("workspace_capabilities", &other)),
+        }
+    }
+
+    /// Trusted catalog administration without creating or attaching a Session.
+    ///
+    /// The runtime records this connection as the authorizing client for
+    /// reviewed effects; arguments never carry authority. A domain rejection is
+    /// returned as `WorkspaceResponse::Error`. Keep request and review IDs
+    /// across uncertain replies and inspect the receipt before retrying.
+    /// Checkout closeout uses [`Self::closeout`].
+    pub fn workspace(
+        &self,
+        request: jcode_harness_api::WorkspaceRequest,
+    ) -> Result<jcode_harness_api::WorkspaceResponse> {
+        let capability = request.required_capability();
+        if capability == jcode_harness_api::WorkspaceCapability::Closeout {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "Checkout closeout uses JcodeClient::closeout, not workspace",
+            ));
+        }
+        if !self.workspace_capabilities()?.supports(capability) {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                format!("The runtime does not support the {capability:?} workspace contract"),
+            ));
+        }
+        let expected = request.clone();
+        match self
+            .request_ok(ApiRequest::Workspace {
+                request: Box::new(request),
+            })?
+            .event
+        {
+            ApiEvent::Workspace { response } if expected.matches_response(&response) => {
+                Ok(*response)
+            }
+            _ => Err(Error::new(
+                ErrorKind::UnexpectedReply,
+                "Workspace response identity or kind mismatch",
+            )),
+        }
+    }
+
     /// Caller retains the UUID across uncertain transport replies. This does
     /// not promise exact-once provider execution or semantic consumption.
     pub fn submit_primary_input(
@@ -847,6 +898,20 @@ impl JcodeClient {
         }
     }
 
+    fn require_session_inspection(&self) -> Result<()> {
+        self.require_capability("primary_control_v1")?;
+        match self.request_ok(ApiRequest::PrimaryControlProbe)?.event {
+            ApiEvent::PrimaryControlCapabilities {
+                session_inspection_version: Some(1),
+                ..
+            } => Ok(()),
+            _ => Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Session location inspection requires session_inspection_version=1",
+            )),
+        }
+    }
+
     fn require_context_scope(&self, mutation: bool) -> Result<()> {
         if !self.supports("primary_control_v1") {
             return Err(Error::new(
@@ -919,6 +984,12 @@ impl JcodeClient {
         &self,
         command: jcode_harness_api::PrimaryLocationCommand,
     ) -> Result<jcode_harness_api::PrimaryLocationResponse> {
+        if matches!(
+            &command,
+            jcode_harness_api::PrimaryLocationCommand::InspectSession { .. }
+        ) {
+            self.require_session_inspection()?;
+        }
         let adoption = self.require_primary_control(Some(matches!(
             command,
             jcode_harness_api::PrimaryLocationCommand::Change { .. }

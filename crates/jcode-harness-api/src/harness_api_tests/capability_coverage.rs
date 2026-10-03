@@ -92,9 +92,11 @@ const LEDGER: &[(&str, Disposition)] = &[
     // durable input is separately exposed by primary_control_v1.
     ("PrimaryClientInput", ClientInternal),
     ("PrimaryClientInputsCancel", ClientInternal),
+    ("PrimaryControlProbe", Covered),
     ("PrimaryInputInspect", Covered),
     ("PrimaryLaunch", Covered),
     ("PrimaryLaunchProbe", Covered),
+    ("PrimaryLocation", Covered),
     ("PrimaryStreamSubscribe", ClientInternal),
     ("RefreshModels", ClientInternal),
     ("ReapplyContextTransaction", ClientInternal),
@@ -108,7 +110,10 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("Rewind", Covered),
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
+    ("RuntimeControl", Covered),
+    ("RuntimeProbe", Covered),
     ("SaveContextCuratorDefault", ClientInternal),
+    ("ScopedContext", Covered),
     ("SearchStartupContextFiles", ClientInternal),
     ("SetContextEmergencyPolicy", ClientInternal),
     ("SetAgent", Covered),
@@ -132,6 +137,10 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("Transcript", ClientInternal),
     ("Transfer", ClientInternal),
     ("TriggerMemoryExtraction", ClientInternal),
+    // Catalog administration over workspace_catalog_v1; closeout keeps its own
+    // route (checkout_closeout_v2).
+    ("Workspace", Covered),
+    ("WorkspaceProbe", Covered),
 ];
 
 /// Requests the reference clients (TUI, desktop2) send to the daemon.

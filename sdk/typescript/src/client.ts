@@ -10,6 +10,7 @@ import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./lau
 import { HarnessError } from "./errors.js";
 import {matchesRuntimeResponse, requiresSupervision, validRuntimeRequest, type RuntimeControlRequest, type RuntimeControlResponse} from "./runtime-control.js";
 import {matchesCloseoutReply, type CloseoutRequest, type CloseoutReply} from "./closeout.js";
+import {matchesWorkspaceResponse, requiredWorkspaceCapability, workspaceSupports, type WorkspaceRequest, type WorkspaceResponse, type WorkspaceVersions} from "./workspace.js";
 import {
   assertRetryCount,
   buildStructuredCorrectionPrompt,
@@ -494,6 +495,29 @@ export class JcodeClient extends EventEmitter {
     return response.response;
   }
 
+  /** Native workspace contract versions. Absent fields are never assumed supported. */
+  async workspaceCapabilities(): Promise<WorkspaceVersions> {
+    if (!this.supports("workspace_catalog_v1")) throw new HarnessError("unsupported_capability", "Workspace catalog requires workspace_catalog_v1");
+    const reply = await this.expectReply({req:"workspace_probe"}, "workspace_capabilities");
+    return reply.versions;
+  }
+
+  /**
+   * Trusted catalog administration without Session creation. The runtime records
+   * this connection as the authorizing client; arguments never carry authority.
+   * A domain rejection is the `error` response kind. Retain request and review
+   * IDs across uncertain replies. Checkout closeout uses `closeout()`.
+   */
+  async workspace(request: WorkspaceRequest): Promise<WorkspaceResponse> {
+    const expected = structuredClone(request);
+    const capability = requiredWorkspaceCapability(expected);
+    if (capability === "closeout") throw new HarnessError("invalid_request", "Checkout closeout uses closeout(), not workspace()");
+    if (!workspaceSupports(await this.workspaceCapabilities(), capability)) throw new HarnessError("unsupported_capability", `The runtime does not support the ${capability} workspace contract`);
+    const reply = await this.expectReply({req:"workspace", request:expected}, "workspace");
+    if (!matchesWorkspaceResponse(expected, reply.response)) throw new HarnessError("unexpected_reply", "Workspace response identity or kind mismatch");
+    return reply.response;
+  }
+
   /** Administrative control without Session creation. Retain request IDs on retry. */
   async closeout(request: CloseoutRequest): Promise<CloseoutReply> {
     const expected = structuredClone(request);
@@ -546,12 +570,20 @@ export class JcodeClient extends EventEmitter {
   }
 
   async primaryLocation(command: import("./protocol.js").PrimaryLocationCommand): Promise<import("./protocol.js").PrimaryLocationResponse> {
+    if (command.action === "inspect_session") {
+      if (!this.supports("primary_control_v1")) throw new HarnessError("unsupported_capability", "Primary controls require primary_control_v1");
+      const probe = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
+      if (probe.session_inspection_version !== 1) throw new HarnessError("unsupported_capability", "Session location inspection requires session_inspection_version=1");
+      const reply = await this.expectReply({req:"primary_location",command},"primary_location");
+      if (reply.response.status === "state" || (reply.response.status === "session" && reply.response.view.session !== command.session)) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
+      return reply.response;
+    }
     const adoption = await this.requirePrimaryControl(command.action === "change" || command.action === "adopt_legacy");
     if (command.action === "adopt_legacy" && adoption !== 1) throw new HarnessError("unsupported_capability", "Explicit legacy adoption requires legacy_adoption_version=1");
     const expected = command.action === "change" || command.action === "adopt_legacy" ? command.request.request : command.operation;
     const expectedSession = command.action === "change" || command.action === "adopt_legacy" ? command.request.session : undefined;
     const reply = await this.expectReply({req:"primary_location",command},"primary_location");
-    if (reply.ev !== "primary_location" || (reply.response.status === "state" && (reply.response.record.operation !== expected || (expectedSession !== undefined && reply.response.record.input.session !== expectedSession)))) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
+    if (reply.ev !== "primary_location" || reply.response.status === "session" || (reply.response.status === "state" && (reply.response.record.operation !== expected || (expectedSession !== undefined && reply.response.record.input.session !== expectedSession)))) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
     return reply.response;
   }
 

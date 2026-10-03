@@ -14,6 +14,15 @@ pub enum ApiRequest {
     Closeout {
         request: Box<crate::CloseoutRequest>,
     },
+    /// Requires `workspace_catalog_v1`. Negotiates the native catalog contracts
+    /// without creating or attaching a Session.
+    WorkspaceProbe,
+    /// Requires `workspace_catalog_v1` and the native version that
+    /// `WorkspaceRequest::required_capability` names. Checkout closeout uses
+    /// its dedicated `closeout` request instead.
+    Workspace {
+        request: Box<crate::WorkspaceRequest>,
+    },
     PrimaryControlProbe,
     PrimaryInput {
         input: Box<crate::PrimaryInputEnvelope>,

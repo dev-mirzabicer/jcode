@@ -44,6 +44,7 @@ const BRIDGE_CAPABILITIES: &[&str] = &[
     "runtime_lifecycle_v1",
     "runtime_supervision_v1",
     "checkout_closeout_v2",
+    "workspace_catalog_v1",
     "primary_control_v1",
     "primary_launch_v1",
     "sessions",

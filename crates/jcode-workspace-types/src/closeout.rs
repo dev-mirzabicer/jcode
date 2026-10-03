@@ -165,39 +165,7 @@ impl CloseoutRequest {
                 history.location.id == *location
             }
             (Self::Execution { control, .. }, CloseoutResponse::Execution(reply)) => {
-                use jcode_tool_types::execution::{
-                    ExecutionRequest as Request, ExecutionResponse as Response,
-                };
-                match (control, reply) {
-                    (Request::Inspect { run_id }, Response::Status { run }) => run.id == *run_id,
-                    (Request::Stop { run_id }, Response::Control { run_id: actual, .. }) => {
-                        actual == run_id
-                    }
-                    (Request::Read { run_id, .. }, Response::Content { run_id: actual, .. }) => {
-                        actual == run_id
-                    }
-                    (
-                        Request::ReadPart {
-                            run_id,
-                            part,
-                            offset,
-                            expected_sha256,
-                            ..
-                        },
-                        Response::Part {
-                            run_id: actual,
-                            page,
-                        },
-                    ) => {
-                        actual == run_id
-                            && page.part == *part
-                            && page.offset == offset.unwrap_or(0)
-                            && expected_sha256
-                                .as_ref()
-                                .is_none_or(|digest| page.sha256 == *digest)
-                    }
-                    _ => false,
-                }
+                crate::execution_reply_matches(control, reply)
             }
             _ => false,
         }

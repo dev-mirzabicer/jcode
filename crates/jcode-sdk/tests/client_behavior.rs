@@ -1166,7 +1166,7 @@ fn durable_primary_controls_negotiate_and_validate_receipt_identity() {
                 issue: None,
             };
             let event=match &frame.request {
-            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false,legacy_adoption_version:None,context_scope_version:None},
+            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false,legacy_adoption_version:None,context_scope_version:None,session_inspection_version:None},
             ApiRequest::PrimaryInput{input}=>{assert_eq!(**input,original);ApiEvent::PrimaryInputReceipt{receipt}},
             ApiRequest::PrimaryInputInspect{..}=>ApiEvent::PrimaryInputReceipt{receipt},
             ApiRequest::PrimaryInputRead{..}=>ApiEvent::PrimaryInputDetail{receipt,input:Box::new(original.clone())},
@@ -1225,6 +1225,7 @@ fn legacy_adoption_requires_negotiation_and_correlates_the_exact_session() {
                         location_enabled: true,
                         legacy_adoption_version: version,
                         context_scope_version: None,
+                        session_inspection_version: None,
                     },
                     ApiRequest::PrimaryLocation { command } => {
                         assert_eq!(version, Some(1), "Unsupported adoption must not be sent");
@@ -1269,6 +1270,7 @@ fn scoped_contexts_negotiate_review_and_validate_destination() {
                         location_enabled: true,
                         legacy_adoption_version: Some(1),
                         context_scope_version: version,
+                        session_inspection_version: None,
                     },
                     ApiRequest::GrantCarryReview { session } => {
                         assert_eq!(version, Some(1));
@@ -1487,5 +1489,166 @@ fn runtime_supervision_requests_never_reach_an_older_runtime() {
                 ErrorKind::UnsupportedCapability
             );
         }
+    }
+}
+
+fn all_workspace_versions() -> jcode_harness_api::WorkspaceVersions {
+    jcode_harness_api::WorkspaceVersions {
+        catalog_version: 1,
+        permissions_version: Some(1),
+        checkout_version: Some(1),
+        closeout_version: Some(2),
+        management_version: Some(1),
+        managed_rollout: false,
+    }
+}
+
+#[test]
+fn workspace_sdk_negotiates_each_contract_before_sending() {
+    use jcode_harness_api::workspace::{OperationKind, OperationQuery};
+    use jcode_harness_api::{WorkspaceRequest, WorkspaceVersions};
+    let operations = WorkspaceRequest::Operations {
+        query: OperationQuery {
+            kinds: vec![OperationKind::Closeout],
+            ..Default::default()
+        },
+        after: None,
+        limit: 10,
+    };
+    // Without the bridge capability nothing is sent.
+    let client = fake_harness_with_capabilities(vec![], |frame, _| {
+        panic!("unexpected request {:?}", frame.request)
+    });
+    let error = client.workspace(WorkspaceRequest::Status {}).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::UnsupportedCapability);
+    // An older runtime without management never receives the request.
+    let client = fake_harness_with_capabilities(
+        vec![jcode_harness_api::WORKSPACE_CATALOG_CAPABILITY.into()],
+        |frame, writer| match &frame.request {
+            ApiRequest::WorkspaceProbe => reply(
+                frame,
+                ApiEvent::WorkspaceCapabilities {
+                    versions: WorkspaceVersions {
+                        catalog_version: 1,
+                        permissions_version: Some(1),
+                        ..Default::default()
+                    },
+                },
+                writer,
+            ),
+            other => panic!("unsupported request sent: {other:?}"),
+        },
+    );
+    let error = client.workspace(operations).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::UnsupportedCapability);
+    // Closeout keeps its dedicated route.
+    let error = client
+        .workspace(WorkspaceRequest::Closeout {
+            request: jcode_harness_api::CloseoutRequest::History {
+                location: jcode_harness_api::workspace::LocationId::new(),
+            },
+        })
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidOption);
+}
+
+#[test]
+fn workspace_sdk_applies_the_shared_correlation_matrix() {
+    use jcode_harness_api::{WorkspaceRequest, WorkspaceResponse};
+    let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../jcode-workspace-types/src/workspace_correlation.json"
+    ))
+    .unwrap();
+    for item in cases {
+        let request: WorkspaceRequest = serde_json::from_value(item["request"].clone()).unwrap();
+        let response: WorkspaceResponse = serde_json::from_value(item["response"].clone()).unwrap();
+        let expected = request.clone();
+        let wire = response.clone();
+        let client = fake_harness_with_capabilities(
+            vec![jcode_harness_api::WORKSPACE_CATALOG_CAPABILITY.into()],
+            move |frame, writer| match &frame.request {
+                ApiRequest::WorkspaceProbe => reply(
+                    frame,
+                    ApiEvent::WorkspaceCapabilities {
+                        versions: all_workspace_versions(),
+                    },
+                    writer,
+                ),
+                ApiRequest::Workspace { request } => {
+                    assert_eq!(**request, expected);
+                    reply(
+                        frame,
+                        ApiEvent::Workspace {
+                            response: Box::new(wire.clone()),
+                        },
+                        writer,
+                    )
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+        );
+        let result = client.workspace(request);
+        if item["accepted"].as_bool().unwrap() {
+            assert_eq!(result.unwrap(), response, "{}", item["name"]);
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind,
+                ErrorKind::UnexpectedReply,
+                "{}",
+                item["name"]
+            );
+        }
+    }
+}
+
+#[test]
+fn session_location_inspection_requires_its_negotiated_version() {
+    use jcode_harness_api::PrimaryLocationCommand;
+    for version in [None, Some(1)] {
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = sent.clone();
+        let client = fake_harness_with_capabilities(
+            vec!["primary_control_v1".into()],
+            move |frame, writer| match &frame.request {
+                ApiRequest::PrimaryControlProbe => reply(
+                    frame,
+                    ApiEvent::PrimaryControlCapabilities {
+                        input_version: 1,
+                        location_version: 1,
+                        location_enabled: false,
+                        legacy_adoption_version: None,
+                        context_scope_version: None,
+                        session_inspection_version: version,
+                    },
+                    writer,
+                ),
+                ApiRequest::PrimaryLocation { .. } => {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    reply(
+                        frame,
+                        ApiEvent::PrimaryLocation {
+                            response: serde_json::from_value(serde_json::json!({"status":"session","view":{"session":"other","location":null,"legacy_working_dir":"/tmp","isolated_child":false,"pending":[],"catalog_revision":1,"catalog_issue":null}})).unwrap(),
+                        },
+                        writer,
+                    )
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+        );
+        let error = client
+            .primary_location(PrimaryLocationCommand::InspectSession {
+                session: "wanted".into(),
+            })
+            .unwrap_err();
+        let expected = if version.is_some() {
+            ErrorKind::UnexpectedReply
+        } else {
+            ErrorKind::UnsupportedCapability
+        };
+        assert_eq!(error.kind, expected);
+        assert_eq!(
+            sent.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(version.is_some())
+        );
     }
 }

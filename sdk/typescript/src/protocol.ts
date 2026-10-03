@@ -8,11 +8,13 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 11;
+export const API_VERSION_MINOR = 13;
 import type {RuntimeControlRequest, RuntimeControlResponse} from "./runtime-control.js";
 export type * from "./runtime-control.js";
 import type {CloseoutRequest, CloseoutReply} from "./closeout.js";
 export type * from "./closeout.js";
+import type {WorkspaceRequest, WorkspaceResponse, WorkspaceVersions} from "./workspace.js";
+export type * from "./workspace.js";
 
 export type WorkspacePlacement = { kind: "project" | "work_area" | "checkout" | "directory" | "standalone"; id: string };
 export type WorkspaceHome = { kind: "project" | "work_area"; id: string };
@@ -46,9 +48,11 @@ export interface GrantCarryChoice { review: string; carry: boolean }
 export interface WorkspaceGrantDefinition { id:string; audience:{kind:"session"|"project"|"work_area"|"checkout"; id:string}; target:{kind:"root"|"project_members"|"work_area_members"; id:string}; state:"disabled"|"active"|"revoked"; revision:number; copied_from:string|null; authorization?:{client:string;request:string;installation:string}|null }
 export interface GrantCarryReview { id:string; source:string; session_revision:number; catalog_revision:number; direct_grants:WorkspaceGrantDefinition[] }
 export interface LegacyLocationAdoptionRequest { request:string; session:string; expected_working_dir:string|null; expected_catalog_revision:number; placement:WorkspacePlacement; cwd:string }
-export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"adopt_legacy"; request:LegacyLocationAdoptionRequest} | {action:"inspect"|"cancel"; operation:string};
+export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"adopt_legacy"; request:LegacyLocationAdoptionRequest} | {action:"inspect"|"cancel"; operation:string} | {action:"inspect_session"; session:string};
 export interface LocationChangeRecord { legacy_origin?:{working_dir:string|null}|null; operation:string; input:LocationChangeRequest; state:"pending"|"complete"|"cancelled"|"failed"|"recovery_required"; effective_revision:number|null; notice_message:string|null; issue:{code:WorkspaceIssueCode; detail:string}|null }
-export type PrimaryLocationResponse = {status:"state"; record:LocationChangeRecord} | {status:"rejected"; issue:{code:WorkspaceIssueCode; detail:string}};
+/** Committed Session placement and cwd for trusted move/adoption review. */
+export interface SessionLocationView { session:string; location:{placement:WorkspacePlacement; cwd:string; initial_cwd:string; revision:number}|null; legacy_working_dir:string|null; isolated_child:boolean; pending:LocationChangeRecord[]; catalog_revision:number|null; catalog_issue:{code:WorkspaceIssueCode; detail:string}|null }
+export type PrimaryLocationResponse = {status:"state"; record:LocationChangeRecord} | {status:"session"; view:SessionLocationView} | {status:"rejected"; issue:{code:WorkspaceIssueCode; detail:string}};
 
 export type ExecutionState = "prepared" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
@@ -193,6 +197,8 @@ export type ApiRequest =
   | {req: "runtime_control"; request: RuntimeControlRequest}
   | {req: "closeout_probe"}
   | {req: "closeout"; request: CloseoutRequest}
+  | {req: "workspace_probe"}
+  | {req: "workspace"; request: WorkspaceRequest}
   | {req: "primary_control_probe"}
   | {req: "primary_input"; input:PrimaryInputEnvelope}
   | {req: "primary_input_inspect"; session:string; input:string}
@@ -261,10 +267,12 @@ export type ApiEvent =
   | {ev: "runtime_control"; response:RuntimeControlResponse}
   | {ev: "closeout_capabilities"; version: number | null}
   | {ev: "closeout"; reply: CloseoutReply}
+  | {ev: "workspace_capabilities"; versions: WorkspaceVersions}
+  | {ev: "workspace"; response: WorkspaceResponse}
   | {ev: "grant_carry_review"; review:GrantCarryReview}
   | {ev: "scoped_context_rejected"; source_session:string; issue:{code:WorkspaceIssueCode;detail:string}}
   | {ev: "scoped_context_created"; source_session:string;session_id:string;kind:NewContextKind}
-  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean; legacy_adoption_version?:number|null; context_scope_version?:number|null}
+  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean; legacy_adoption_version?:number|null; context_scope_version?:number|null; session_inspection_version?:number|null}
   | {ev: "primary_input_receipt"; receipt:PrimaryInputReceipt}
   | {ev: "primary_input_detail"; receipt:PrimaryInputReceipt; input:PrimaryInputEnvelope}
   | {ev: "primary_location"; response:PrimaryLocationResponse}
@@ -418,6 +426,8 @@ export const KNOWN_EVENT_KINDS = [
   "runtime_control",
   "closeout_capabilities",
   "closeout",
+  "workspace_capabilities",
+  "workspace",
   "primary_control_capabilities",
   "grant_carry_review",
   "scoped_context_created",
@@ -477,6 +487,8 @@ export const KNOWN_REQUEST_KINDS = [
   "runtime_control",
   "closeout_probe",
   "closeout",
+  "workspace_probe",
+  "workspace",
   "primary_control_probe",
   "grant_carry_review",
   "scoped_context",

@@ -40,6 +40,8 @@ pub use jcode_tool_types::inspection::{
     CAPABILITY as INSPECTION_CAPABILITY, CLEANUP_CAPABILITY, InspectionRequest, InspectionResponse,
     TranscriptRange,
 };
+/// Complete typed catalog DTOs for `Workspace` requests and responses.
+pub use jcode_workspace_types as workspace;
 pub use jcode_workspace_types::runtime::{
     CAPABILITY as RUNTIME_LIFECYCLE_CAPABILITY, IndependentTasks, PowerStatus, RecoveryCause,
     RecoveryDecision, RecoveryExecution, RecoveryId, RecoveryItem, RecoveryResolution,
@@ -59,7 +61,10 @@ pub use jcode_workspace_types::{
     GrantCarryReview, Issue as WorkspaceIssue, LegacyLocationAdoptionRequest, LegacyLocationOrigin,
     LocationChangeRecord, NewContextKind, PrimaryLaunchRecord, PrimaryLaunchRequest,
     PrimaryLaunchResponse, PrimaryLocationCommand, PrimaryLocationResponse, RequestId,
+    WorkspaceCapability, WorkspaceRequest, WorkspaceResponse, WorkspaceVersions,
 };
+/// Bridge capability for `WorkspaceProbe` and `Workspace`.
+pub const WORKSPACE_CATALOG_CAPABILITY: &str = "workspace_catalog_v1";
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 
@@ -74,7 +79,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 12;
+pub const API_VERSION_MINOR: u32 = 13;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

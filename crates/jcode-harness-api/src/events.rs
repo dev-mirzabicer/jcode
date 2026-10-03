@@ -23,6 +23,13 @@ pub enum ApiEvent {
     Closeout {
         reply: Box<crate::CloseoutReply>,
     },
+    WorkspaceCapabilities {
+        versions: crate::WorkspaceVersions,
+    },
+    /// A domain rejection is the `error` response kind, not a transport error.
+    Workspace {
+        response: Box<crate::WorkspaceResponse>,
+    },
     PrimaryControlCapabilities {
         input_version: u32,
         location_version: u32,
@@ -31,6 +38,9 @@ pub enum ApiEvent {
         legacy_adoption_version: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_scope_version: Option<u32>,
+        /// Read-only `inspect_session` location view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_inspection_version: Option<u32>,
     },
     GrantCarryReview {
         review: crate::GrantCarryReview,

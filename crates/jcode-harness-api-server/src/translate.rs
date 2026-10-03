@@ -156,6 +156,8 @@ enum SimpleKind {
     RuntimeControl(Box<jcode_harness_api::RuntimeRequest>),
     CloseoutProbe,
     Closeout(Box<jcode_harness_api::CloseoutRequest>),
+    WorkspaceProbe,
+    Workspace(Box<jcode_harness_api::WorkspaceRequest>),
     PrimaryLaunchProbe,
     PrimaryControl(&'static str),
     PrimaryLaunch,
@@ -620,6 +622,47 @@ impl BridgeState {
                 ));
                 vec![Outbound::Legacy(
                     json!({"type":"runtime_control", "id":id, "request":command}),
+                )]
+            }
+            "workspace_probe" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::WorkspaceProbe));
+                vec![Outbound::Legacy(json!({"type":"workspace_probe", "id":id}))]
+            }
+            "workspace" => {
+                let command = match serde_json::from_value::<jcode_harness_api::WorkspaceRequest>(
+                    request["request"].clone(),
+                ) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &format!("Invalid workspace request: {error}"),
+                        );
+                    }
+                };
+                // One public route per operation: closeout keeps its own
+                // negotiated contract and reply envelope.
+                if matches!(
+                    command,
+                    jcode_harness_api::WorkspaceRequest::Closeout { .. }
+                ) {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Checkout closeout uses the closeout request, not workspace",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((
+                    id,
+                    api_id,
+                    SimpleKind::Workspace(Box::new(command.clone())),
+                ));
+                vec![Outbound::Legacy(
+                    json!({"type":"workspace", "id":id, "request":command}),
                 )]
             }
             "closeout_probe" => {
@@ -1572,6 +1615,23 @@ impl BridgeState {
             }
             "workspace_capabilities" => {
                 let id = event["id"].as_u64().unwrap_or_default();
+                if let Some(api_id) = self.take_simple(id, SimpleKind::WorkspaceProbe) {
+                    let mut body = event.clone();
+                    if let Some(object) = body.as_object_mut() {
+                        object.remove("type");
+                        object.remove("id");
+                    }
+                    let reply = match serde_json::from_value::<jcode_harness_api::WorkspaceVersions>(
+                        body,
+                    ) {
+                        Ok(versions) => ApiEvent::WorkspaceCapabilities { versions },
+                        Err(error) => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: format!("Invalid workspace capabilities: {error}"),
+                        },
+                    };
+                    return vec![ServerFrame::reply(api_id, reply)];
+                }
                 let Some(api_id) = self.take_simple(id, SimpleKind::CloseoutProbe) else {
                     return vec![];
                 };
@@ -1591,6 +1651,33 @@ impl BridgeState {
             }
             "workspace_response" => {
                 let id = event["id"].as_u64().unwrap_or_default();
+                if let Some(index) = self.pending_simple.iter().position(|(legacy, _, kind)| {
+                    *legacy == id && matches!(kind, SimpleKind::Workspace(_))
+                }) {
+                    let (_, api_id, SimpleKind::Workspace(expected)) =
+                        self.pending_simple.remove(index)
+                    else {
+                        unreachable!()
+                    };
+                    let event = match serde_json::from_value::<jcode_harness_api::WorkspaceResponse>(
+                        event["response"].clone(),
+                    ) {
+                        Ok(response) if expected.matches_response(&response) => {
+                            ApiEvent::Workspace {
+                                response: Box::new(response),
+                            }
+                        }
+                        Ok(_) => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Workspace target or response kind mismatch".into(),
+                        },
+                        Err(error) => ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: format!("Invalid workspace response: {error}"),
+                        },
+                    };
+                    return vec![ServerFrame::reply(api_id, event)];
+                }
                 if let Some(index) = self.pending_simple.iter().position(|(legacy, _, kind)| {
                     *legacy == id && matches!(kind, SimpleKind::Closeout(_))
                 }) {
