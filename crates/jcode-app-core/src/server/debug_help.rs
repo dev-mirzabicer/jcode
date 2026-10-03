@@ -157,6 +157,8 @@ TESTER COMMANDS (tester: prefix):
   tester:<id>:scroll-suite - Run scroll+diagram test suite
   tester:<id>:side-panel-latency - Benchmark headless side-panel input->frame latency
   tester:<id>:mermaid-ui-bench - Benchmark live Mermaid UI render path
+  tester:<id>:resize:<c>x<r> - Resize the tester's PTY window
+  tester:<id>:workspace-manager - Get workspace manager state
   tester:<id>:stop         - Stop tester
 
 Examples:

@@ -1,6 +1,13 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+/// Retained PTY masters so a tester's terminal can be resized like a real
+/// window. Only debug testers own entries; they are dropped on `stop`.
+#[cfg(unix)]
+static TESTER_PTYS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::os::fd::OwnedFd>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// Execute tester commands
 pub(super) async fn execute_tester_command(command: &str) -> Result<String> {
     let trimmed = command.trim();
@@ -135,6 +142,10 @@ async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
 
         let slave: OwnedFd = pty.slave;
         let master: OwnedFd = pty.master;
+        TESTER_PTYS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Tester PTY registry poisoned"))?
+            .insert(id.clone(), master.try_clone()?);
 
         let stdin_slave = slave.try_clone()?;
         let stdout_slave = slave.try_clone()?;
@@ -249,6 +260,35 @@ fn allocate_pty(cols: u16, rows: u16) -> std::io::Result<TesterPty> {
     })
 }
 
+#[cfg(unix)]
+fn resize_tester(tester_id: &str, cols: u16, rows: u16) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let ptys = TESTER_PTYS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Tester PTY registry poisoned"))?;
+    let master = ptys
+        .get(tester_id)
+        .ok_or_else(|| anyhow::anyhow!("Tester {tester_id} was not spawned by this server"))?;
+    let winsize = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // Safety: the fd is a live PTY master owned by the registry for the
+    // duration of the lock, and `winsize` is a valid readable struct.
+    let rc = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn resize_tester(_tester_id: &str, _cols: u16, _rows: u16) -> Result<()> {
+    anyhow::bail!("Tester resize requires a Unix PTY")
+}
+
 async fn execute_tester_subcommand(
     tester_id: &str,
     cmd: &str,
@@ -299,7 +339,31 @@ async fn execute_tester_subcommand(
             Some(raw) => format!("mermaid:ui-bench:{}", raw),
             None => "mermaid:ui-bench".to_string(),
         },
+        "resize" => {
+            let (cols, rows) = arg
+                .and_then(|value| value.split_once('x'))
+                .and_then(|(cols, rows)| {
+                    Some((cols.parse::<u16>().ok()?, rows.parse::<u16>().ok()?))
+                })
+                .filter(|(cols, rows)| *cols > 0 && *rows > 0)
+                .ok_or_else(|| anyhow::anyhow!("Usage: tester:<id>:resize:<cols>x<rows>"))?;
+            resize_tester(tester_id, cols, rows)?;
+            if let Some(pid) = tester.get("pid").and_then(|v| v.as_u64()) {
+                // The tester has no controlling terminal; deliver the window
+                // change notification a terminal emulator would send.
+                let _ = std::process::Command::new("kill")
+                    .arg("-WINCH")
+                    .arg(pid.to_string())
+                    .output();
+            }
+            return Ok(format!("Resized tester to {cols}x{rows}."));
+        }
+        "workspace-manager" => "workspace-manager-state".to_string(),
         "stop" => {
+            #[cfg(unix)]
+            if let Ok(mut ptys) = TESTER_PTYS.lock() {
+                ptys.remove(tester_id);
+            }
             if let Some(pid) = tester.get("pid").and_then(|v| v.as_u64()) {
                 let _ = std::process::Command::new("kill")
                     .arg("-TERM")
