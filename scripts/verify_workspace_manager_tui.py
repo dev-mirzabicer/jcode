@@ -16,7 +16,9 @@ from pathlib import Path
 import test_instruction_manager as f
 
 config = f.home / 'config.toml'
-config.write_text(config.read_text().replace('[features]', '[features]\nmanaged_primary_launch=true', 1))
+RUNTIME_ONLY = os.environ.get('WORKSPACE_JOURNEY') == 'runtime'
+if not RUNTIME_ONLY:
+    config.write_text(config.read_text().replace('[features]', '[features]\nmanaged_primary_launch=true', 1))
 gate_entered = threading.Event(); gate_release = threading.Event(); calls = []
 
 def respond(self):
@@ -57,7 +59,14 @@ def client(tid, text):
     target = Path(row['debug_cmd_path']); reply = Path(row['debug_response_path'])
     if reply.exists(): reply.unlink()
     temporary = target.with_suffix('.next'); temporary.write_text(text); os.replace(temporary, target)
-    wait(lambda: reply.exists() and reply.stat().st_size > 0, 'tester reply to ' + text[:40], 20)
+    try:
+        wait(lambda: reply.exists() and reply.stat().st_size > 0, 'tester reply to ' + text[:40], 20)
+    except TimeoutError:
+        # Record where an unresponsive client is blocked before failing.
+        for pid in client_pids():
+            out = evidence / f'unresponsive-client-{pid}-{int(time.time())}.txt'
+            subprocess.run(['sample', str(pid), '3', '-file', str(out)], capture_output=True, timeout=60)
+        raise
     value = reply.read_text(); reply.unlink()
     with (evidence / 'tester-commands.jsonl').open('a') as out:
         out.write(json.dumps({'at': time.time(), 'tester': tid, 'command': text, 'response': value[:4000]}) + '\n')
@@ -281,244 +290,250 @@ try:
     keys(tid, 'shift+i'); confirm(tid)
     until(tid, lambda s: s['catalog'] and 'revision' in s['catalog'], 'catalog ready')
 
-    step('organization: project, repository, work area, association, directory')
-    keys(tid, 'n'); until(tid, lambda s: s['form'], 'project form')
-    type_text(tid, 'Acme'); submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'project created')
-    keys(tid, 'shift+n'); until(tid, lambda s: s['form'], 'repository form')
-    set_text(tid, 'name', 'Tool'); set_text(tid, 'remotes', 'file://' + str(remote))
-    submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'repository created')
-    select_row(tid, lambda t: t.startswith('P  Acme'), 'Acme')
-    keys(tid, 'a'); until(tid, lambda s: s['form'] and s['form']['title'] == 'New work area', 'area form')
-    set_text(tid, 'name', 'Sprint'); submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'area created')
-    entities = {e['value']['name']: e['value'] for e in ws('list', query=query(), after=None, limit=200)['value']['items']}
-    acme = entities['Acme']['id']; tool = entities['Tool']['id']; sprint = entities['Sprint']['id']
-    keys(tid, 'shift+a'); until(tid, lambda s: s['form'] and 'Associate' in s['form']['title'], 'associate form')
-    set_choice(tid, 'project', 'project:' + acme); set_choice(tid, 'repository', 'repository:' + tool)
-    submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'associated')
-    keys(tid, 'g'); until(tid, lambda s: s['form'] and 'Register' in s['form']['title'], 'register form')
-    set_choice(tid, 'kind', 'directory'); set_text(tid, 'path', str(docs)); set_text(tid, 'name', 'Docs')
-    set_choice(tid, 'home', 'project:' + acme)
-    submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'directory registered')
-    frame(tid, 'w03-organization-wide', 'Acme')
+    clones = {}; launched = legacy_session; standalone_session = None
+    if RUNTIME_ONLY:
+        # Focused rerun of the runtime and reconnect journeys on a legacy
+        # session (managed launch staged off); the full run covers the rest.
+        step('runtime-only mode: organization, clone, permission, closeout and backup journeys skipped')
+    else:
+        step('organization: project, repository, work area, association, directory')
+        keys(tid, 'n'); until(tid, lambda s: s['form'], 'project form')
+        type_text(tid, 'Acme'); submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'project created')
+        keys(tid, 'shift+n'); until(tid, lambda s: s['form'], 'repository form')
+        set_text(tid, 'name', 'Tool'); set_text(tid, 'remotes', 'file://' + str(remote))
+        submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'repository created')
+        select_row(tid, lambda t: t.startswith('P  Acme'), 'Acme')
+        keys(tid, 'a'); until(tid, lambda s: s['form'] and s['form']['title'] == 'New work area', 'area form')
+        set_text(tid, 'name', 'Sprint'); submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'area created')
+        entities = {e['value']['name']: e['value'] for e in ws('list', query=query(), after=None, limit=200)['value']['items']}
+        acme = entities['Acme']['id']; tool = entities['Tool']['id']; sprint = entities['Sprint']['id']
+        keys(tid, 'shift+a'); until(tid, lambda s: s['form'] and 'Associate' in s['form']['title'], 'associate form')
+        set_choice(tid, 'project', 'project:' + acme); set_choice(tid, 'repository', 'repository:' + tool)
+        submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'associated')
+        keys(tid, 'g'); until(tid, lambda s: s['form'] and 'Register' in s['form']['title'], 'register form')
+        set_choice(tid, 'kind', 'directory'); set_text(tid, 'path', str(docs)); set_text(tid, 'name', 'Docs')
+        set_choice(tid, 'home', 'project:' + acme)
+        submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'directory registered')
+        frame(tid, 'w03-organization-wide', 'Acme')
 
-    step('volumes: saved default, then custom and default clone destinations')
-    mount = subprocess.run(['df', '-P', str(ROOT)], capture_output=True, text=True).stdout.splitlines()[-1].split()[-1]
-    data_volume = next(v for v in ws('volumes')['value'] if v['mount'] == mount)
-    keys(tid, 'v'); until(tid, lambda s: s['form'] and 'Default checkout' in s['form']['title'], 'volume default form')
-    set_choice(tid, 'volume', data_volume['uuid']); set_text(tid, 'path', str(ROOT / 'volume-default'))
-    submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'volume default')
-    clones = {}
-    for name, destination in (('tool-custom', 'custom'), ('tool-default', 'default')):
-        select_row(tid, lambda t: t.startswith('R  Tool'), 'Tool repository')
-        keys(tid, 'c'); until(tid, lambda s: s['form'] and 'Clone' in s['form']['title'], 'clone form')
-        set_text(tid, 'name', name); set_choice(tid, 'home', 'area:' + sprint)
-        set_choice(tid, 'source', 'local'); set_text(tid, 'local', str(source))
-        set_text(tid, 'base', 'main'); set_text(tid, 'remotes', 'origin=file://' + str(remote))
-        set_choice(tid, 'volume', data_volume['uuid']); set_choice(tid, 'destination', destination)
-        if destination == 'custom': set_text(tid, 'custom', str(ROOT / 'checkouts' / name))
-        else: set_text(tid, 'project_component', 'acme')
-        review = submit_and_confirm(tid, 'Begin clone')
-        expected = ROOT / 'checkouts' / name if destination == 'custom' else ROOT / 'volume-default' / 'acme' / name
-        assert any(str(expected) in line for line in review['lines']), review
-        clones[name] = expected
-        last_outcome(tid, f'Clone {name} is Ready', 'clone ready ' + name, 240)
-        assert (expected / '.git').is_dir() and (expected / 'README.md').read_text() == 'fixture\n'
-        assert not (expected / '.git' / 'objects' / 'info' / 'alternates').exists()
-    keys(tid, '3'); until(tid, lambda s: s['section'] == 'operations', 'operations section')
-    keys(tid, 'u'); until(tid, lambda s: sum('Clone' in r['text'] for r in s['rows']) >= 2, 'finished clones listed')
-    frame(tid, 'w04-operations', 'Ready')
-    keys(tid, '1')
-    locations = {e['value']['name']: e['value'] for e in ws('list', query=query('location'), after=None, limit=200)['value']['items']}
+        step('volumes: saved default, then custom and default clone destinations')
+        mount = subprocess.run(['df', '-P', str(ROOT)], capture_output=True, text=True).stdout.splitlines()[-1].split()[-1]
+        data_volume = next(v for v in ws('volumes')['value'] if v['mount'] == mount)
+        keys(tid, 'v'); until(tid, lambda s: s['form'] and 'Default checkout' in s['form']['title'], 'volume default form')
+        set_choice(tid, 'volume', data_volume['uuid']); set_text(tid, 'path', str(ROOT / 'volume-default'))
+        submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'volume default')
+        clones = {}
+        for name, destination in (('tool-custom', 'custom'), ('tool-default', 'default')):
+            select_row(tid, lambda t: t.startswith('R  Tool'), 'Tool repository')
+            keys(tid, 'c'); until(tid, lambda s: s['form'] and 'Clone' in s['form']['title'], 'clone form')
+            set_text(tid, 'name', name); set_choice(tid, 'home', 'area:' + sprint)
+            set_choice(tid, 'source', 'local'); set_text(tid, 'local', str(source))
+            set_text(tid, 'base', 'main'); set_text(tid, 'remotes', 'origin=file://' + str(remote))
+            set_choice(tid, 'volume', data_volume['uuid']); set_choice(tid, 'destination', destination)
+            if destination == 'custom': set_text(tid, 'custom', str(ROOT / 'checkouts' / name))
+            else: set_text(tid, 'project_component', 'acme')
+            review = submit_and_confirm(tid, 'Begin clone')
+            expected = ROOT / 'checkouts' / name if destination == 'custom' else ROOT / 'volume-default' / 'acme' / name
+            assert any(str(expected) in line for line in review['lines']), review
+            clones[name] = expected
+            last_outcome(tid, f'Clone {name} is Ready', 'clone ready ' + name, 240)
+            assert (expected / '.git').is_dir() and (expected / 'README.md').read_text() == 'fixture\n'
+            assert not (expected / '.git' / 'objects' / 'info' / 'alternates').exists()
+        keys(tid, '3'); until(tid, lambda s: s['section'] == 'operations', 'operations section')
+        keys(tid, 'u'); until(tid, lambda s: sum('Clone' in r['text'] for r in s['rows']) >= 2, 'finished clones listed')
+        frame(tid, 'w04-operations', 'Ready')
+        keys(tid, '1')
+        locations = {e['value']['name']: e['value'] for e in ws('list', query=query('location'), after=None, limit=200)['value']['items']}
 
-    step('launch a managed primary into the custom clone')
-    select_row(tid, lambda t: t.startswith('C  tool-custom'), 'tool-custom')
-    keys(tid, 'l'); until(tid, lambda s: s['form'] and 'Launch' in s['form']['title'], 'launch form')
-    form = manager(tid)['form']
-    assert form['values']['placement'] == 'checkout:' + locations['tool-custom']['id'], form
-    assert form['values']['cwd'] == str(clones['tool-custom']), form
-    submit_and_confirm(tid, 'Launch primary')
-    launched = until(tid, lambda s: s['launched'], 'launched', 120)['launched']
-    view = rpc('primary_location', command={'action': 'inspect_session', 'session': launched})['response']['view']
-    assert view['location']['placement'] == {'kind': 'checkout', 'id': locations['tool-custom']['id']}, view
+        step('launch a managed primary into the custom clone')
+        select_row(tid, lambda t: t.startswith('C  tool-custom'), 'tool-custom')
+        keys(tid, 'l'); until(tid, lambda s: s['form'] and 'Launch' in s['form']['title'], 'launch form')
+        form = manager(tid)['form']
+        assert form['values']['placement'] == 'checkout:' + locations['tool-custom']['id'], form
+        assert form['values']['cwd'] == str(clones['tool-custom']), form
+        submit_and_confirm(tid, 'Launch primary')
+        launched = until(tid, lambda s: s['launched'], 'launched', 120)['launched']
+        view = rpc('primary_location', command={'action': 'inspect_session', 'session': launched})['response']['view']
+        assert view['location']['placement'] == {'kind': 'checkout', 'id': locations['tool-custom']['id']}, view
 
-    step('move the launched session to the work area; cwd kept by default')
-    keys(tid, '2'); until(tid, lambda s: s['section'] == 'sessions', 'sessions section')
-    keys(tid, 'i'); until(tid, lambda s: s['form'], 'inspect form'); type_text(tid, launched); keys(tid, 'ctrl+s')
-    until(tid, lambda s: s['selected'] == launched and any(a.startswith('m ') for a in s['actions']), 'launched session inspected')
-    keys(tid, 'm'); until(tid, lambda s: s['form'] and 'Move' in s['form']['title'], 'move form')
-    set_choice(tid, 'placement', 'area:' + sprint)
-    review = submit_and_confirm(tid, 'Change session location')
-    assert any(str(clones['tool-custom']) in line for line in review['lines'] if 'Working directory' in line), review
-    last_outcome(tid, 'Complete', 'move complete')
-    view = rpc('primary_location', command={'action': 'inspect_session', 'session': launched})['response']['view']
-    assert view['location']['placement'] == {'kind': 'work_area', 'id': sprint} and view['location']['cwd'] == str(clones['tool-custom']), view
-    frame(tid, 'w05-sessions-moved', 'Placement')
+        step('move the launched session to the work area; cwd kept by default')
+        keys(tid, '2'); until(tid, lambda s: s['section'] == 'sessions', 'sessions section')
+        keys(tid, 'i'); until(tid, lambda s: s['form'], 'inspect form'); type_text(tid, launched); keys(tid, 'ctrl+s')
+        until(tid, lambda s: s['selected'] == launched and any(a.startswith('m ') for a in s['actions']), 'launched session inspected')
+        keys(tid, 'm'); until(tid, lambda s: s['form'] and 'Move' in s['form']['title'], 'move form')
+        set_choice(tid, 'placement', 'area:' + sprint)
+        review = submit_and_confirm(tid, 'Change session location')
+        assert any(str(clones['tool-custom']) in line for line in review['lines'] if 'Working directory' in line), review
+        last_outcome(tid, 'Complete', 'move complete')
+        view = rpc('primary_location', command={'action': 'inspect_session', 'session': launched})['response']['view']
+        assert view['location']['placement'] == {'kind': 'work_area', 'id': sprint} and view['location']['cwd'] == str(clones['tool-custom']), view
+        frame(tid, 'w05-sessions-moved', 'Placement')
 
-    step('projectless standalone launch into a newly created empty cwd; project placement needs an explicit cwd')
-    standalone_root = ROOT / 'standalone'; standalone_root.mkdir()
-    keys(tid, '1'); select_row(tid, lambda t: t.startswith('P  Acme'), 'Acme project')
-    keys(tid, 'l'); until(tid, lambda s: s['form'] and 'Launch' in s['form']['title'], 'project launch form')
-    form = manager(tid)['form']
-    assert form['values']['placement'] == 'project:' + acme and form['values']['cwd'] == '', form
-    keys(tid, 'ctrl+s')
-    form = until(tid, lambda s: s['form'] and s['form']['error'], 'explicit cwd required')['form']
-    assert not manager(tid)['confirm'], 'nothing is reviewed without an explicit cwd'
-    # A new empty directory becomes the standalone root itself.
-    set_choice(tid, 'placement', 'new-standalone')
-    set_choice(tid, 'cwd_mode', 'create'); set_text(tid, 'cwd', str(standalone_root / 'fresh'))
-    MARK[:] = [manager(tid)['outcome_seq']]
-    submit_and_confirm(tid, 'Launch primary')
-    standalone_session = until(tid, lambda s: s['launched'] and s['launched'] != launched, 'standalone launched', 120)['launched']
-    view = rpc('primary_location', command={'action': 'inspect_session', 'session': standalone_session})['response']['view']
-    assert view['location']['placement']['kind'] == 'standalone' and view['location']['cwd'] == str(standalone_root / 'fresh'), view
-    standalone_location = next(e['value'] for e in ws('list', query=query('location'), after=None, limit=200)['value']['items'] if e['value']['id'] == view['location']['placement']['id'])
-    assert standalone_location['home'] is None and standalone_location['observed_path'] == str(standalone_root / 'fresh'), standalone_location
-    assert (standalone_root / 'fresh').is_dir() and not any((standalone_root / 'fresh').iterdir())
-    assert not any(str(standalone_root) in str(e['value'].get('home')) for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'])
-    frame(tid, 'w05b-standalone-launched', 'Launched')
+        step('projectless standalone launch into a newly created empty cwd; project placement needs an explicit cwd')
+        standalone_root = ROOT / 'standalone'; standalone_root.mkdir()
+        keys(tid, '1'); select_row(tid, lambda t: t.startswith('P  Acme'), 'Acme project')
+        keys(tid, 'l'); until(tid, lambda s: s['form'] and 'Launch' in s['form']['title'], 'project launch form')
+        form = manager(tid)['form']
+        assert form['values']['placement'] == 'project:' + acme and form['values']['cwd'] == '', form
+        keys(tid, 'ctrl+s')
+        form = until(tid, lambda s: s['form'] and s['form']['error'], 'explicit cwd required')['form']
+        assert not manager(tid)['confirm'], 'nothing is reviewed without an explicit cwd'
+        # A new empty directory becomes the standalone root itself.
+        set_choice(tid, 'placement', 'new-standalone')
+        set_choice(tid, 'cwd_mode', 'create'); set_text(tid, 'cwd', str(standalone_root / 'fresh'))
+        MARK[:] = [manager(tid)['outcome_seq']]
+        submit_and_confirm(tid, 'Launch primary')
+        standalone_session = until(tid, lambda s: s['launched'] and s['launched'] != launched, 'standalone launched', 120)['launched']
+        view = rpc('primary_location', command={'action': 'inspect_session', 'session': standalone_session})['response']['view']
+        assert view['location']['placement']['kind'] == 'standalone' and view['location']['cwd'] == str(standalone_root / 'fresh'), view
+        standalone_location = next(e['value'] for e in ws('list', query=query('location'), after=None, limit=200)['value']['items'] if e['value']['id'] == view['location']['placement']['id'])
+        assert standalone_location['home'] is None and standalone_location['observed_path'] == str(standalone_root / 'fresh'), standalone_location
+        assert (standalone_root / 'fresh').is_dir() and not any((standalone_root / 'fresh').iterdir())
+        assert not any(str(standalone_root) in str(e['value'].get('home')) for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'])
+        frame(tid, 'w05b-standalone-launched', 'Launched')
 
-    step("adopt the tester's legacy session into the Docs directory")
-    keys(tid, '2'); until(tid, lambda s: s['section'] == 'sessions', 'sessions section for adoption')
-    select_row(tid, lambda t: t.startswith('● '), 'own session')
-    until(tid, lambda s: any(a.startswith('a Adopt') for a in s['actions']), 'legacy adoption offered')
-    frame(tid, 'w06-legacy', 'Legacy session')
-    keys(tid, 'a'); until(tid, lambda s: s['form'] and 'legacy' in s['form']['title'], 'adoption form')
-    set_choice(tid, 'placement', 'directory:' + locations['Docs']['id']); set_text(tid, 'cwd', str(docs))
-    submit_and_confirm(tid, 'Adopt legacy'); last_outcome(tid, 'Complete', 'adopted')
-    view = rpc('primary_location', command={'action': 'inspect_session', 'session': legacy_session})['response']['view']
-    assert view['location']['placement'] == {'kind': 'directory', 'id': locations['Docs']['id']}, view
+        step("adopt the tester's legacy session into the Docs directory")
+        keys(tid, '2'); until(tid, lambda s: s['section'] == 'sessions', 'sessions section for adoption')
+        select_row(tid, lambda t: t.startswith('● '), 'own session')
+        until(tid, lambda s: any(a.startswith('a Adopt') for a in s['actions']), 'legacy adoption offered')
+        frame(tid, 'w06-legacy', 'Legacy session')
+        keys(tid, 'a'); until(tid, lambda s: s['form'] and 'legacy' in s['form']['title'], 'adoption form')
+        set_choice(tid, 'placement', 'directory:' + locations['Docs']['id']); set_text(tid, 'cwd', str(docs))
+        submit_and_confirm(tid, 'Adopt legacy'); last_outcome(tid, 'Complete', 'adopted')
+        view = rpc('primary_location', command={'action': 'inspect_session', 'session': legacy_session})['response']['view']
+        assert view['location']['placement'] == {'kind': 'directory', 'id': locations['Docs']['id']}, view
 
-    step('agent-side access proposal approved, then revoked, through the human client')
-    proposal = ws('permissions', request={'action': 'propose', 'session': launched, 'request': str(uuid.uuid4()), 'target': {'kind': 'root', 'id': locations['Docs']['id']}, 'reason': 'needs docs'})
-    assert proposal['kind'] == 'permissions', proposal
-    keys(tid, '4'); until(tid, lambda s: s['section'] == 'permissions' and any('wants' in r['text'] for r in s['rows']), 'proposal listed')
-    select_row(tid, lambda t: 'wants' in t and launched in t, 'proposal')
-    keys(tid, 'a'); until(tid, lambda s: s['form'] and 'Approve' in s['form']['title'], 'approve form')
-    assert manager(tid)['form']['values']['session'] == launched
-    review = submit_and_confirm(tid, 'permission')
-    assert any('writable now' in line and str(docs) in line for line in review['lines']), review
-    last_outcome(tid, 'is Active', 'grant active')
-    frame(tid, 'w07-permissions', 'Approved')
-    keys(tid, 'v'); until(tid, lambda s: any(r['text'].startswith('Active') for r in s['rows']), 'grants listed')
-    select_row(tid, lambda t: t.startswith('Active') and launched in t, 'active grant')
-    keys(tid, 'x'); until(tid, lambda s: s['confirm'], 'revoke review'); confirm(tid)
-    last_outcome(tid, 'is Revoked', 'grant revoked')
+        step('agent-side access proposal approved, then revoked, through the human client')
+        proposal = ws('permissions', request={'action': 'propose', 'session': launched, 'request': str(uuid.uuid4()), 'target': {'kind': 'root', 'id': locations['Docs']['id']}, 'reason': 'needs docs'})
+        assert proposal['kind'] == 'permissions', proposal
+        keys(tid, '4'); until(tid, lambda s: s['section'] == 'permissions' and any('wants' in r['text'] for r in s['rows']), 'proposal listed')
+        select_row(tid, lambda t: 'wants' in t and launched in t, 'proposal')
+        keys(tid, 'a'); until(tid, lambda s: s['form'] and 'Approve' in s['form']['title'], 'approve form')
+        assert manager(tid)['form']['values']['session'] == launched
+        review = submit_and_confirm(tid, 'permission')
+        assert any('writable now' in line and str(docs) in line for line in review['lines']), review
+        last_outcome(tid, 'is Active', 'grant active')
+        frame(tid, 'w07-permissions', 'Approved')
+        keys(tid, 'v'); until(tid, lambda s: any(r['text'].startswith('Active') for r in s['rows']), 'grants listed')
+        select_row(tid, lambda t: t.startswith('Active') and launched in t, 'active grant')
+        keys(tid, 'x'); until(tid, lambda s: s['confirm'], 'revoke review'); confirm(tid)
+        last_outcome(tid, 'is Revoked', 'grant revoked')
 
-    step('direct grant to this session, then Clear with a reviewed carry choice')
-    keys(tid, 'n'); until(tid, lambda s: s['form'] and 'grant' in s['form']['title'].lower(), 'grant form')
-    set_text(tid, 'session', legacy_session); set_choice(tid, 'target', 'checkout:' + locations['tool-default']['id'])
-    submit_and_confirm(tid, 'permission'); last_outcome(tid, 'is Active', 'direct grant')
-    keys(tid, '2'); select_row(tid, lambda t: t.startswith('● '), 'own session')
-    keys(tid, 'n'); until(tid, lambda s: s['form'] and 'New context' in s['form']['title'], 'new context form')
-    set_choice(tid, 'kind', 'clear'); keys(tid, 'ctrl+s')
-    until(tid, lambda s: s['form'] and s['form']['title'] == 'Grant carry', 'carry review')
-    frame(tid, 'w08-carry', 'Grant carry')
-    set_choice(tid, 'carry', 'yes'); keys(tid, 'ctrl+s')
-    def copied():
-        items = ws('permissions', request={'action': 'list', 'query': {'kind': 'grants', 'audience': None}, 'after': None, 'limit': 200})['value']['value']['items']
-        return [g['value'] for g in items if g['value'].get('copied_from')]
-    carried = wait(copied, 'carried grant copy', 60)
-    assert carried[0]['state'] == 'active' and carried[0]['audience']['id'] != legacy_session, carried
+        step('direct grant to this session, then Clear with a reviewed carry choice')
+        keys(tid, 'n'); until(tid, lambda s: s['form'] and 'grant' in s['form']['title'].lower(), 'grant form')
+        set_text(tid, 'session', legacy_session); set_choice(tid, 'target', 'checkout:' + locations['tool-default']['id'])
+        submit_and_confirm(tid, 'permission'); last_outcome(tid, 'is Active', 'direct grant')
+        keys(tid, '2'); select_row(tid, lambda t: t.startswith('● '), 'own session')
+        keys(tid, 'n'); until(tid, lambda s: s['form'] and 'New context' in s['form']['title'], 'new context form')
+        set_choice(tid, 'kind', 'clear'); keys(tid, 'ctrl+s')
+        until(tid, lambda s: s['form'] and s['form']['title'] == 'Grant carry', 'carry review')
+        frame(tid, 'w08-carry', 'Grant carry')
+        set_choice(tid, 'carry', 'yes'); keys(tid, 'ctrl+s')
+        def copied():
+            items = ws('permissions', request={'action': 'list', 'query': {'kind': 'grants', 'audience': None}, 'after': None, 'limit': 200})['value']['value']['items']
+            return [g['value'] for g in items if g['value'].get('copied_from')]
+        carried = wait(copied, 'carried grant copy', 60)
+        assert carried[0]['state'] == 'active' and carried[0]['audience']['id'] != legacy_session, carried
 
-    step('closeout with final human approval on tool-default')
-    open_manager(tid); keys(tid, '1')
-    select_row(tid, lambda t: t.startswith('C  tool-default'), 'tool-default')
-    keys(tid, 'o'); until(tid, lambda s: s['form'] and 'closeout' in s['form']['title'].lower(), 'closeout form')
-    assert manager(tid)['form']['values']['conditional'] == 'false'
-    # Every regular file needs a disposition or the verified full archive.
-    set_toggle(tid, 'full_archive', True)
-    review = submit_and_confirm(tid, 'Begin closeout')
-    assert any('off' in line for line in review['lines'] if 'Conditional' in line), review
-    until(tid, lambda s: s['section'] == 'closeout' and s['selected'], 'closeout selected')
-    def act(key, label, seconds=240):
-        until(tid, lambda s: any(a.startswith(key + ' ') for a in s['actions']), 'action ' + label, seconds)
-        keys(tid, key if len(key) == 1 and key.islower() else 'shift+' + key.lower())
-    def closeout_step(key, label):
-        act(key, label); until(tid, lambda s: s['confirm'], label + ' review'); confirm(tid)
-        until(tid, lambda s: new_outcomes(s) and not s['pending'], label + ' outcome', 240)
-        (evidence / ('closeout-' + key + '.json')).write_text(json.dumps(manager(tid), indent=1))
-    closeout_step('f', 'Refresh inventory')
-    # A human disposition on one inventoried entry (the full archive covers the rest).
-    act('i', 'Inventory'); act('d', 'Disposition')
-    until(tid, lambda s: s['form'] and s['form']['title'] == 'Record disposition', 'disposition form')
-    # Preserve keeps the information; the human choice is recorded with provenance.
-    set_choice(tid, 'kind', 'preserve')
-    MARK[:] = [manager(tid)['outcome_seq']]; keys(tid, 'ctrl+s')
-    until(tid, lambda s: not s['form'] and new_outcomes(s) and not s['pending'], 'disposition recorded', 120)
-    (evidence / 'closeout-d.json').write_text(json.dumps(manager(tid), indent=1))
-    frame(tid, 'w09-closeout-inventory', 'Inventory')
-    act('b', 'Record pane')
-    closeout_step('p', 'Preserve')
-    closeout_step('w', 'Review removal')
-    frame(tid, 'w09-closeout-review', 'Removal review')
-    act('a', 'Approve removal')
-    until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'approve', 'typed approval')
-    confirm(tid, 'approve')
-    act('F', 'Finish removal'); until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'remove', 'typed removal')
-    confirm(tid, 'remove')
-    last_outcome(tid, 'Closed', 'closed', 240)
-    assert not clones['tool-default'].exists(), 'disposable fixture checkout removed'
-    keys(tid, 'shift+h'); frame(tid, 'w10-closed-history', 'History of')
-    keys(tid, '1')
-    def cycle_visibility(predicate, label):
-        for _ in range(6):
-            keys(tid, 'h')
-            # Judge each visibility only after its page has arrived.
-            state = until(tid, lambda s: not s['pending'] and not s['queued'], 'visibility page', 60)
-            if predicate(state): return state
-        raise TimeoutError(label)
-    cycle_visibility(lambda s: any(r['text'].startswith('C  tool-default') and 'Closed' in r['text'] for r in s['rows']), 'closed checkout under a visibility filter')
-    frame(tid, 'w11-closed-filter', 'tool-default')
-    cycle_visibility(lambda s: any(r['text'].startswith('C  tool-custom') for r in s['rows']) and not any(r['text'].startswith('C  tool-default') for r in s['rows']), 'back to current visibility')
+        step('closeout with final human approval on tool-default')
+        open_manager(tid); keys(tid, '1')
+        select_row(tid, lambda t: t.startswith('C  tool-default'), 'tool-default')
+        keys(tid, 'o'); until(tid, lambda s: s['form'] and 'closeout' in s['form']['title'].lower(), 'closeout form')
+        assert manager(tid)['form']['values']['conditional'] == 'false'
+        # Every regular file needs a disposition or the verified full archive.
+        set_toggle(tid, 'full_archive', True)
+        review = submit_and_confirm(tid, 'Begin closeout')
+        assert any('off' in line for line in review['lines'] if 'Conditional' in line), review
+        until(tid, lambda s: s['section'] == 'closeout' and s['selected'], 'closeout selected')
+        def act(key, label, seconds=240):
+            until(tid, lambda s: any(a.startswith(key + ' ') for a in s['actions']), 'action ' + label, seconds)
+            keys(tid, key if len(key) == 1 and key.islower() else 'shift+' + key.lower())
+        def closeout_step(key, label):
+            act(key, label); until(tid, lambda s: s['confirm'], label + ' review'); confirm(tid)
+            until(tid, lambda s: new_outcomes(s) and not s['pending'], label + ' outcome', 240)
+            (evidence / ('closeout-' + key + '.json')).write_text(json.dumps(manager(tid), indent=1))
+        closeout_step('f', 'Refresh inventory')
+        # A human disposition on one inventoried entry (the full archive covers the rest).
+        act('i', 'Inventory'); act('d', 'Disposition')
+        until(tid, lambda s: s['form'] and s['form']['title'] == 'Record disposition', 'disposition form')
+        # Preserve keeps the information; the human choice is recorded with provenance.
+        set_choice(tid, 'kind', 'preserve')
+        MARK[:] = [manager(tid)['outcome_seq']]; keys(tid, 'ctrl+s')
+        until(tid, lambda s: not s['form'] and new_outcomes(s) and not s['pending'], 'disposition recorded', 120)
+        (evidence / 'closeout-d.json').write_text(json.dumps(manager(tid), indent=1))
+        frame(tid, 'w09-closeout-inventory', 'Inventory')
+        act('b', 'Record pane')
+        closeout_step('p', 'Preserve')
+        closeout_step('w', 'Review removal')
+        frame(tid, 'w09-closeout-review', 'Removal review')
+        act('a', 'Approve removal')
+        until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'approve', 'typed approval')
+        confirm(tid, 'approve')
+        act('F', 'Finish removal'); until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'remove', 'typed removal')
+        confirm(tid, 'remove')
+        last_outcome(tid, 'Closed', 'closed', 240)
+        assert not clones['tool-default'].exists(), 'disposable fixture checkout removed'
+        keys(tid, 'shift+h'); frame(tid, 'w10-closed-history', 'History of')
+        keys(tid, '1')
+        def cycle_visibility(predicate, label):
+            for _ in range(6):
+                keys(tid, 'h')
+                # Judge each visibility only after its page has arrived.
+                state = until(tid, lambda s: not s['pending'] and not s['queued'], 'visibility page', 60)
+                if predicate(state): return state
+            raise TimeoutError(label)
+        cycle_visibility(lambda s: any(r['text'].startswith('C  tool-default') and 'Closed' in r['text'] for r in s['rows']), 'closed checkout under a visibility filter')
+        frame(tid, 'w11-closed-filter', 'tool-default')
+        cycle_visibility(lambda s: any(r['text'].startswith('C  tool-custom') for r in s['rows']) and not any(r['text'].startswith('C  tool-default') for r in s['rows']), 'back to current visibility')
 
-    step('conditional no-loss authorization issued, then revoked, on tool-custom')
-    select_row(tid, lambda t: t.startswith('C  tool-custom'), 'tool-custom')
-    keys(tid, 'o'); until(tid, lambda s: s['form'], 'closeout form 2')
-    set_toggle(tid, 'conditional', True)
-    review = submit_and_confirm(tid, 'Begin closeout')
-    assert any('ON' in line for line in review['lines']), review
-    record = next(op for op in ws('operations', query={'target': None, 'session': None, 'kinds': ['closeout'], 'unfinished_only': True}, after=None, limit=50)['value']['items'])
-    assert record['operation']['record']['spec']['conditional_no_loss'] is True, record
-    act('X', 'Revoke closeout'); until(tid, lambda s: s['confirm'], 'revoke closeout review'); confirm(tid)
-    last_outcome(tid, 'revoked', 'conditional closeout revoked')
-    assert clones['tool-custom'].exists()
+        step('conditional no-loss authorization issued, then revoked, on tool-custom')
+        select_row(tid, lambda t: t.startswith('C  tool-custom'), 'tool-custom')
+        keys(tid, 'o'); until(tid, lambda s: s['form'], 'closeout form 2')
+        set_toggle(tid, 'conditional', True)
+        review = submit_and_confirm(tid, 'Begin closeout')
+        assert any('ON' in line for line in review['lines']), review
+        record = next(op for op in ws('operations', query={'target': None, 'session': None, 'kinds': ['closeout'], 'unfinished_only': True}, after=None, limit=50)['value']['items'])
+        assert record['operation']['record']['spec']['conditional_no_loss'] is True, record
+        act('X', 'Revoke closeout'); until(tid, lambda s: s['confirm'], 'revoke closeout review'); confirm(tid)
+        last_outcome(tid, 'revoked', 'conditional closeout revoked')
+        assert clones['tool-custom'].exists()
 
-    step('backup, export, import and restore')
-    keys(tid, '6'); until(tid, lambda s: s['section'] == 'backup', 'backup section')
-    keys(tid, 'b'); until(tid, lambda s: s['form'], 'backup form'); set_text(tid, 'name', 'before-import')
-    submit_and_confirm(tid, 'Back up'); last_outcome(tid, 'written to', 'backup')
-    keys(tid, 'e'); until(tid, lambda s: s['form'], 'export form'); set_choice(tid, 'project', 'project:' + acme); set_text(tid, 'name', 'acme-export')
-    submit_and_confirm(tid, 'Export'); state = last_outcome(tid, 'Exported project definition', 'exported')
-    exported = next(t for t in new_outcomes(state) if 'Exported' in t).split(' to ', 1)[1].split('. It contains')[0]
-    # Importing a project whose locations are already bound here must not
-    # duplicate physical ownership: the review refuses it and keeps the draft.
-    keys(tid, 'i'); until(tid, lambda s: s['form'], 'import form')
-    set_text(tid, 'path', exported); set_choice(tid, 'collisions', 'new')
-    keys(tid, 'ctrl+s')
-    refused = until(tid, lambda s: s['form'] and s['form']['error'], 'duplicate physical identity refused')['form']
-    assert 'Remap it explicitly' in refused['error'] and refused['values']['path'] == exported, refused
-    assert not manager(tid)['confirm']
-    frame(tid, 'w12a-import-refused', 'Remap')
-    keys(tid, 'esc', 'esc'); until(tid, lambda s: not s['form'], 'refused import draft discarded')
-    # A definition without physical locations imports as new identities.
-    keys(tid, '1'); keys(tid, 'n'); until(tid, lambda s: s['form'] and 'project' in s['form']['title'].lower(), 'lab project form')
-    set_text(tid, 'name', 'Lab'); submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'lab project')
-    lab = next(e['value']['id'] for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'] if e['value']['name'] == 'Lab')
-    keys(tid, '6'); until(tid, lambda s: s['section'] == 'backup', 'backup section again')
-    keys(tid, 'e'); until(tid, lambda s: s['form'], 'lab export form'); set_choice(tid, 'project', 'project:' + lab); set_text(tid, 'name', 'lab-export')
-    submit_and_confirm(tid, 'Export'); state = last_outcome(tid, 'Exported project definition', 'lab exported')
-    lab_export = next(t for t in new_outcomes(state) if 'Exported' in t).split(' to ', 1)[1].split('. It contains')[0]
-    keys(tid, 'i'); until(tid, lambda s: s['form'], 'lab import form')
-    set_text(tid, 'path', lab_export); set_choice(tid, 'collisions', 'new')
-    review = submit_and_confirm(tid, 'Apply import')
-    assert any('stay disabled' in line for line in review['lines']), review
-    last_outcome(tid, 'apply import', 'imported')
-    labs = [e['value'] for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'] if e['value']['name'] == 'Lab']
-    assert len(labs) == 2 and len({p['id'] for p in labs}) == 2, labs
-    select_row(tid, lambda t: 'before-import' in t, 'named snapshot')
-    keys(tid, 'shift+r'); until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'restore', 'restore review')
-    confirm(tid, 'restore'); last_outcome(tid, 'restore catalog snapshot', 'restored')
-    frame(tid, 'w12-backup', 'before-import')
+        step('backup, export, import and restore')
+        keys(tid, '6'); until(tid, lambda s: s['section'] == 'backup', 'backup section')
+        keys(tid, 'b'); until(tid, lambda s: s['form'], 'backup form'); set_text(tid, 'name', 'before-import')
+        submit_and_confirm(tid, 'Back up'); last_outcome(tid, 'written to', 'backup')
+        keys(tid, 'e'); until(tid, lambda s: s['form'], 'export form'); set_choice(tid, 'project', 'project:' + acme); set_text(tid, 'name', 'acme-export')
+        submit_and_confirm(tid, 'Export'); state = last_outcome(tid, 'Exported project definition', 'exported')
+        exported = next(t for t in new_outcomes(state) if 'Exported' in t).split(' to ', 1)[1].split('. It contains')[0]
+        # Importing a project whose locations are already bound here must not
+        # duplicate physical ownership: the review refuses it and keeps the draft.
+        keys(tid, 'i'); until(tid, lambda s: s['form'], 'import form')
+        set_text(tid, 'path', exported); set_choice(tid, 'collisions', 'new')
+        keys(tid, 'ctrl+s')
+        refused = until(tid, lambda s: s['form'] and s['form']['error'], 'duplicate physical identity refused')['form']
+        assert 'Remap it explicitly' in refused['error'] and refused['values']['path'] == exported, refused
+        assert not manager(tid)['confirm']
+        frame(tid, 'w12a-import-refused', 'Remap')
+        keys(tid, 'esc', 'esc'); until(tid, lambda s: not s['form'], 'refused import draft discarded')
+        # A definition without physical locations imports as new identities.
+        keys(tid, '1'); keys(tid, 'n'); until(tid, lambda s: s['form'] and 'project' in s['form']['title'].lower(), 'lab project form')
+        set_text(tid, 'name', 'Lab'); submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'lab project')
+        lab = next(e['value']['id'] for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'] if e['value']['name'] == 'Lab')
+        keys(tid, '6'); until(tid, lambda s: s['section'] == 'backup', 'backup section again')
+        keys(tid, 'e'); until(tid, lambda s: s['form'], 'lab export form'); set_choice(tid, 'project', 'project:' + lab); set_text(tid, 'name', 'lab-export')
+        submit_and_confirm(tid, 'Export'); state = last_outcome(tid, 'Exported project definition', 'lab exported')
+        lab_export = next(t for t in new_outcomes(state) if 'Exported' in t).split(' to ', 1)[1].split('. It contains')[0]
+        keys(tid, 'i'); until(tid, lambda s: s['form'], 'lab import form')
+        set_text(tid, 'path', lab_export); set_choice(tid, 'collisions', 'new')
+        review = submit_and_confirm(tid, 'Apply import')
+        assert any('stay disabled' in line for line in review['lines']), review
+        last_outcome(tid, 'apply import', 'imported')
+        labs = [e['value'] for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'] if e['value']['name'] == 'Lab']
+        assert len(labs) == 2 and len({p['id'] for p in labs}) == 2, labs
+        select_row(tid, lambda t: 'before-import' in t, 'named snapshot')
+        keys(tid, 'shift+r'); until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'restore', 'restore review')
+        confirm(tid, 'restore'); last_outcome(tid, 'restore catalog snapshot', 'restored')
+        frame(tid, 'w12-backup', 'before-import')
 
     step('layouts through real PTY resizes; mouse tabs and footer actions')
     for cols, rows, expect in ((80, 24, 'Workspace'), (60, 24, 'Workspace'), (48, 12, 'Workspace'), (40, 10, 'needs 48×12'), (120, 32, 'Workspace')):
@@ -626,7 +641,9 @@ finally:
             cleanup['stop_review'] = review
             request = review.get('confirm_request')
             if request:
-                cleanup['stop'] = subprocess.run(request if isinstance(request, list) else ['sh', '-c', request], env=f.env, capture_output=True, text=True, timeout=120).returncode
+                confirmed = cli('runtime', 'confirm', review['response']['value']['id'], '--request', request, '--json', timeout=120)
+                cleanup['stop'] = confirmed.returncode
+                wait(lambda: not daemon_pids(), 'fixture runtime stopped', 60)
     except Exception as error:
         cleanup['stop_error'] = repr(error)
     for pid in daemon_pids():
