@@ -308,21 +308,35 @@ fn state_tone(state: OperationState) -> Tone {
 
 pub(super) fn rows(manager: &WorkspaceManager) -> Vec<Row> {
     match manager.section {
-        Section::Organization => manager
-            .org
-            .page
-            .iter()
-            .flat_map(|page| &page.items)
-            .map(|entity| {
-                entity_row(
-                    manager,
-                    manager
+        Section::Organization => {
+            // Pages follow the owner's stable ID order. Within a page, group by
+            // kind and name so related rows read together; selection stays by ID.
+            let mut rows: Vec<(u8, Row)> = manager
+                .org
+                .page
+                .iter()
+                .flat_map(|page| &page.items)
+                .map(|entity| {
+                    let current = manager
                         .known
                         .get(&entity.id().to_string())
-                        .unwrap_or(entity),
-                )
-            })
-            .collect(),
+                        .unwrap_or(entity);
+                    let rank = match current {
+                        Entity::Project(_) => 0,
+                        Entity::WorkArea(_) => 1,
+                        Entity::Repository(_) => 2,
+                        Entity::Location(_) => 3,
+                    };
+                    (rank, entity_row(manager, current))
+                })
+                .collect();
+            rows.sort_by(|(a, x), (b, y)| {
+                a.cmp(b)
+                    .then_with(|| x.text.to_lowercase().cmp(&y.text.to_lowercase()))
+                    .then_with(|| x.key.cmp(&y.key))
+            });
+            rows.into_iter().map(|(_, row)| row).collect()
+        }
         Section::Sessions => {
             let mut rows = vec![Row {
                 key: manager.session.clone(),

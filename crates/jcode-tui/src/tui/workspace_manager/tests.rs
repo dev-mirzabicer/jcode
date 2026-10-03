@@ -1211,3 +1211,25 @@ fn directory_proposal_prefills_its_listed_choice_and_newer_pages_advance_the_rev
         }
     ));
 }
+
+#[test]
+fn organization_rows_group_by_kind_and_name_within_a_page() {
+    let (mut m, mut wire) = ready(false);
+    wire.drain(&mut m);
+    let repository = Entity::Repository(Repository {
+        id: RepositoryId::new(),
+        name: "tool".into(),
+        remotes: vec![],
+        state: OrganizationState::Active,
+        revision: 1,
+    });
+    let items = vec![repository, project("beta"), project("Alpha")];
+    m.org.page = Some(Page {
+        revision: 3,
+        total: 3,
+        items,
+        next: None,
+    });
+    let texts: Vec<String> = describe::rows(&m).into_iter().map(|row| row.text).collect();
+    assert_eq!(texts, vec!["P  Alpha", "P  beta", "R  tool"]);
+}
