@@ -284,10 +284,6 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if app.handle_onboarding_continue_prompt_key(code) {
-        return Ok(());
-    }
-
     if app.handle_instruction_key(code, modifiers) {
         app.dispatch_remote_instruction_request(remote).await;
         return Ok(());
@@ -316,6 +312,12 @@ async fn handle_remote_key_internal(
     if app.startup_context_overlay_scroll().is_some() {
         app.handle_startup_context_details_key(code, modifiers);
         app.dispatch_remote_startup_context_request(remote).await;
+        return Ok(());
+    }
+
+    // Full-screen modal owners above receive keys before the onboarding
+    // prompt, as on the local path; the prompt is drawn beneath them.
+    if app.handle_onboarding_continue_prompt_key(code) {
         return Ok(());
     }
 
