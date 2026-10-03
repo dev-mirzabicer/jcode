@@ -155,10 +155,7 @@ impl WorkspaceService {
     pub fn lease(&self, exclusive: bool) -> Result<CatalogLease> {
         let parent = self.root.parent().ok_or_else(|| io("Missing state root"))?;
         if !parent.is_dir() {
-            return Err(issue(
-                IssueCode::RecoveryRequired,
-                "Workspace is not initialized",
-            ));
+            return Err(Issue::not_initialized());
         }
         let file = private_file(&parent.join("workspace.lock"), false)?;
         let result = if exclusive {
@@ -390,7 +387,24 @@ pub(crate) fn connect(root: &Path) -> Result<Connection> {
             ),
         ));
     }
-    let marker: Installation = read_json(&root.with_file_name("workspace-installation.json"))?;
+    let marker_path = root.with_file_name("workspace-installation.json");
+    let absent = |path: &Path| match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(corrupt(e)),
+    };
+    if absent(&marker_path)? {
+        // First genuine initialization has neither identity nor data. Anything
+        // else is existing state that must not be mistaken for a fresh start.
+        return Err(if absent(root)? {
+            Issue::not_initialized()
+        } else {
+            corrupt(
+                "Workspace exists without installation identity. Preserve it and repair explicitly",
+            )
+        });
+    }
+    let marker: Installation = read_json(&marker_path)?;
     if !marker.ready {
         return Err(issue(
             IssueCode::RecoveryRequired,

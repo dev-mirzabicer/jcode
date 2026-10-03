@@ -162,14 +162,7 @@ fn uninitialized_catalog_offers_reviewed_initialize_only() {
     let mut m = WorkspaceManager::new("session_self".into(), true, Section::Organization);
     let mut wire = Wire::new();
     answer_probes(&mut m, &mut wire, false);
-    answer_status(
-        &mut m,
-        &mut wire,
-        Err(Issue {
-            code: IssueCode::RecoveryRequired,
-            detail: "Workspace is not initialized".into(),
-        }),
-    );
+    answer_status(&mut m, &mut wire, Err(Issue::not_initialized()));
     let actions = actions::available(&m);
     assert!(actions.iter().any(|spec| spec.key == 'I'));
     assert!(

@@ -117,10 +117,7 @@ fn workspace_manager_remote_physical_keys_send_only_management_requests() {
         app.handle_server_event(
             crate::protocol::ServerEvent::WorkspaceResponse {
                 id,
-                response: Box::new(crate::workspace::WorkspaceResponse::Error(crate::workspace::Issue {
-                    code: crate::workspace::IssueCode::RecoveryRequired,
-                    detail: "Workspace is not initialized".into(),
-                })),
+                response: Box::new(crate::workspace::WorkspaceResponse::Error(crate::workspace::Issue::not_initialized())),
             },
             &mut remote,
         );

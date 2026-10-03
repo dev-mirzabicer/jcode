@@ -233,7 +233,7 @@ pub(crate) fn available(manager: &WorkspaceManager) -> Vec<ActionSpec> {
         return actions;
     }
     let ready = manager.catalog_ready();
-    if matches!(&manager.catalog, Some(Err(issue)) if issue.code == IssueCode::RecoveryRequired && issue.detail.contains("not initialized"))
+    if matches!(&manager.catalog, Some(Err(issue)) if issue.is_not_initialized())
         && manager.section != Section::Runtime
     {
         actions.push(spec('I', "Initialize catalog", Action::Initialize));

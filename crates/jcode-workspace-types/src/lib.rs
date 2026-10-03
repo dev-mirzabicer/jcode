@@ -367,6 +367,22 @@ pub struct Issue {
     pub code: IssueCode,
     pub detail: String,
 }
+/// A catalog that was never initialized. It is reported with an existing code
+/// so older clients still decode it; clients recognize it through this owner.
+const NOT_INITIALIZED: &str = "Workspace is not initialized";
+impl Issue {
+    pub fn not_initialized() -> Self {
+        Self {
+            code: IssueCode::RecoveryRequired,
+            detail: NOT_INITIALIZED.into(),
+        }
+    }
+    /// True only for a genuinely uninitialized catalog, never for a missing or
+    /// damaged catalog that was initialized before.
+    pub fn is_not_initialized(&self) -> bool {
+        self.code == IssueCode::RecoveryRequired && self.detail == NOT_INITIALIZED
+    }
+}
 impl std::fmt::Display for Issue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}: {}", self.code, self.detail)

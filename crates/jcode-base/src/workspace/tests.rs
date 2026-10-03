@@ -1611,3 +1611,29 @@ fn primary_location_preparation_requires_explicit_cwd_and_preserves_placement() 
     assert!(!missing.exists());
     assert!(!roots[1].1.join(".git").exists());
 }
+
+#[test]
+fn only_a_never_initialized_catalog_reports_not_initialized() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = WorkspaceService::new(dir.path());
+    assert!(service.status().unwrap_err().is_not_initialized());
+    let mut session = crate::session::Session::create(None, None);
+    session.working_dir = Some("/synthetic/legacy".into());
+    assert!(
+        service
+            .session_location_view(&session)
+            .catalog_issue
+            .is_some_and(|issue| issue.is_not_initialized())
+    );
+    // Existing data without its identity is never treated as a fresh start.
+    let stray = tempfile::tempdir().unwrap();
+    std::fs::create_dir(stray.path().join("workspace")).unwrap();
+    let error = WorkspaceService::new(stray.path()).status().unwrap_err();
+    assert!(!error.is_not_initialized());
+    assert_eq!(error.code, IssueCode::CorruptState);
+    // A lost identity after initialization is damage, not an empty catalog.
+    service.initialize(RequestId::new()).unwrap();
+    std::fs::remove_file(dir.path().join("workspace-installation.json")).unwrap();
+    let error = service.status().unwrap_err();
+    assert!(!error.is_not_initialized(), "{error:?}");
+}

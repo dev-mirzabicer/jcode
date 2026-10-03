@@ -510,7 +510,7 @@ fn catalog_lines(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) ->
             false
         }
         Some(Err(issue)) => {
-            if issue.detail.contains("not initialized") {
+            if issue.is_not_initialized() {
                 push(
                     lines,
                     Tone::Warn,
