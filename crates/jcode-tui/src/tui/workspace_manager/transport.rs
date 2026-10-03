@@ -486,9 +486,12 @@ pub(super) fn reduce(manager: &mut WorkspaceManager, op: Op, event: ServerEvent)
                     );
                     manager.launched = Some(*record);
                     manager.sessions.views.clear();
+                    manager.draft_settled();
                 }
                 PrimaryLaunchResponse::Rejected { request: id, issue } if id == request.request => {
                     manager.note(Tone::Bad, format!("Launch rejected: {issue}"));
+                    // Invalid preparation publishes nothing; the launch draft returns.
+                    manager.draft_failed(&issue);
                 }
                 _ => mismatch(manager, Op::Launch(request)),
             }
@@ -566,6 +569,14 @@ fn workspace(
                 }
                 .label();
                 issue_note(manager, &format!("Rejected: {label}"), issue);
+                manager.draft_failed(issue);
+            }
+            View::Review
+            | View::CarryReview(_)
+            | View::StartupPlans { .. }
+            | View::Volumes(Some(_)) => {
+                issue_note(manager, "Request rejected", issue);
+                manager.draft_failed(issue);
             }
             _ => issue_note(manager, "Request rejected", issue),
         }
@@ -650,6 +661,8 @@ fn workspace(
                 );
                 manager.load_ops();
                 manager.load_known();
+                // Publication advanced the catalog; later reviews need it.
+                manager.queue(Op::read(View::Status, WorkspaceRequest::Status {}));
             }
             manager.ops.clone = Some(*record);
         }
@@ -722,13 +735,21 @@ fn workspace(
             }
             manager.backups.snapshots = Some(snapshots);
         }
-        (view, R::Closeout(response)) => closeout(manager, view, request, *response),
+        (view, R::Closeout(response)) => {
+            if view == View::Effect {
+                manager.draft_settled();
+            }
+            closeout(manager, view, request, *response)
+        }
         (View::Review, response) => {
             if let Some(confirm) = describe::review_confirm(manager, &request, response) {
                 manager.confirm = Some(confirm);
             }
         }
-        (View::Effect, response) => effect(manager, request, response),
+        (View::Effect, response) => {
+            manager.draft_settled();
+            effect(manager, request, response)
+        }
         (_, _) => manager.note(
             Tone::Warn,
             "Unexpected reply kind; refresh to read current state.",
@@ -962,6 +983,14 @@ fn location(
         }
         PrimaryLocationResponse::State { record } => {
             let session = record.input.session.clone();
+            if matches!(
+                command,
+                PrimaryLocationCommand::Change { .. } | PrimaryLocationCommand::AdoptLegacy { .. }
+            ) {
+                // Accepted, even if pending: the request now has its own
+                // durable operation identity and can be inspected or cancelled.
+                manager.draft_settled();
+            }
             let tone = match record.state {
                 LocationChangeState::Complete => Tone::Good,
                 LocationChangeState::Pending => Tone::Accent,
@@ -989,6 +1018,7 @@ fn location(
         PrimaryLocationResponse::Rejected { issue } => {
             let label = Op::Location { view, command }.label();
             issue_note(manager, &format!("Rejected: {label}"), &issue);
+            manager.draft_failed(&issue);
         }
     }
 }
@@ -999,10 +1029,15 @@ fn runtime(
     request: RuntimeRequest,
     response: RuntimeResponse,
 ) {
+    let human_step = matches!(view, View::Review | View::Effect);
+    let effect = view == View::Effect;
     match (view, response) {
         (_, RuntimeResponse::Error(issue)) => {
             let label = Op::runtime(View::Effect, request).label();
             issue_note(manager, &format!("Rejected: {label}"), &issue);
+            if human_step {
+                manager.draft_failed(&issue);
+            }
         }
         (View::RuntimeStatus, RuntimeResponse::Status(status)) => {
             if let Some(operation) = &status.operation {
@@ -1024,6 +1059,9 @@ fn runtime(
             manager.confirm = Some(describe::shutdown_confirm(&review));
         }
         (View::RuntimeOperation | View::Effect, RuntimeResponse::Operation(operation)) => {
+            if effect {
+                manager.draft_settled();
+            }
             if matches!(view_label(&request), Some(label) if !label.is_empty()) {
                 manager.note(
                     describe::phase_tone(operation.phase),

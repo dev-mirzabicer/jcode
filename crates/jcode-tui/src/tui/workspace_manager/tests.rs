@@ -981,3 +981,117 @@ fn local_client_reports_shared_runtime_requirement() {
     let text = frame(&mut m, 100, 24);
     assert!(text.contains("needs the shared runtime"), "{text}");
 }
+
+#[test]
+fn rejected_or_declined_review_reopens_the_draft_and_conflict_refreshes_revision() {
+    let (mut m, mut wire) = ready(false);
+    wire.drain(&mut m);
+    key(&mut m, KeyCode::Char('n'));
+    type_text(&mut m, "Acme");
+    m.key(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert!(m.form.is_none());
+    let sent = wire.drain(&mut m);
+    let (id, _) = find(&sent, |r| {
+        matches!(
+            r,
+            WorkspaceRequest::Review {
+                expected_revision: 3,
+                ..
+            }
+        )
+    });
+    // Another writer advanced the catalog: the server refuses the stale review.
+    let conflict = Issue {
+        code: IssueCode::Conflict,
+        detail: "Catalog changed: expected 3, current 9".into(),
+    };
+    assert!(m.accept(id, workspace(id, WorkspaceResponse::Error(conflict))));
+    let (_, form) = m
+        .form
+        .as_ref()
+        .expect("the draft returns instead of being lost");
+    assert_eq!(form.fields[0].value, "Acme");
+    assert!(
+        form.error
+            .as_deref()
+            .is_some_and(|e| e.contains("Conflict"))
+    );
+    // The conflict refreshes catalog status; the resubmission uses it.
+    let rest = answer_status(&mut m, &mut wire, Ok(status(9)));
+    assert!(rest.is_empty(), "{rest:?}");
+    m.key(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let sent = wire.drain(&mut m);
+    let (id, request) = find(&sent, |r| matches!(r, WorkspaceRequest::Review { .. }));
+    assert!(matches!(
+        request,
+        WorkspaceRequest::Review {
+            expected_revision: 9,
+            ..
+        }
+    ));
+    let WorkspaceRequest::Review { change, .. } = request.clone() else {
+        unreachable!()
+    };
+    let review = Review {
+        id: ReviewId::new(),
+        revision: 9,
+        change,
+        targets: vec![],
+        issues: vec![],
+    };
+    assert!(m.accept(id, workspace(id, WorkspaceResponse::Review(review))));
+    assert!(m.confirm.is_some());
+    // Declining the review sends nothing and returns the same draft.
+    key(&mut m, KeyCode::Char('n'));
+    assert!(m.confirm.is_none());
+    assert!(wire.drain(&mut m).is_empty());
+    assert_eq!(
+        m.form.as_ref().expect("draft reopened").1.fields[0].value,
+        "Acme"
+    );
+    // Discarding the reopened draft still needs the dirty double-Esc.
+    key(&mut m, KeyCode::Esc);
+    key(&mut m, KeyCode::Esc);
+    assert!(m.form.is_none() && m.draft.is_none());
+}
+
+#[test]
+fn an_accepted_effect_settles_the_draft() {
+    let (mut m, mut wire) = ready(false);
+    wire.drain(&mut m);
+    key(&mut m, KeyCode::Char('n'));
+    type_text(&mut m, "Acme");
+    m.key(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let sent = wire.drain(&mut m);
+    let (id, request) = find(&sent, |r| matches!(r, WorkspaceRequest::Review { .. }));
+    let WorkspaceRequest::Review { change, .. } = request.clone() else {
+        unreachable!()
+    };
+    let review = Review {
+        id: ReviewId::new(),
+        revision: 3,
+        change,
+        targets: vec![],
+        issues: vec![],
+    };
+    assert!(m.accept(id, workspace(id, WorkspaceResponse::Review(review))));
+    key(&mut m, KeyCode::Char('y'));
+    let sent = wire.drain(&mut m);
+    let (id, request) = find(&sent, |r| matches!(r, WorkspaceRequest::Apply { .. }));
+    let WorkspaceRequest::Apply {
+        request: request_id,
+        ..
+    } = request.clone()
+    else {
+        unreachable!()
+    };
+    let receipt = Receipt {
+        operation: OperationId::new(),
+        request: request_id,
+        revision: 4,
+        targets: vec![],
+        issues: vec![],
+    };
+    assert!(m.accept(id, workspace(id, WorkspaceResponse::Receipt(receipt))));
+    assert!(m.draft.is_none() && m.form.is_none());
+}

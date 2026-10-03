@@ -301,6 +301,9 @@ pub struct WorkspaceManager {
     pub(crate) backups: Backups,
     pub(crate) runtime: Runtime,
     pub(crate) form: Option<(actions::FormKind, Form)>,
+    /// The submitted draft whose review or effect has not settled. A
+    /// rejection or a declined review reopens it rather than losing input.
+    pub(crate) draft: Option<(actions::FormKind, Form)>,
     pub(crate) confirm: Option<Confirm>,
     pub(crate) uncertain: Vec<Uncertain>,
     pub(crate) show_uncertain: bool,
@@ -341,6 +344,7 @@ impl WorkspaceManager {
             backups: Backups::default(),
             runtime: Runtime::default(),
             form: None,
+            draft: None,
             confirm: None,
             uncertain: Vec::new(),
             show_uncertain: false,
@@ -806,7 +810,13 @@ impl WorkspaceManager {
                     let kind = kind.clone();
                     let form = form.clone();
                     match actions::build(self, &kind, &form) {
-                        Ok(()) => self.form = None,
+                        Ok(()) => {
+                            // A build may open its follow-up form directly.
+                            if self.form.as_ref().is_some_and(|(open, _)| *open == kind) {
+                                self.form = None;
+                            }
+                            self.draft = Some((kind, form));
+                        }
                         Err(error) => {
                             if let Some((_, form)) = &mut self.form {
                                 form.error = Some(error);
@@ -896,13 +906,9 @@ impl WorkspaceManager {
             return;
         };
         match code {
-            KeyCode::Esc => {
-                self.confirm = None;
-                self.status = "Review closed; nothing was sent.".into();
-            }
+            KeyCode::Esc => self.decline_review("Review closed; nothing was sent."),
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.confirm = None;
-                self.status = "Review closed; nothing was sent.".into();
+                self.decline_review("Review closed; nothing was sent.")
             }
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
                 confirm.yes = !confirm.yes;
@@ -919,10 +925,7 @@ impl WorkspaceManager {
                 confirm.yes = true;
                 self.confirm_submit();
             }
-            KeyCode::Char('n') => {
-                self.confirm = None;
-                self.status = "Review declined; nothing was sent.".into();
-            }
+            KeyCode::Char('n') => self.decline_review("Review declined; nothing was sent."),
             KeyCode::Enter => {
                 if confirm.typed.is_some() {
                     confirm.yes = true;
@@ -933,13 +936,55 @@ impl WorkspaceManager {
         }
     }
 
+    /// Closing a review sends nothing. A draft that produced it returns for
+    /// editing; Esc on the reopened form discards it as usual.
+    fn decline_review(&mut self, message: &str) {
+        self.confirm = None;
+        self.status = message.into();
+        if self.form.is_none()
+            && let Some(draft) = self.draft.take()
+        {
+            self.form = Some(draft);
+            self.status = format!("{message} Your draft is reopened.");
+        }
+    }
+
+    /// A review or effect from the last submitted draft was refused. Reopen
+    /// the draft with the reason. A stale catalog revision also refreshes the
+    /// status, so the next submission reviews against current state.
+    pub(crate) fn draft_failed(&mut self, issue: &Issue) {
+        if issue.code == IssueCode::Conflict {
+            self.queue(Op::read(
+                transport::View::Status,
+                WorkspaceRequest::Status {},
+            ));
+        }
+        if self.form.is_some() || self.confirm.is_some() {
+            return;
+        }
+        if let Some((kind, mut form)) = self.draft.take() {
+            let mut error = format!("{:?}: {}", issue.code, issue.detail);
+            if issue.code == IssueCode::Conflict {
+                error.push_str(
+                    " — state changed since this draft. Ctrl+S reviews it against current state.",
+                );
+            }
+            form.error = Some(error);
+            self.form = Some((kind, form));
+        }
+    }
+
+    /// The draft's effect was accepted; it no longer needs to be kept.
+    pub(crate) fn draft_settled(&mut self) {
+        self.draft = None;
+    }
+
     pub(crate) fn confirm_submit(&mut self) {
         let Some(confirm) = &self.confirm else {
             return;
         };
         if !confirm.yes {
-            self.confirm = None;
-            self.status = "Review declined; nothing was sent.".into();
+            self.decline_review("Review declined; nothing was sent.");
             return;
         }
         if let Some(word) = confirm.typed

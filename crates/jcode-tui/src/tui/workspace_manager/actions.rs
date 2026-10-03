@@ -575,6 +575,8 @@ pub(crate) fn run(manager: &mut WorkspaceManager, action: Action) {
     if !available(manager).iter().any(|spec| spec.action == action) {
         return;
     }
+    // A new action supersedes any earlier submitted draft.
+    manager.draft = None;
     match action {
         Action::Refresh => {
             manager.refresh();
@@ -1633,6 +1635,7 @@ fn shutdown_options(
 
 /// Open the form for an action, prefilled from the current selection.
 pub(crate) fn open(manager: &mut WorkspaceManager, kind: FormKind) {
+    manager.draft = None;
     let form = match &kind {
         FormKind::CreateProject => Form::new("New project", "Review", vec![
             Field::text("name", "Name", "").required(),
