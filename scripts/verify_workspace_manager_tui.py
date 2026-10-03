@@ -344,6 +344,26 @@ try:
     assert view['location']['placement'] == {'kind': 'work_area', 'id': sprint} and view['location']['cwd'] == str(clones['tool-custom']), view
     frame(tid, 'w05-sessions-moved', 'Placement')
 
+    step('projectless standalone launch into a newly created empty cwd; project placement needs an explicit cwd')
+    standalone_root = ROOT / 'standalone'; standalone_root.mkdir()
+    keys(tid, '1'); select_row(tid, lambda t: t.startswith('P  Acme'), 'Acme project')
+    keys(tid, 'l'); until(tid, lambda s: s['form'] and 'Launch' in s['form']['title'], 'project launch form')
+    form = manager(tid)['form']
+    assert form['values']['placement'] == 'project:' + acme and form['values']['cwd'] == '', form
+    keys(tid, 'ctrl+s')
+    form = until(tid, lambda s: s['form'] and s['form']['error'], 'explicit cwd required')['form']
+    assert not manager(tid)['confirm'], 'nothing is reviewed without an explicit cwd'
+    set_choice(tid, 'placement', 'new-standalone'); set_text(tid, 'root', str(standalone_root))
+    set_choice(tid, 'cwd_mode', 'create'); set_text(tid, 'cwd', str(standalone_root / 'fresh'))
+    MARK[:] = [manager(tid)['outcome_seq']]
+    submit_and_confirm(tid, 'Launch primary')
+    standalone_session = until(tid, lambda s: s['launched'] and s['launched'] != launched, 'standalone launched', 120)['launched']
+    view = rpc('primary_location', command={'action': 'inspect_session', 'session': standalone_session})['response']['view']
+    assert view['location']['placement']['kind'] == 'standalone' and view['location']['cwd'] == str(standalone_root / 'fresh'), view
+    assert (standalone_root / 'fresh').is_dir() and not any((standalone_root / 'fresh').iterdir())
+    assert not any(str(standalone_root) in str(e['value'].get('home')) for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'])
+    frame(tid, 'w05b-standalone-launched', 'Launched')
+
     step("adopt the tester's legacy session into the Docs directory")
     select_row(tid, lambda t: t.startswith('● '), 'own session')
     until(tid, lambda s: any(a.startswith('a Adopt') for a in s['actions']), 'legacy adoption offered')
@@ -534,7 +554,7 @@ try:
     frame(tid, 'w19-recovery', 'Needs decision')
     keys(tid, 'shift+l'); until(tid, lambda s: s['confirm'], 'leave review'); confirm(tid)
     last_outcome(tid, 'left stopped', 'recovery resolved')
-    result.update(status='passed', conflicts_recovered=len(CONFLICTS), launched=launched, legacy_session=legacy_session, clones={k: str(v) for k, v in clones.items()}, frames=frames)
+    result.update(status='passed', conflicts_recovered=len(CONFLICTS), launched=launched, standalone_session=standalone_session, legacy_session=legacy_session, clones={k: str(v) for k, v in clones.items()}, frames=frames)
 except Exception:
     result['error'] = traceback.format_exc()
 finally:
