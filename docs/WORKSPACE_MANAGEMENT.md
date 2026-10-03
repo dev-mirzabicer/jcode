@@ -167,7 +167,9 @@ supervision state, the macOS login service and interrupted turns.
 - **Start** (`S`): when the runtime is stopped, the section shows its durable
   intent read from local state (it starts nothing by itself). `S` runs the
   explicit `jcode runtime start` for this socket, then the client reconnects.
-  An intentional Stop is never undone automatically.
+  An intentional Stop is never undone automatically. While the runtime is
+  unreachable, operation controls are hidden: only the live coordinator can act
+  on a shutdown, and a finished one is shown as the last shutdown.
 
 `jcode runtime …` remains the scripted and offline control. See
 [runtime control](RUNTIME_CONTROL.md).

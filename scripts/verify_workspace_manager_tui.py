@@ -281,10 +281,22 @@ def client_pids():
             owned.append(int(pid))
     return owned
 
+def attach(session):
+    """Attach the fixture connection to an existing session. A live session
+    reports its identity in the history snapshot rather than a session event."""
+    f.counter += 1; ident = f.counter
+    f.send({'type': 'subscribe', 'id': ident, 'working_dir': str(f.project), 'selfdev': False, 'target_session_id': session})
+    result = f.until(lambda e: e.get('id') == ident and e.get('type') in ('done', 'error'))
+    assert result['type'] == 'done', result
+    seen = {e.get('session_id') for e in f.events if e.get('type') in ('session', 'history') and e.get('session_id')}
+    assert seen == {session}, (session, seen, sorted({e.get('type') for e in f.events}))
+
 def fixture_connect():
     import socket as socketlib
     f.client = socketlib.socket(socketlib.AF_UNIX); f.client.connect(str(f.sockpath))
     f.client.settimeout(120); f.reader = f.client.makefile('rb')
+    # Events from an earlier connection must not answer this one's requests.
+    f.events.clear()
 
 def cli(*args, timeout=180):
     run = subprocess.run([f.BIN, '--no-update', '--socket', str(f.sockpath), *args], env=f.env, capture_output=True, text=True, timeout=timeout)
@@ -598,7 +610,7 @@ try:
 
     step('runtime: finish-current stop waits for a held turn and is cancelled while waiting')
     fixture_connect(); gate_entered.clear(); gate_release.clear()
-    f.subscribe(launched); f.send({'type': 'message', 'id': 9001, 'content': 'hold this turn'})
+    attach(launched); f.send({'type': 'message', 'id': 9001, 'content': 'hold this turn'})
     assert gate_entered.wait(60), 'turn reached the fixture provider'
     open_manager(tid, '/runtime')
     until(tid, lambda s: s['section'] == 'runtime' and s['runtime']['desired_stopped'] is False, 'runtime status')
@@ -641,7 +653,7 @@ try:
 
     step('crash during a turn: recovery selection Leave stopped')
     fixture_connect(); gate_entered.clear(); gate_release.clear()
-    f.subscribe(launched); f.send({'type': 'message', 'id': 9002, 'content': 'hold this turn again'})
+    attach(launched); f.send({'type': 'message', 'id': 9002, 'content': 'hold this turn again'})
     assert gate_entered.wait(60), 'second turn reached the fixture provider'
     crashed = daemon_pids()
     rows = [r for r in subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines() if str(ROOT) in r]
