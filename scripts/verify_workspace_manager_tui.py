@@ -207,7 +207,7 @@ MARK = []
 
 def confirm(tid, typed=None):
     review = manager(tid)['confirm']
-    MARK[:] = manager(tid)['outcomes']
+    MARK[:] = [manager(tid)['outcome_seq']]
     (evidence / 'reviews.jsonl').open('a').write(json.dumps(review) + '\n')
     if typed:
         type_text(tid, typed); keys(tid, 'tab'); keys(tid, 'enter')
@@ -219,7 +219,8 @@ def confirm(tid, typed=None):
 def new_outcomes(state):
     outcomes = state['outcomes']
     if not MARK: return outcomes
-    return outcomes[:outcomes.index(MARK[0])] if MARK[0] in outcomes else outcomes
+    # By sequence, not text: identical outcome texts stay distinguishable.
+    return outcomes[:max(0, state['outcome_seq'] - MARK[0])]
 
 def last_outcome(tid, needle, label, seconds=90):
     """Wait for an outcome produced after the most recent confirmation."""
@@ -407,7 +408,7 @@ try:
     act('i', 'Inventory'); act('d', 'Disposition')
     until(tid, lambda s: s['form'] and s['form']['title'] == 'Record disposition', 'disposition form')
     set_choice(tid, 'kind', 'redundant'); set_text(tid, 'reason', 'Fixture data')
-    MARK[:] = manager(tid)['outcomes']; keys(tid, 'ctrl+s')
+    MARK[:] = [manager(tid)['outcome_seq']]; keys(tid, 'ctrl+s')
     until(tid, lambda s: not s['form'] and new_outcomes(s) and not s['pending'], 'disposition recorded', 120)
     (evidence / 'closeout-d.json').write_text(json.dumps(manager(tid), indent=1))
     frame(tid, 'w09-closeout-inventory', 'Inventory')

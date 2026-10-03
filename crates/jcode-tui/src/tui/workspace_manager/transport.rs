@@ -842,12 +842,28 @@ fn closeout(
                     manager.closeouts.recovery = Some((**review).clone());
                     manager.note(
                         Tone::Accent,
-                        "Recovery review ready. Inspect it, then apply (A).",
+                        "Recovery review ready. Inspect it, then apply (Y).",
                     );
                 }
-                Some(CloseoutActionResult::Record(record)) => {
-                    manager.note(Tone::Good, format!("Closeout is now {:?}.", record.stage));
-                    manager.closeouts.record = Some((**record).clone());
+                Some(CloseoutActionResult::Record(result)) => {
+                    let summary = match &record.spec.action {
+                        CloseoutAction::Refresh => "Inventory refreshed".to_string(),
+                        CloseoutAction::Preserve => "Preservation verified".to_string(),
+                        CloseoutAction::Disposition { decision } => {
+                            format!("Disposition recorded for entry {}", decision.entry)
+                        }
+                        CloseoutAction::ApproveRemoval { .. } => "Removal approved".to_string(),
+                        CloseoutAction::Finish => "Removal finished".to_string(),
+                        CloseoutAction::ApplyRecovery { .. } => "Recovery applied".to_string(),
+                        CloseoutAction::ReviewRemoval | CloseoutAction::ReviewRecovery { .. } => {
+                            "Done".to_string()
+                        }
+                    };
+                    manager.note(
+                        Tone::Good,
+                        format!("{summary}; closeout is now {:?}.", result.stage),
+                    );
+                    manager.closeouts.record = Some((**result).clone());
                 }
                 None => {}
             }

@@ -308,6 +308,8 @@ pub struct WorkspaceManager {
     pub(crate) uncertain: Vec<Uncertain>,
     pub(crate) show_uncertain: bool,
     pub(crate) outcomes: VecDeque<(Tone, String)>,
+    /// Count of outcomes ever noted; identical texts stay distinguishable.
+    pub(crate) outcome_seq: u64,
     pub(crate) status: String,
     pub(crate) help: bool,
     pub(crate) detail: bool,
@@ -349,6 +351,7 @@ impl WorkspaceManager {
             uncertain: Vec::new(),
             show_uncertain: false,
             outcomes: VecDeque::new(),
+            outcome_seq: 0,
             status: String::new(),
             help: false,
             detail: false,
@@ -454,6 +457,7 @@ impl WorkspaceManager {
         self.status = text.clone();
         self.outcomes.push_front((tone, text));
         self.outcomes.truncate(50);
+        self.outcome_seq += 1;
     }
 
     pub(crate) fn queue(&mut self, op: Op) {
@@ -1273,6 +1277,7 @@ impl WorkspaceManager {
             "queued": self.queued.len(),
             "status": self.status,
             "outcomes": self.outcomes.iter().take(10).map(|(_, text)| text.clone()).collect::<Vec<_>>(),
+            "outcome_seq": self.outcome_seq,
             "actions": actions::available(self).iter().map(|spec| format!("{} {}", spec.key, spec.label)).collect::<Vec<_>>(),
             "runtime": {
                 "desired_stopped": self.runtime.status.as_ref().map(|s| s.desired_stopped),
