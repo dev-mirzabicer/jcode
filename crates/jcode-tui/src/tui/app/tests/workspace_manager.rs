@@ -125,8 +125,9 @@ fn workspace_manager_remote_physical_keys_send_only_management_requests() {
             &mut remote,
         );
         app.input.clear();
-        super::remote::handle_remote_key_event(&mut app, KeyEvent::new(KeyCode::Char('I'), KeyModifiers::NONE), &mut remote).await.unwrap();
-        assert_eq!(app.workspace_debug()["confirm"]["typed"], serde_json::Value::Null);
+        // Enhanced keyboard reporting delivers Shift+i as 'i' plus SHIFT.
+        super::remote::handle_remote_key_event(&mut app, KeyEvent::new(KeyCode::Char('i'), KeyModifiers::SHIFT), &mut remote).await.unwrap();
+        assert_eq!(app.workspace_debug()["confirm"]["title"], "Initialize the workspace catalog");
         assert!(app.input.is_empty(), "management keys never reach the composer");
         super::remote::handle_remote_key_event(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &mut remote).await.unwrap();
         assert!(app.workspace_debug()["confirm"].is_null(), "declined review sends nothing: {}", app.workspace_debug());

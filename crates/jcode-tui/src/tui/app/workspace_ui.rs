@@ -85,6 +85,14 @@ impl App {
     }
 
     pub(super) fn handle_workspace_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        // Terminals with enhanced keyboard reporting send Shift+letter as the
+        // lowercase key plus SHIFT; actions are bound to the typed character.
+        let code = match code {
+            KeyCode::Char(c) => {
+                KeyCode::Char(super::input::shifted_printable_fallback(c, modifiers))
+            }
+            other => other,
+        };
         let handled = self
             .workspace_ui
             .manager

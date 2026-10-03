@@ -1362,7 +1362,7 @@ fn is_layout_modified_text_char(c: char) -> bool {
     !c.is_control() && c != ' ' && !c.is_ascii_alphanumeric()
 }
 
-fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
+pub(super) fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
     if modifiers.contains(KeyModifiers::SHIFT) && c.is_ascii_lowercase() {
         return c.to_ascii_uppercase();
     }
