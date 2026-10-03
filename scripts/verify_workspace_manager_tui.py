@@ -407,7 +407,8 @@ try:
     # A human disposition on one inventoried entry (the full archive covers the rest).
     act('i', 'Inventory'); act('d', 'Disposition')
     until(tid, lambda s: s['form'] and s['form']['title'] == 'Record disposition', 'disposition form')
-    set_choice(tid, 'kind', 'redundant'); set_text(tid, 'reason', 'Fixture data')
+    # Preserve keeps the information; the human choice is recorded with provenance.
+    set_choice(tid, 'kind', 'preserve')
     MARK[:] = [manager(tid)['outcome_seq']]; keys(tid, 'ctrl+s')
     until(tid, lambda s: not s['form'] and new_outcomes(s) and not s['pending'], 'disposition recorded', 120)
     (evidence / 'closeout-d.json').write_text(json.dumps(manager(tid), indent=1))
