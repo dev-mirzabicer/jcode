@@ -290,6 +290,7 @@ async fn wait_for_reload_handoff_before_reconnect(
                     _ = &mut wait => break,
                     _ = redraw.tick() => {
                         app.poll_workspace_local();
+                        super::check_debug_command_while_disconnected(app);
                         terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
                     }
                     event = event_stream.next() => {
@@ -399,6 +400,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             result = &mut connect => break result,
             _ = redraw.tick() => {
                 app.poll_workspace_local();
+                        super::check_debug_command_while_disconnected(app);
                 terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
             }
             event = event_stream.next() => {
@@ -521,6 +523,8 @@ pub(in crate::tui::app) async fn connect_with_retry(
                             tokio::select! {
                                 _ = &mut wait => break,
                                 _ = redraw.tick() => {
+                                    app.poll_workspace_local();
+                                    super::check_debug_command_while_disconnected(app);
                                     terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
                                 }
                                 event = event_stream.next() => {
@@ -557,6 +561,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
                     _ = &mut sleep => break,
                     _ = redraw.tick() => {
                         app.poll_workspace_local();
+                        super::check_debug_command_while_disconnected(app);
                         terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
                     }
                     event = event_stream.next() => {

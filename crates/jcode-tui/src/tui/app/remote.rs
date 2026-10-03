@@ -1912,6 +1912,47 @@ async fn parse_and_inject_key(
     Ok(format!("injected {:?} with {:?}", key_code, modifiers))
 }
 
+/// Debug-tester commands while the client waits to reconnect. Injected keys
+/// take the same route as physical keys in this state; requests that need a
+/// live connection are refused rather than queued as input.
+pub(super) fn check_debug_command_while_disconnected(app: &mut App) -> bool {
+    let cmd_path = super::debug_cmd_path();
+    let Ok(cmd) = std::fs::read_to_string(&cmd_path) else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&cmd_path);
+    let cmd = cmd.trim();
+    app.debug_trace.record("cmd", cmd.to_string());
+    let response = if let Some(keys) = cmd.strip_prefix("keys:") {
+        let mut results = Vec::new();
+        for spec in keys.split(',') {
+            match app.parse_key_spec(spec.trim()) {
+                Ok((code, modifiers)) => {
+                    let routed = if app.handle_workspace_key_disconnected(code, modifiers) {
+                        Ok(())
+                    } else {
+                        handle_disconnected_key_event(app, KeyEvent::new(code, modifiers))
+                    };
+                    app.debug_trace
+                        .record("key", format!("{code:?} {modifiers:?} (disconnected)"));
+                    results.push(match routed {
+                        Ok(()) => format!("OK: injected {code:?} with {modifiers:?}"),
+                        Err(error) => format!("ERR: {error}"),
+                    });
+                }
+                Err(error) => results.push(format!("ERR: {error}")),
+            }
+        }
+        results.join("\n")
+    } else if cmd.starts_with("message:") || cmd == "submit" || cmd == "reload" {
+        "ERR: disconnected; this command needs a live connection".to_string()
+    } else {
+        app.handle_debug_command(cmd)
+    };
+    let _ = std::fs::write(super::debug_response_path(), &response);
+    true
+}
+
 fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
     let handled = super::commands_dispatch::dispatch_local_command(app, trimmed);
 

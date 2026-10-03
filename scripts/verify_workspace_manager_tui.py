@@ -234,6 +234,16 @@ def daemon_pids():
         if ' serve' in command and str(f.sockpath) in command: owned.append(int(pid))
     return owned
 
+def client_pids():
+    """Fixture TUI clients: this run's binary bound to this run's socket."""
+    rows = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+    owned = []
+    for row in rows:
+        pid, _, command = row.strip().partition(' ')
+        if ' serve' not in command and command.startswith(str(f.BIN)) and str(f.sockpath) in command:
+            owned.append(int(pid))
+    return owned
+
 def fixture_connect():
     import socket as socketlib
     f.client = socketlib.socket(socketlib.AF_UNIX); f.client.connect(str(f.sockpath))
@@ -527,10 +537,14 @@ try:
     type_text(tid, 'Draft')
 
     step('a draft survives a runtime crash and explicit Start')
-    for pid in daemon_pids(): os.kill(pid, signal.SIGKILL)
+    crashed = daemon_pids()
+    for pid in crashed: os.kill(pid, signal.SIGKILL)
     if f.proc: f.proc.wait(timeout=20)
-    until(tid, lambda s: not s['connected'], 'disconnected', 30)
-    assert manager(tid)['form']['values']['session'] == 'Draft'
+    wait(lambda: not set(crashed) & set(daemon_pids()), 'crashed daemon gone', 30)
+    # The client may notice the loss and reconnect to a replacement quickly;
+    # the draft must survive either way.
+    state = manager(tid)
+    assert state['form'] and state['form']['values']['session'] == 'Draft', state['form']
     started = cli('runtime', 'start', '--json'); assert started.returncode == 0, started.stderr
     until(tid, lambda s: s['connected'] and s['capabilities']['management'], 'reconnected', 120)
     state = manager(tid)
@@ -583,9 +597,10 @@ try:
     fixture_connect(); gate_entered.clear(); gate_release.clear()
     f.subscribe(launched); f.send({'type': 'message', 'id': 9002, 'content': 'hold this turn again'})
     assert gate_entered.wait(60), 'second turn reached the fixture provider'
-    for pid in daemon_pids(): os.kill(pid, signal.SIGKILL)
+    crashed = daemon_pids()
+    for pid in crashed: os.kill(pid, signal.SIGKILL)
     gate_release.set()
-    until(tid, lambda s: not s['connected'], 'crash observed', 30)
+    wait(lambda: not set(crashed) & set(daemon_pids()), 'crashed daemon gone again', 30)
     started = cli('runtime', 'start', '--json'); assert started.returncode == 0, started.stderr
     until(tid, lambda s: s['connected'] and s['runtime']['recoveries'], 'recovery item visible', 180)
     open_manager(tid, '/runtime')
@@ -616,6 +631,11 @@ finally:
         cleanup['stop_error'] = repr(error)
     for pid in daemon_pids():
         cleanup.setdefault('killed_leftover', []).append(pid); os.kill(pid, signal.SIGKILL)
+    for pid in client_pids():
+        # A tester whose daemon is gone cannot receive its debug stop.
+        cleanup.setdefault('terminated_clients', []).append(pid); os.kill(pid, signal.SIGTERM)
+    time.sleep(2)
+    cleanup['leftover_clients'] = client_pids()
     if f.proc and f.proc.poll() is None:
         f.proc.terminate()
         try: f.proc.wait(timeout=30)
