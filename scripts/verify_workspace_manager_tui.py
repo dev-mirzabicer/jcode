@@ -390,16 +390,30 @@ try:
     select_row(tid, lambda t: t.startswith('C  tool-default'), 'tool-default')
     keys(tid, 'o'); until(tid, lambda s: s['form'] and 'closeout' in s['form']['title'].lower(), 'closeout form')
     assert manager(tid)['form']['values']['conditional'] == 'false'
+    # Every regular file needs a disposition or the verified full archive.
+    set_toggle(tid, 'full_archive', True)
     review = submit_and_confirm(tid, 'Begin closeout')
     assert any('off' in line for line in review['lines'] if 'Conditional' in line), review
     until(tid, lambda s: s['section'] == 'closeout' and s['selected'], 'closeout selected')
     def act(key, label, seconds=240):
         until(tid, lambda s: any(a.startswith(key + ' ') for a in s['actions']), 'action ' + label, seconds)
         keys(tid, key if len(key) == 1 and key.islower() else 'shift+' + key.lower())
-    for key, label in (('f', 'Refresh inventory'), ('p', 'Preserve'), ('w', 'Review removal')):
+    def closeout_step(key, label):
         act(key, label); until(tid, lambda s: s['confirm'], label + ' review'); confirm(tid)
-        until(tid, lambda s: new_outcomes(s), label + ' outcome', 240)
+        until(tid, lambda s: new_outcomes(s) and not s['pending'], label + ' outcome', 240)
         (evidence / ('closeout-' + key + '.json')).write_text(json.dumps(manager(tid), indent=1))
+    closeout_step('f', 'Refresh inventory')
+    # A human disposition on one inventoried entry (the full archive covers the rest).
+    act('i', 'Inventory'); act('d', 'Disposition')
+    until(tid, lambda s: s['form'] and s['form']['title'] == 'Record disposition', 'disposition form')
+    set_choice(tid, 'kind', 'redundant'); set_text(tid, 'reason', 'Fixture data')
+    MARK[:] = manager(tid)['outcomes']; keys(tid, 'ctrl+s')
+    until(tid, lambda s: not s['form'] and new_outcomes(s) and not s['pending'], 'disposition recorded', 120)
+    (evidence / 'closeout-d.json').write_text(json.dumps(manager(tid), indent=1))
+    frame(tid, 'w09-closeout-inventory', 'Inventory')
+    act('b', 'Record pane')
+    closeout_step('p', 'Preserve')
+    closeout_step('w', 'Review removal')
     frame(tid, 'w09-closeout-review', 'Removal review')
     act('a', 'Approve removal')
     until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'approve', 'typed approval')
