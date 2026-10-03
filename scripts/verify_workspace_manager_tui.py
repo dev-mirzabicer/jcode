@@ -368,6 +368,7 @@ try:
     frame(tid, 'w05b-standalone-launched', 'Launched')
 
     step("adopt the tester's legacy session into the Docs directory")
+    keys(tid, '2'); until(tid, lambda s: s['section'] == 'sessions', 'sessions section for adoption')
     select_row(tid, lambda t: t.startswith('● '), 'own session')
     until(tid, lambda s: any(a.startswith('a Adopt') for a in s['actions']), 'legacy adoption offered')
     frame(tid, 'w06-legacy', 'Legacy session')
