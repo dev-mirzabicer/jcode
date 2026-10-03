@@ -578,6 +578,30 @@ fn runtime_stop_review_confirm_and_force_needs_typed_word() {
         !actions::available(&m).iter().any(|spec| spec.key == 'c'),
         "cancel closes once stopping began"
     );
+    {
+        // A disconnected client keeps the last operation it saw, but only the
+        // live coordinator can act on it.
+        let mut offline = WorkspaceManager::new("session".into(), true, Section::Runtime);
+        offline.caps.runtime = Some(true);
+        offline.runtime.operation = Some(blocked.clone());
+        assert!(
+            actions::available(&offline)
+                .iter()
+                .any(|spec| spec.key == 'F')
+        );
+        offline.disconnected();
+        let keys: Vec<char> = actions::available(&offline)
+            .iter()
+            .map(|spec| spec.key)
+            .collect();
+        for control in ['F', 'c', 'h', 'y', 's', 'R'] {
+            assert!(
+                !keys.contains(&control),
+                "{control} offered while offline: {keys:?}"
+            );
+        }
+        assert!(keys.contains(&'S'), "{keys:?}");
+    }
     key(&mut m, KeyCode::Char('F'));
     type_text(&mut m, "forc");
     key(&mut m, KeyCode::Enter);

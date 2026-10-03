@@ -110,13 +110,38 @@ def frame(tid, name, expect=None):
     frames.append(name)
     return value['rendered_text']['overlay_text']
 
+# Testers are spawned by a separate harness daemon, which owns their PTY
+# masters. Crashing or stopping the daemon under test therefore leaves the
+# client's terminal drained, as a real terminal emulator would.
+HARNESS_SOCK = ROOT / 'h.sock'
+harness = {'proc': None}
+
+def start_harness():
+    args = [f.BIN, '--no-update', '--no-selfdev', '--provider-profile', 'wp09-fixture', '--model', 'fixture',
+            '--socket', str(HARNESS_SOCK), '-C', str(f.project), '--debug-socket', 'serve', '--server-name', 'wp10-harness']
+    # One server per runtime directory: the harness gets its own.
+    env = dict(f.env, JCODE_RUNTIME_DIR=str(ROOT / 'harness-runtime'), JCODE_SOCKET=str(HARNESS_SOCK))
+    harness['env'] = env
+    harness['proc'] = subprocess.Popen(args, env=env, stdout=open(ROOT / 'harness.log', 'wb'), stderr=subprocess.STDOUT)
+    wait(lambda: HARNESS_SOCK.exists(), 'harness daemon socket', 60)
+
+def harness_debug(command):
+    result = subprocess.run([f.BIN, 'debug', command, '--socket', str(HARNESS_SOCK)], env=harness['env'], capture_output=True, text=True, timeout=25)
+    with (evidence / 'harness-debug.jsonl').open('a') as out:
+        out.write(json.dumps({'command': command, 'code': result.returncode, 'stdout': result.stdout[-2000:], 'stderr': result.stderr[-2000:]}) + '\n')
+    assert result.returncode == 0, (command, result.stdout, result.stderr)
+    return result.stdout
+
 def spawn(cols, rows, session=None):
     args = [f.BIN, '--no-update', '--no-selfdev', '--provider-profile', 'wp09-fixture', '--model', 'fixture', '--socket', str(f.sockpath)]
     if session: args += ['--resume', session]
     wrapper = ROOT / f'client-{len(testers)}.sh'
-    wrapper.write_text('#!/bin/sh\nexec ' + ' '.join(map(lambda a: "'" + a.replace("'", "'\\''") + "'", args)))
+    # The client belongs to the runtime under test, not to the harness that
+    # spawned it and drains its terminal.
+    quote = lambda a: "'" + str(a).replace("'", "'\\''") + "'"
+    wrapper.write_text('#!/bin/sh\nexport JCODE_RUNTIME_DIR=' + quote(f.env['JCODE_RUNTIME_DIR']) + ' JCODE_SOCKET=' + quote(f.sockpath) + '\nexec ' + ' '.join(map(lambda a: "'" + a.replace("'", "'\\''") + "'", args)))
     wrapper.chmod(0o700)
-    f.debug('tester:spawn ' + json.dumps({'cwd': str(f.project), 'binary': str(wrapper), 'cols': cols, 'rows': rows}))
+    harness_debug('tester:spawn ' + json.dumps({'cwd': str(f.project), 'binary': str(wrapper), 'cols': cols, 'rows': rows}))
     tid = json.loads((f.home / 'testers.json').read_text())[-1]['id']; testers.append(tid)
     wait(lambda: json.loads(client(tid, 'state')).get('server_version'), 'tester attached', 90)
     client(tid, 'enable')
@@ -236,12 +261,15 @@ def last_outcome(tid, needle, label, seconds=90):
     return until(tid, lambda s: any(needle in text for text in new_outcomes(s)), label, seconds)
 
 def daemon_pids():
-    rows = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
-    owned = []
-    for row in rows:
-        pid, _, command = row.strip().partition(' ')
-        if ' serve' in command and str(f.sockpath) in command: owned.append(int(pid))
-    return owned
+    """Processes listening on this run's socket. A runtime started by
+    `jcode runtime start` or a client carries its socket in the environment,
+    not argv, so identify the owner by the bound socket path instead."""
+    listing = subprocess.run(['lsof', '-U', '-F', 'pn'], capture_output=True, text=True).stdout
+    owned, pid = set(), None
+    for line in listing.splitlines():
+        if line.startswith('p'): pid = int(line[1:])
+        elif line.startswith('n') and line[1:] == str(f.sockpath) and pid: owned.add(pid)
+    return sorted(owned)
 
 def client_pids():
     """Fixture TUI clients: this run's binary bound to this run's socket."""
@@ -275,7 +303,7 @@ try:
     (ROOT / 'checkouts').mkdir(); (ROOT / 'volume-default').mkdir()
     query = lambda kind=None: {'kind': kind, 'project': None, 'home': None, 'repository': None, 'visibility': 'all', 'active_sessions_only': False}
 
-    f.start(); f.client.settimeout(120)
+    f.start(); f.client.settimeout(120); start_harness()
     step('attach tester and open /workspace on an uninitialized catalog')
     legacy_session = f.subscribe()
     tid = spawn(120, 32, legacy_session)
@@ -537,7 +565,7 @@ try:
 
     step('layouts through real PTY resizes; mouse tabs and footer actions')
     for cols, rows, expect in ((80, 24, 'Workspace'), (60, 24, 'Workspace'), (48, 12, 'Workspace'), (40, 10, 'needs 48×12'), (120, 32, 'Workspace')):
-        f.debug(f'tester:{tid}:resize:{cols}x{rows}')
+        harness_debug(f'tester:{tid}:resize:{cols}x{rows}')
         wait(lambda: manager(tid)['dimensions'] == [cols, rows], f'resize {cols}x{rows}', 20)
         frame(tid, f'w13-layout-{cols}x{rows}', expect)
     text = frame(tid, 'w14-before-click', '7 Runtime')
@@ -553,6 +581,7 @@ try:
 
     step('a draft survives a runtime crash and explicit Start')
     crashed = daemon_pids()
+    assert crashed, 'owned daemon found before the draft crash'
     for pid in crashed: os.kill(pid, signal.SIGKILL)
     if f.proc: f.proc.wait(timeout=20)
     wait(lambda: not set(crashed) & set(daemon_pids()), 'crashed daemon gone', 30)
@@ -590,6 +619,8 @@ try:
     until(tid, lambda s: not s['connected'], 'runtime stopped; client offline', 120)
     until(tid, lambda s: s['runtime']['offline'] and 'S Start runtime' in s['actions'], 'offline start offered', 60)
     frame(tid, 'w18-runtime-stopped', 'intentionally stopped')
+    offline_actions = manager(tid)['actions']
+    assert not any(a.split(' ', 1)[0] in ('c', 'h', 'y', 'F', 's', 'R') for a in offline_actions), offline_actions
     assert not daemon_pids(), 'intentional stop is not undone by the client'
     keys(tid, 'shift+s')
     until(tid, lambda s: s['connected'] and s['capabilities']['runtime'], 'reconnected after TUI Start', 180)
@@ -613,6 +644,9 @@ try:
     f.subscribe(launched); f.send({'type': 'message', 'id': 9002, 'content': 'hold this turn again'})
     assert gate_entered.wait(60), 'second turn reached the fixture provider'
     crashed = daemon_pids()
+    rows = [r for r in subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines() if str(ROOT) in r]
+    (evidence / 'processes-before-turn-crash.txt').write_text('\n'.join(rows))
+    assert crashed, rows
     for pid in crashed: os.kill(pid, signal.SIGKILL)
     gate_release.set()
     wait(lambda: not set(crashed) & set(daemon_pids()), 'crashed daemon gone again', 30)
@@ -631,7 +665,7 @@ finally:
     gate_release.set()
     cleanup = {}
     for tid in list(testers):
-        try: cleanup[tid] = f.debug('tester:' + tid + ':stop')
+        try: cleanup[tid] = harness_debug('tester:' + tid + ':stop')
         except Exception as error: cleanup[tid] = repr(error)
     try:
         status = cli('runtime', 'status', '--json', timeout=60)
@@ -658,6 +692,11 @@ finally:
         try: f.proc.wait(timeout=30)
         except subprocess.TimeoutExpired: f.proc.kill()
     cleanup['leftover_daemons'] = daemon_pids()
+    if harness['proc'] and harness['proc'].poll() is None:
+        harness['proc'].terminate()
+        try: harness['proc'].wait(timeout=30)
+        except subprocess.TimeoutExpired: harness['proc'].kill()
+    cleanup['harness_exit'] = harness['proc'].poll() if harness['proc'] else None
     try: f.http.shutdown(); f.http.server_close(); f.log.close()
     except Exception: pass
     (evidence / 'steps.json').write_text(json.dumps(steps, indent=1))

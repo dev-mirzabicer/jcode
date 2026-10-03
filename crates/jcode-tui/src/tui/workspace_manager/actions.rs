@@ -519,7 +519,9 @@ pub(crate) fn available(manager: &WorkspaceManager) -> Vec<ActionSpec> {
                     actions.push(spec('R', "Restart", Action::Restart));
                 }
             }
-            if let Some(op) = operation {
+            // Operation controls need the live coordinator; a cached operation
+            // seen before a disconnect is not current authority.
+            if let Some(op) = operation.filter(|_| live) {
                 if op.phase == ShutdownPhase::WaitingForCurrent && !op.cancellation_closed {
                     actions.push(spec('c', "Cancel wait", Action::CancelWait));
                 }

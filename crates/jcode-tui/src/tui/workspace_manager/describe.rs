@@ -1780,8 +1780,15 @@ fn runtime_detail(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) {
             lines,
             phase_tone(operation.phase),
             format!(
-                "Shutdown {} · {:?} · revision {}",
-                operation.id, operation.phase, operation.revision
+                "{} {} · {:?} · revision {}",
+                if operation.phase.terminal() {
+                    "Last shutdown"
+                } else {
+                    "Shutdown"
+                },
+                operation.id,
+                operation.phase,
+                operation.revision
             ),
         );
         let options = &operation.review.options;
@@ -1796,7 +1803,7 @@ fn runtime_detail(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) {
                 options.destination
             ),
         );
-        if operation.cancellation_closed {
+        if operation.cancellation_closed && !operation.phase.terminal() {
             push(
                 lines,
                 Tone::Muted,
