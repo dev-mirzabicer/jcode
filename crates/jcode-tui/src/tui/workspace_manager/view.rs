@@ -67,6 +67,37 @@ fn safe(value: &str) -> String {
         .collect()
 }
 
+/// Wrap display text to terminal cells, preferring spaces and breaking long
+/// tokens such as paths and IDs. Overlay heights, scrolling and hit regions are
+/// computed from these exact rows.
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for paragraph in safe(text).split('\n') {
+        let mut line = String::new();
+        for ch in paragraph.chars() {
+            let cell = ch.width().unwrap_or(0);
+            while !line.is_empty() && line.width() + cell > width {
+                match line.rfind(' ').filter(|index| *index > 0) {
+                    Some(index) => {
+                        let rest = line[index + 1..].to_string();
+                        rows.push(line[..index].trim_end().to_string());
+                        line = rest;
+                    }
+                    None => rows.push(std::mem::take(&mut line)),
+                }
+            }
+            if ch == ' ' && line.is_empty() && !rows.is_empty() {
+                continue;
+            }
+            line.push(ch);
+        }
+        rows.push(line);
+    }
+    rows
+}
+
 fn fit(text: &str, width: usize) -> String {
     let text = safe(text).replace('\n', " ");
     if text.width() <= width {
@@ -503,10 +534,12 @@ impl WorkspaceManager {
             ]));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
+        for row in wrap(
             "Native write policy is not a shell sandbox. Same-user clients are trusted, not proof of a human.",
-            styles.muted,
-        )));
+            area.width.min(84).saturating_sub(2) as usize,
+        ) {
+            lines.push(Line::from(Span::styled(row, styles.muted)));
+        }
         let inner = self.overlay(
             frame,
             area,
@@ -552,7 +585,9 @@ impl WorkspaceManager {
         let inner_width = width.saturating_sub(4) as usize;
         let mut lines: Vec<(Line, Option<Hit>)> = Vec::new();
         for intro in &form.intro {
-            lines.push((Line::from(Span::styled(safe(intro), styles.muted)), None));
+            for row in wrap(intro, width.saturating_sub(2) as usize) {
+                lines.push((Line::from(Span::styled(row, styles.muted)), None));
+            }
         }
         if !form.intro.is_empty() {
             lines.push((Line::from(""), None));
@@ -656,20 +691,25 @@ impl WorkspaceManager {
         if submit_focused || cancel_focused {
             focus_line = lines.len();
         }
+        // The reason and key hints stay visible below the scrolled fields.
+        let mut footer: Vec<Line> = Vec::new();
         if let Some(error) = &form.error {
-            lines.push((Line::from(Span::styled(safe(error), styles.error)), None));
+            for row in wrap(error, width.saturating_sub(2) as usize) {
+                footer.push(Line::from(Span::styled(row, styles.error)));
+            }
         }
-        lines.push((
-            Line::from(Span::styled(
+        footer.push(Line::from(Span::styled(
+            fit(
                 "Tab/↑↓ fields · ←→/Space choose · Ctrl+S submit · Esc cancel",
-                styles.muted,
-            )),
-            None,
-        ));
+                width.saturating_sub(2) as usize,
+            ),
+            styles.muted,
+        )));
         let title = form.title.clone();
-        let height = (lines.len() as u16 + 2).min(area.height);
+        let height = ((lines.len() + footer.len()) as u16 + 2).min(area.height);
         let inner = self.overlay(frame, area, width, height, &title, styles);
-        let visible_rows = inner.height as usize;
+        let footer_rows = footer.len().min(inner.height.saturating_sub(1) as usize);
+        let visible_rows = (inner.height as usize).saturating_sub(footer_rows);
         let mut offset = form.offset;
         if focus_line > offset + visible_rows {
             offset = focus_line - visible_rows;
@@ -702,7 +742,16 @@ impl WorkspaceManager {
             }
             rendered.push(line);
         }
-        frame.render_widget(Paragraph::new(rendered), inner);
+        let body = Rect::new(inner.x, inner.y, inner.width, visible_rows as u16);
+        frame.render_widget(Paragraph::new(rendered), body);
+        let start = footer.len() - footer_rows;
+        let footer_area = Rect::new(
+            inner.x,
+            inner.y + visible_rows as u16,
+            inner.width,
+            footer_rows as u16,
+        );
+        frame.render_widget(Paragraph::new(footer.split_off(start)), footer_area);
     }
 
     fn render_confirm(&mut self, frame: &mut Frame, area: Rect, styles: &Styles) {
@@ -710,10 +759,15 @@ impl WorkspaceManager {
             return;
         };
         let width = area.width.min(96);
+        let text_width = width.saturating_sub(2) as usize;
         let mut lines = confirm
             .lines
             .iter()
-            .map(|(tone, text)| Line::from(Span::styled(safe(text), styles.tone(*tone))))
+            .flat_map(|(tone, text)| {
+                wrap(text, text_width)
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, styles.tone(*tone))))
+            })
             .collect::<Vec<_>>();
         lines.push(Line::from(""));
         if let Some(word) = confirm.typed {
@@ -771,12 +825,7 @@ impl WorkspaceManager {
             self.hit
                 .push((Rect::new(inner.x + 14, y, 10, 1), Hit::ConfirmNo));
         }
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((scroll as u16, 0)),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
     }
 }
 

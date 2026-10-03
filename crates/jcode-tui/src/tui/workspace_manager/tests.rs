@@ -1471,3 +1471,48 @@ fn a_new_standalone_directory_is_its_own_root() {
             .contains("standalone root")
     );
 }
+
+#[test]
+fn wrapping_prefers_spaces_breaks_long_tokens_and_respects_cell_width() {
+    let rows = view::wrap("Remap it explicitly /a/very/long/path/that/exceeds", 12);
+    assert!(
+        rows.iter()
+            .all(|row| unicode_width::UnicodeWidthStr::width(row.as_str()) <= 12),
+        "{rows:?}"
+    );
+    assert_eq!(rows[0], "Remap it");
+    assert_eq!(
+        rows.concat().replace(' ', ""),
+        "Remapitexplicitly/a/very/long/path/that/exceeds"
+    );
+    let wide = view::wrap("日本語のパス名", 5);
+    assert!(
+        wide.iter()
+            .all(|row| unicode_width::UnicodeWidthStr::width(row.as_str()) <= 5),
+        "{wide:?}"
+    );
+    assert_eq!(wide.concat(), "日本語のパス名");
+}
+
+#[test]
+fn a_long_refusal_is_fully_visible_below_the_form_fields() {
+    let (mut m, mut wire) = ready(false);
+    wire.drain(&mut m);
+    m.switch(Section::Backup);
+    actions::open(&mut m, actions::FormKind::Import);
+    let detail = "Location 3a0c2118-de5e-40b1-b243-723fb04d32f2 already has a local physical identity. Remap it explicitly rather than duplicate ownership";
+    m.form.as_mut().unwrap().1.error = Some(format!("Conflict: {detail}"));
+    for (w, h) in [(120, 32), (80, 24), (60, 24), (48, 12)] {
+        let text = frame(&mut m, w, h);
+        for word in [
+            "Conflict:",
+            "Remap",
+            "explicitly",
+            "duplicate",
+            "ownership",
+            "Ctrl+S",
+        ] {
+            assert!(text.contains(word), "{w}x{h} lacks {word}:\n{text}");
+        }
+    }
+}
