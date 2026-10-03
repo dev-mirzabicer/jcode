@@ -86,7 +86,7 @@ visibility: current, all, archived, retired and closed.
   clone runs under the runtime; follow it in Operations.
 - **Startup Context copy** (`p` on a checkout): copies the ordered selection, not
   file bodies, after a review of both plans.
-- **Launch** (`l`): choose placement, an existing cwd or a new empty directory,
+- **Launch** (`l`): choose placement (including a new projectless standalone root), an existing cwd or a new empty directory (which becomes the root of a new standalone location),
   and optional agent, model and effort. A checkout proposes its root. Launch never
   clones.
 - **Close out** (`o` on a checkout): see Closeout below.

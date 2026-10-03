@@ -480,6 +480,23 @@ pub(crate) fn available(manager: &WorkspaceManager) -> Vec<ActionSpec> {
                     actions.push(spec('b', "Record", Action::RecordPane));
                 }
             }
+            // The closeout list itself pages from the record and history panes.
+            let list_pane = manager.closeouts.record.is_none()
+                || matches!(
+                    manager.closeouts.pane,
+                    CloseoutPane::Record | CloseoutPane::History
+                );
+            if list_pane
+                && (!manager.closeouts.previous.is_empty()
+                    || manager
+                        .closeouts
+                        .page
+                        .as_ref()
+                        .is_some_and(|p| p.next.is_some()))
+            {
+                actions.push(spec('[', "Prev page", Action::Older));
+                actions.push(spec(']', "Next page", Action::Newer));
+            }
         }
         Section::Backup if ready => {
             actions.push(spec('b', "Backup now", Action::Backup));
@@ -1304,7 +1321,21 @@ fn page(manager: &mut WorkspaceManager, forward: bool) {
                 }
                 load_removal(manager);
             }
-            _ => {}
+            _ => {
+                let next = manager.closeouts.page.as_ref().and_then(|p| p.next.clone());
+                if forward {
+                    let Some(next) = next else { return };
+                    let current = manager.closeouts.cursor.replace(next);
+                    manager.closeouts.previous.push(current);
+                } else if let Some(previous) = manager.closeouts.previous.pop() {
+                    manager.closeouts.cursor = previous;
+                } else {
+                    return;
+                }
+                manager.closeouts.selected = None;
+                manager.closeouts.record = None;
+                manager.load_closeouts();
+            }
         },
         Section::Organization => {
             if forward {
@@ -1841,7 +1872,7 @@ pub(crate) fn open(manager: &mut WorkspaceManager, kind: FormKind) {
             placements.push(Choice::new("new-standalone", "New standalone location (no project)"));
             Form::new("Launch a primary session", "Review", vec![
                 Field::choice("placement", "Placement", placements, &placement.map(placement_value).unwrap_or_default()),
-                Field::text("root", "Standalone root (absolute)", "").required().when("placement", &["new-standalone"]),
+                Field::text("root", "Standalone root (absolute; empty when the new cwd is the root)", "").when("placement", &["new-standalone"]),
                 Field::choice("cwd_mode", "Command working directory", vec![Choice::new("existing", "Existing directory"), Choice::new("create", "Create a new empty directory")], "existing"),
                 Field::text("cwd", "Working directory (absolute)", cwd).required(),
                 Field::text("agent", "Agent profile (empty: default)", ""),
@@ -2170,17 +2201,26 @@ pub(crate) fn build(
             ));
         }
         FormKind::Launch => {
+            let path = absolute(&text("cwd"), "Working directory")?;
+            let create = form.value("cwd_mode") == "create";
             let placement = if form.value("placement") == "new-standalone" {
-                PrimaryPlacement::Standalone {
-                    root: absolute(&text("root"), "Standalone root")?,
+                // A newly created standalone directory is its own root; an
+                // existing cwd may sit below a separately chosen root.
+                let root = match (text("root").is_empty(), create) {
+                    (true, true) => path.clone(),
+                    (true, false) => return Err("Choose the standalone root".into()),
+                    (false, _) => absolute(&text("root"), "Standalone root")?,
+                };
+                if create && root != path {
+                    return Err("A new empty directory becomes the standalone root itself; leave the root empty or equal to the working directory".into());
                 }
+                PrimaryPlacement::Standalone { root }
             } else {
                 PrimaryPlacement::Existing {
                     placement: parse_placement(form.value("placement"))?,
                 }
             };
-            let path = absolute(&text("cwd"), "Working directory")?;
-            let cwd = if form.value("cwd_mode") == "create" {
+            let cwd = if create {
                 let home = match &placement {
                     PrimaryPlacement::Existing {
                         placement: Placement::Project(id),

@@ -353,13 +353,16 @@ try:
     keys(tid, 'ctrl+s')
     form = until(tid, lambda s: s['form'] and s['form']['error'], 'explicit cwd required')['form']
     assert not manager(tid)['confirm'], 'nothing is reviewed without an explicit cwd'
-    set_choice(tid, 'placement', 'new-standalone'); set_text(tid, 'root', str(standalone_root))
+    # A new empty directory becomes the standalone root itself.
+    set_choice(tid, 'placement', 'new-standalone')
     set_choice(tid, 'cwd_mode', 'create'); set_text(tid, 'cwd', str(standalone_root / 'fresh'))
     MARK[:] = [manager(tid)['outcome_seq']]
     submit_and_confirm(tid, 'Launch primary')
     standalone_session = until(tid, lambda s: s['launched'] and s['launched'] != launched, 'standalone launched', 120)['launched']
     view = rpc('primary_location', command={'action': 'inspect_session', 'session': standalone_session})['response']['view']
     assert view['location']['placement']['kind'] == 'standalone' and view['location']['cwd'] == str(standalone_root / 'fresh'), view
+    standalone_location = next(e['value'] for e in ws('list', query=query('location'), after=None, limit=200)['value']['items'] if e['value']['id'] == view['location']['placement']['id'])
+    assert standalone_location['home'] is None and standalone_location['observed_path'] == str(standalone_root / 'fresh'), standalone_location
     assert (standalone_root / 'fresh').is_dir() and not any((standalone_root / 'fresh').iterdir())
     assert not any(str(standalone_root) in str(e['value'].get('home')) for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'])
     frame(tid, 'w05b-standalone-launched', 'Launched')

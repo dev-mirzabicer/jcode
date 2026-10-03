@@ -228,6 +228,8 @@ pub(crate) enum CloseoutPane {
 #[derive(Default)]
 pub(crate) struct Closeouts {
     pub page: Option<OperationPage>,
+    pub cursor: Option<Cursor>,
+    pub previous: Vec<Option<Cursor>>,
     pub selected: Option<OperationId>,
     pub record: Option<CloseoutRecord>,
     pub review: Option<CloseoutReview>,
@@ -632,6 +634,40 @@ impl WorkspaceManager {
         }
     }
 
+    /// A continuation cursor is bound to the catalog revision and query it was
+    /// read at. After another change the owner refuses it; show the list from
+    /// its first page instead of a stale or partial view.
+    pub(crate) fn restart_list(&mut self, view: &transport::View) {
+        match view {
+            transport::View::OrgPage => {
+                self.org.cursor = None;
+                self.org.previous.clear();
+                self.load_org();
+            }
+            transport::View::Operations => {
+                self.ops.cursor = None;
+                self.ops.previous.clear();
+                self.load_ops();
+            }
+            transport::View::Closeouts => {
+                self.closeouts.cursor = None;
+                self.closeouts.previous.clear();
+                self.load_closeouts();
+            }
+            transport::View::Permissions => {
+                self.perms.cursor = None;
+                self.perms.previous.clear();
+                self.load_perms();
+            }
+            transport::View::Known => {
+                self.load_known();
+                return;
+            }
+            _ => return,
+        }
+        self.note(Tone::Muted, "The list changed; showing its first page.");
+    }
+
     pub(crate) fn load_known(&mut self) {
         for kind in [
             EntityKind::Project,
@@ -729,7 +765,7 @@ impl WorkspaceManager {
                     kinds: vec![OperationKind::Closeout],
                     ..Default::default()
                 },
-                after: None,
+                after: self.closeouts.cursor.clone(),
                 limit: PAGE,
             },
         ));

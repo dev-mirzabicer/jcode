@@ -116,6 +116,7 @@ fn workspace(id: u64, response: WorkspaceResponse) -> ServerEvent {
     }
 }
 
+#[track_caller]
 fn find(
     sent: &[(u64, Request)],
     pred: impl Fn(&WorkspaceRequest) -> bool,
@@ -1343,4 +1344,130 @@ fn large_closeout_inventories_page_and_a_refreshed_digest_starts_over() {
         workspace(*id, WorkspaceResponse::Closeout(Box::new(operation_record)))
     ));
     assert_eq!(inventory(&mut m, &mut wire, "d2"), Some(0));
+}
+
+#[test]
+fn known_entities_follow_every_page_and_a_stale_cursor_restarts_the_list() {
+    let mut m = WorkspaceManager::new("session_self".into(), true, Section::Organization);
+    let mut wire = Wire::new();
+    answer_probes(&mut m, &mut wire, false);
+    answer_status(&mut m, &mut wire, Ok(status(3)));
+    // The first Known page for projects has a continuation; it is followed.
+    let rest = wire.drain(&mut m);
+    let (id, query) = rest
+        .iter()
+        .find_map(|(id, r)| match r {
+            Request::Workspace { request, .. } => match &**request {
+                WorkspaceRequest::List {
+                    query,
+                    after: None,
+                    limit: 200,
+                } if query.kind == Some(EntityKind::Project) => Some((*id, query.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("known projects read");
+    let cursor = Cursor {
+        revision: 3,
+        after: "p".into(),
+        query_digest: "q".into(),
+    };
+    let page = Page {
+        revision: 3,
+        total: 201,
+        items: vec![project("first")],
+        next: Some(cursor.clone()),
+    };
+    assert!(m.accept(id, workspace(id, WorkspaceResponse::Page(page))));
+    let sent = wire.drain(&mut m);
+    let (id, _) = find(
+        &sent,
+        |r| matches!(r, WorkspaceRequest::List { query: q, after: Some(c), .. } if *q == query && *c == cursor),
+    );
+    let last = project("second");
+    let page = Page {
+        revision: 3,
+        total: 201,
+        items: vec![last.clone()],
+        next: None,
+    };
+    assert!(m.accept(id, workspace(id, WorkspaceResponse::Page(page))));
+    assert!(
+        m.known.contains_key(&last.id().to_string()),
+        "entities past the first page are known"
+    );
+    assert!(wire.drain(&mut m).iter().all(|(_, r)| !matches!(r, Request::Workspace { request, .. } if matches!(&**request, WorkspaceRequest::List { query: q, .. } if *q == query))));
+    // A continued organization page refused after a change restarts at page one.
+    m.org.cursor = Some(cursor.clone());
+    m.load_org();
+    let sent = wire.drain(&mut m);
+    let (id, _) = find(&sent, |r| {
+        matches!(r, WorkspaceRequest::List { after: Some(_), .. })
+    });
+    let conflict = Issue {
+        code: IssueCode::Conflict,
+        detail:
+            "List changed or continuation belongs to another query; refresh from the first page"
+                .into(),
+    };
+    assert!(m.accept(id, workspace(id, WorkspaceResponse::Error(conflict))));
+    assert!(m.org.cursor.is_none());
+    // The first page is requested again (or is still in flight from the
+    // initial load, which reads deduplicate).
+    wire.drain(&mut m);
+    assert!(m.pending.values().any(|pending| matches!(
+        &pending.op,
+        Op::Workspace {
+            view: transport::View::OrgPage,
+            request: WorkspaceRequest::List { after: None, .. }
+        }
+    )));
+    assert!(m.status.contains("first page"));
+}
+
+#[test]
+fn a_new_standalone_directory_is_its_own_root() {
+    let (mut m, mut wire) = ready(true);
+    wire.drain(&mut m);
+    actions::open(&mut m, actions::FormKind::Launch);
+    let (kind, mut form) = m.form.clone().unwrap();
+    form.set("placement", "new-standalone");
+    form.set("cwd_mode", "create");
+    form.set("cwd", "/synthetic/fresh");
+    form.set("root", "/synthetic");
+    assert!(
+        actions::build(&mut m, &kind, &form)
+            .unwrap_err()
+            .contains("standalone root itself")
+    );
+    form.set("root", "");
+    actions::build(&mut m, &kind, &form).unwrap();
+    let Some(confirm) = &m.confirm else {
+        panic!("launch review")
+    };
+    let Op::Launch(request) = &confirm.op else {
+        panic!("{:?}", confirm.op)
+    };
+    assert_eq!(
+        request.input.placement,
+        PrimaryPlacement::Standalone {
+            root: "/synthetic/fresh".into()
+        }
+    );
+    assert_eq!(
+        request.input.cwd,
+        Some(PrimaryCwd::CreateEmpty {
+            path: "/synthetic/fresh".into(),
+            home: None
+        })
+    );
+    m.confirm = None;
+    // An existing cwd needs an explicitly chosen root.
+    form.set("cwd_mode", "existing");
+    assert!(
+        actions::build(&mut m, &kind, &form)
+            .unwrap_err()
+            .contains("standalone root")
+    );
 }

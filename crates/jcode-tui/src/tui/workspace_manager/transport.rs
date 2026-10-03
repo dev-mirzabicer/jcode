@@ -578,6 +578,15 @@ fn workspace(
                 issue_note(manager, "Request rejected", issue);
                 manager.draft_failed(issue);
             }
+            View::OrgPage
+            | View::Operations
+            | View::Closeouts
+            | View::Permissions
+            | View::Known
+                if issue.code == IssueCode::Conflict && list_cursor(&request).is_some() =>
+            {
+                manager.restart_list(&view);
+            }
             _ => issue_note(manager, "Request rejected", issue),
         }
         return;
@@ -594,6 +603,19 @@ fn workspace(
         }
         (View::Known, R::Page(page)) => {
             manager.observe_revision(page.revision);
+            // Names and form choices cover the whole catalog, not one page.
+            if let (Some(next), WorkspaceRequest::List { query, limit, .. }) =
+                (page.next.clone(), &request)
+            {
+                manager.queue(Op::read(
+                    View::Known,
+                    WorkspaceRequest::List {
+                        query: query.clone(),
+                        after: Some(next),
+                        limit: *limit,
+                    },
+                ));
+            }
             for entity in page.items {
                 manager.known.insert(entity.id().to_string(), entity);
             }
@@ -1131,5 +1153,19 @@ fn view_label(request: &RuntimeRequest) -> Option<&'static str> {
     match request {
         RuntimeRequest::Inspect { .. } => None,
         _ => Some("effect"),
+    }
+}
+
+/// The continuation cursor a list request carried, if it was not a first page.
+fn list_cursor(request: &WorkspaceRequest) -> Option<&Cursor> {
+    match request {
+        WorkspaceRequest::List { after, .. } | WorkspaceRequest::Operations { after, .. } => {
+            after.as_ref()
+        }
+        WorkspaceRequest::Permissions {
+            request:
+                PermissionRequest::List { after, .. } | PermissionRequest::ImportedGrants { after, .. },
+        } => after.as_ref(),
+        _ => None,
     }
 }
