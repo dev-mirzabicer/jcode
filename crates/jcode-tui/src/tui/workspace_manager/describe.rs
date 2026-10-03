@@ -521,6 +521,13 @@ fn catalog_lines(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) ->
                     Tone::Muted,
                     "Initializing creates the private catalog only. Press I to review.",
                 );
+            } else if let Some(request) = issue.interrupted_initialization() {
+                push(
+                    lines,
+                    Tone::Warn,
+                    format!("Catalog initialization {request} stopped before it was ready."),
+                );
+                push(lines, Tone::Muted, "Press I to resume that same request.");
             } else {
                 push(
                     lines,

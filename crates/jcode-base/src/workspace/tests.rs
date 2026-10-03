@@ -407,6 +407,9 @@ fn interrupted_initialization_resumes_only_its_recorded_request() {
             IssueCode::RecoveryRequired
         );
         assert!(service.status().is_err());
+        let reported = service.status().unwrap_err();
+        assert!(!reported.is_not_initialized());
+        assert_eq!(reported.interrupted_initialization(), Some(request));
         let state = service.initialize(request).unwrap();
         assert_eq!(state.revision, 0);
     }

@@ -406,13 +406,7 @@ pub(crate) fn connect(root: &Path) -> Result<Connection> {
     }
     let marker: Installation = read_json(&marker_path)?;
     if !marker.ready {
-        return Err(issue(
-            IssueCode::RecoveryRequired,
-            format!(
-                "Initialization is incomplete. Resume initialize request {}",
-                marker.request
-            ),
-        ));
+        return Err(Issue::initialization_incomplete(marker.request));
     }
     let meta = std::fs::symlink_metadata(root).map_err(corrupt)?;
     if !meta.is_dir() || meta.file_type().is_symlink() {

@@ -233,10 +233,14 @@ pub(crate) fn available(manager: &WorkspaceManager) -> Vec<ActionSpec> {
         return actions;
     }
     let ready = manager.catalog_ready();
-    if matches!(&manager.catalog, Some(Err(issue)) if issue.is_not_initialized())
+    if let Some(Err(issue)) = &manager.catalog
         && manager.section != Section::Runtime
     {
-        actions.push(spec('I', "Initialize catalog", Action::Initialize));
+        if issue.is_not_initialized() {
+            actions.push(spec('I', "Initialize catalog", Action::Initialize));
+        } else if issue.interrupted_initialization().is_some() {
+            actions.push(spec('I', "Resume initialization", Action::Initialize));
+        }
     }
     match manager.section {
         Section::Organization if ready => {
@@ -589,16 +593,32 @@ pub(crate) fn run(manager: &mut WorkspaceManager, action: Action) {
         Action::Uncertain => manager.show_uncertain = true,
         Action::Older | Action::Newer => page(manager, action == Action::Newer),
         Action::Initialize => {
+            // An interrupted initialization can only be finished by its own
+            // request identity; a fresh one would be refused.
+            let interrupted = match &manager.catalog {
+                Some(Err(issue)) => issue.interrupted_initialization(),
+                _ => None,
+            };
+            let (title, first) = match interrupted {
+                Some(request) => (
+                    "Resume the interrupted catalog initialization",
+                    format!("Finishes initialize request {request}, which stopped before it was ready."),
+                ),
+                None => (
+                    "Initialize the workspace catalog",
+                    "Creates the private catalog under this installation's durable state.".into(),
+                ),
+            };
             manager.confirm = Some(confirm(
-                "Initialize the workspace catalog",
+                title,
                 vec![
-                    (Tone::Normal, "Creates the private catalog under this installation's durable state.".into()),
+                    (Tone::Normal, first),
                     (Tone::Muted, "No project, checkout, session or file is created or changed.".into()),
                 ],
                 Op::read(
                     View::Effect,
                     WorkspaceRequest::Initialize {
-                        request: new_request(),
+                        request: interrupted.unwrap_or_else(new_request),
                     },
                 ),
             ));

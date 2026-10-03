@@ -382,7 +382,25 @@ impl Issue {
     pub fn is_not_initialized(&self) -> bool {
         self.code == IssueCode::RecoveryRequired && self.detail == NOT_INITIALIZED
     }
+    /// Initialization stopped after recording its identity. Only the same
+    /// request can finish it.
+    pub fn initialization_incomplete(request: RequestId) -> Self {
+        Self {
+            code: IssueCode::RecoveryRequired,
+            detail: format!("{INITIALIZATION_INCOMPLETE}{request}"),
+        }
+    }
+    pub fn interrupted_initialization(&self) -> Option<RequestId> {
+        if self.code != IssueCode::RecoveryRequired {
+            return None;
+        }
+        self.detail
+            .strip_prefix(INITIALIZATION_INCOMPLETE)?
+            .parse()
+            .ok()
+    }
 }
+const INITIALIZATION_INCOMPLETE: &str = "Initialization is incomplete. Resume initialize request ";
 impl std::fmt::Display for Issue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}: {}", self.code, self.detail)

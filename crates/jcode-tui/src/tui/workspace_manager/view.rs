@@ -486,7 +486,10 @@ impl WorkspaceManager {
             Line::from(Span::styled("Navigation", styles.accent)),
             Line::from("1–7 or Tab/Shift-Tab  sections · ↑↓ j k  select · PgUp PgDn"),
             Line::from("Enter  details (narrow) · Esc/q  back or close · r refresh"),
-            Line::from("Every effect opens a review. y or Enter confirms, n or Esc declines."),
+            Line::from("Every effect opens a review. y confirms, n or Esc declines; Enter presses"),
+            Line::from(
+                "the highlighted button (Cancel by default). Escalations need a typed word.",
+            ),
             Line::from(""),
             Line::from(Span::styled(
                 format!("{} actions", self.section.label()),

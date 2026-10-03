@@ -1095,3 +1095,38 @@ fn an_accepted_effect_settles_the_draft() {
     assert!(m.accept(id, workspace(id, WorkspaceResponse::Receipt(receipt))));
     assert!(m.draft.is_none() && m.form.is_none());
 }
+
+#[test]
+fn interrupted_initialization_resumes_its_own_request_and_damage_offers_nothing() {
+    let recorded = RequestId::new();
+    let mut m = WorkspaceManager::new("session_self".into(), true, Section::Organization);
+    let mut wire = Wire::new();
+    answer_probes(&mut m, &mut wire, false);
+    answer_status(
+        &mut m,
+        &mut wire,
+        Err(Issue::initialization_incomplete(recorded)),
+    );
+    assert!(frame(&mut m, 120, 32).contains(&recorded.to_string()));
+    key(&mut m, KeyCode::Char('I'));
+    key(&mut m, KeyCode::Char('y'));
+    let sent = wire.drain(&mut m);
+    let (_, request) = find(&sent, |r| matches!(r, WorkspaceRequest::Initialize { .. }));
+    assert_eq!(
+        request,
+        &WorkspaceRequest::Initialize { request: recorded },
+        "only the recorded request can finish initialization"
+    );
+    // Damaged state is reported but never offered a fresh initialization.
+    let mut m = WorkspaceManager::new("session_self".into(), true, Section::Organization);
+    let mut wire = Wire::new();
+    answer_probes(&mut m, &mut wire, false);
+    let damaged = Issue {
+        code: IssueCode::CorruptState,
+        detail: "Workspace exists without installation identity".into(),
+    };
+    answer_status(&mut m, &mut wire, Err(damaged));
+    assert!(!actions::available(&m).iter().any(|spec| spec.key == 'I'));
+    key(&mut m, KeyCode::Char('I'));
+    assert!(m.confirm.is_none() && wire.drain(&mut m).is_empty());
+}
