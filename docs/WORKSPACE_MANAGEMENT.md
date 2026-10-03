@@ -54,9 +54,10 @@ request. Nothing is sent while you edit.
   `y` confirms, `n` or Esc declines. Enter presses the highlighted button, which
   is Cancel by default. Escalations (closeout approval and removal, catalog
   restore, runtime Force) require typing a word.
-- Your draft survives a rejected or declined review. If the catalog changed since
-  the draft was opened, the review is refused, the catalog status refreshes, and
-  the draft returns with the reason. Ctrl+S reviews it against current state.
+- Your draft survives a rejected or declined review. A refused review reopens it
+  with the owner's reason. When the refusal is a conflict with current state (for
+  example, another change advanced the catalog), the catalog status also
+  refreshes; edit the draft if needed and Ctrl+S reviews it again.
 - Drafts, selections and target IDs persist through resize and reconnect.
 - A reply that is lost after an effect was sent is listed under **Unknown
   outcomes** (`U`). Inspect the current state first. `R` retries the *same*

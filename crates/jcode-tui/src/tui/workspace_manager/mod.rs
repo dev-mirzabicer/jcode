@@ -1010,7 +1010,7 @@ impl WorkspaceManager {
             let mut error = format!("{:?}: {}", issue.code, issue.detail);
             if issue.code == IssueCode::Conflict {
                 error.push_str(
-                    " — state changed since this draft. Ctrl+S reviews it against current state.",
+                    " — current state differs from this draft. Edit it if needed; Ctrl+S reviews it again.",
                 );
             }
             form.error = Some(error);

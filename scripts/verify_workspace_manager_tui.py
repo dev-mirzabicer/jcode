@@ -480,11 +480,31 @@ try:
     keys(tid, 'e'); until(tid, lambda s: s['form'], 'export form'); set_choice(tid, 'project', 'project:' + acme); set_text(tid, 'name', 'acme-export')
     submit_and_confirm(tid, 'Export'); state = last_outcome(tid, 'Exported project definition', 'exported')
     exported = next(t for t in new_outcomes(state) if 'Exported' in t).split(' to ', 1)[1].split('. It contains')[0]
+    # Importing a project whose locations are already bound here must not
+    # duplicate physical ownership: the review refuses it and keeps the draft.
     keys(tid, 'i'); until(tid, lambda s: s['form'], 'import form')
     set_text(tid, 'path', exported); set_choice(tid, 'collisions', 'new')
+    keys(tid, 'ctrl+s')
+    refused = until(tid, lambda s: s['form'] and s['form']['error'], 'duplicate physical identity refused')['form']
+    assert 'Remap it explicitly' in refused['error'] and refused['values']['path'] == exported, refused
+    assert not manager(tid)['confirm']
+    frame(tid, 'w12a-import-refused', 'Remap')
+    keys(tid, 'esc', 'esc'); until(tid, lambda s: not s['form'], 'refused import draft discarded')
+    # A definition without physical locations imports as new identities.
+    keys(tid, '1'); keys(tid, 'n'); until(tid, lambda s: s['form'] and 'project' in s['form']['title'].lower(), 'lab project form')
+    set_text(tid, 'name', 'Lab'); submit_and_confirm(tid, 'organization'); last_outcome(tid, 'Done', 'lab project')
+    lab = next(e['value']['id'] for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'] if e['value']['name'] == 'Lab')
+    keys(tid, '6'); until(tid, lambda s: s['section'] == 'backup', 'backup section again')
+    keys(tid, 'e'); until(tid, lambda s: s['form'], 'lab export form'); set_choice(tid, 'project', 'project:' + lab); set_text(tid, 'name', 'lab-export')
+    submit_and_confirm(tid, 'Export'); state = last_outcome(tid, 'Exported project definition', 'lab exported')
+    lab_export = next(t for t in new_outcomes(state) if 'Exported' in t).split(' to ', 1)[1].split('. It contains')[0]
+    keys(tid, 'i'); until(tid, lambda s: s['form'], 'lab import form')
+    set_text(tid, 'path', lab_export); set_choice(tid, 'collisions', 'new')
     review = submit_and_confirm(tid, 'Apply import')
     assert any('stay disabled' in line for line in review['lines']), review
     last_outcome(tid, 'apply import', 'imported')
+    labs = [e['value'] for e in ws('list', query=query('project'), after=None, limit=200)['value']['items'] if e['value']['name'] == 'Lab']
+    assert len(labs) == 2 and len({p['id'] for p in labs}) == 2, labs
     select_row(tid, lambda t: 'before-import' in t, 'named snapshot')
     keys(tid, 'shift+r'); until(tid, lambda s: s['confirm'] and s['confirm']['typed'] == 'restore', 'restore review')
     confirm(tid, 'restore'); last_outcome(tid, 'restore catalog snapshot', 'restored')
