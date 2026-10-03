@@ -3,6 +3,7 @@
 pub use jcode_base::workspace::*;
 mod clone_runner;
 mod closeout_runner;
+pub(crate) use closeout_runner::agent_action as agent_closeout_action;
 #[cfg(test)]
 mod runtime_tests;
 mod startup_copy;

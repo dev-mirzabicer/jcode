@@ -8,6 +8,8 @@ mod checkout;
 pub use checkout::*;
 mod closeout;
 mod correlation;
+mod discovery;
+pub use discovery::*;
 pub mod filesystem_path;
 mod operations;
 pub use closeout::*;

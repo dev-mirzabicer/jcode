@@ -329,6 +329,9 @@ pub struct Session {
     pub swarm_routing_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_guidance: Option<String>,
+    /// Exact managed workspace tool guidance captured after successful preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_guidance: Option<String>,
     /// The tool set this session's provider history advertised, and every
     /// change announced since (INT-01/WP-06, D15). Set at the first request;
     /// a new provider history starts without one.
@@ -990,6 +993,13 @@ impl Session {
         }
     }
 
+    pub fn set_workspace_guidance(&mut self, text: String) {
+        self.workspace_guidance = Some(text);
+        self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
+        self.mark_memory_profile_dirty();
+    }
+
     pub fn set_delegation_guidance(&mut self, text: String) {
         self.delegation_guidance = Some(text);
         self.updated_at = Utc::now();
@@ -1382,6 +1392,7 @@ impl Session {
         self.active_skill = parent.active_skill.clone();
         self.swarm_routing_prompt = parent.swarm_routing_prompt.clone();
         self.delegation_guidance = parent.delegation_guidance.clone();
+        self.workspace_guidance = parent.workspace_guidance.clone();
         self.tool_set = parent.tool_set.clone();
         self.provider_client_identity = parent.provider_client_identity.clone();
         self.system_prompt_metadata = parent.system_prompt_metadata.clone();
@@ -1474,6 +1485,7 @@ impl Session {
         session.active_skill = snapshot.active_skill;
         session.swarm_routing_prompt = snapshot.swarm_routing_prompt;
         session.delegation_guidance = snapshot.delegation_guidance;
+        session.workspace_guidance = snapshot.workspace_guidance;
         // A remote client sends no provider requests: the server's session
         // owns the tool set, so the startup projection does not load it.
         session.tool_set = None;
@@ -2225,6 +2237,7 @@ impl Session {
             active_skill: None,
             swarm_routing_prompt: None,
             delegation_guidance: None,
+            workspace_guidance: None,
             tool_set: None,
             provider_client_identity: None,
             system_prompt_metadata: None,
@@ -2306,6 +2319,7 @@ impl Session {
             active_skill: None,
             swarm_routing_prompt: None,
             delegation_guidance: None,
+            workspace_guidance: None,
             tool_set: None,
             provider_client_identity: None,
             system_prompt_metadata: None,
@@ -2453,8 +2467,7 @@ impl Session {
             self.working_dir = current_working_dir_string();
         }
 
-        let context =
-            crate::prompt::build_session_context(self.working_dir.as_deref().map(Path::new));
+        let context = self.initial_session_context_text();
         let wrapped = format!("<system-reminder>\n{}\n</system-reminder>", context.trim());
         self.add_message_with_display_role(
             Role::User,
@@ -2465,6 +2478,25 @@ impl Session {
             Some(StoredDisplayRole::System),
         );
         true
+    }
+
+    /// Generated session facts. A placed primary also receives its compact
+    /// workspace location facts; unplaced sessions are unchanged.
+    fn initial_session_context_text(&self) -> String {
+        let mut context =
+            crate::prompt::build_session_context(self.working_dir.as_deref().map(Path::new));
+        if self.location.is_some() && self.isolated_child.is_none() {
+            let workspace =
+                crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+            context.push('\n');
+            match workspace.location_context(self) {
+                Ok(facts) => context.push_str(&crate::workspace::location_context_text(&facts)),
+                Err(issue) => context.push_str(&format!(
+                    "Workspace facts are unavailable ({issue}). Use the workspace tool to inspect the current placement."
+                )),
+            }
+        }
+        context
     }
 
     /// Append the dynamic session facts after already-installed stable startup messages.
@@ -2486,6 +2518,7 @@ impl Session {
             return false;
         }
 
+        let context = self.initial_session_context_text();
         let Some(message) = self.messages.iter_mut().find(|message| {
             message.content.iter().any(|block| match block {
                 ContentBlock::Text { text, .. } => text.starts_with(SESSION_CONTEXT_PREFIX),
@@ -2495,8 +2528,6 @@ impl Session {
             return false;
         };
 
-        let context =
-            crate::prompt::build_session_context(self.working_dir.as_deref().map(Path::new));
         let wrapped = format!("<system-reminder>\n{}\n</system-reminder>", context.trim());
         for block in &mut message.content {
             if let ContentBlock::Text { text, .. } = block
@@ -3474,6 +3505,8 @@ struct RemoteStartupSessionSnapshot {
     swarm_routing_prompt: Option<String>,
     #[serde(default)]
     delegation_guidance: Option<String>,
+    #[serde(default)]
+    workspace_guidance: Option<String>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
     #[serde(default)]

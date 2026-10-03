@@ -15,6 +15,18 @@ pub fn preview(session: &Session, tools: &mut [ToolDefinition]) -> anyhow::Resul
             }
         }
     }
+    if let Some(tool) = tools.iter_mut().find(|tool| tool.name == "workspace") {
+        if let Some(text) = &session.workspace_guidance {
+            tool.description = text.clone();
+        } else {
+            let body = crate::instruction::SystemPromptComposer::new().workspace_tool_guidance(
+                session.working_dir.as_deref().map(std::path::Path::new),
+            )?;
+            if !body.is_empty() {
+                tool.description = format!("{}\n\n{body}", tool.description);
+            }
+        }
+    }
     if !crate::config::config().features.swarm {
         return Ok(());
     }
@@ -49,17 +61,29 @@ pub fn commit(session: &mut Session, tools: &[ToolDefinition]) -> anyhow::Result
         .is_none()
         .then(|| tools.iter().find(|tool| tool.name == "subagent"))
         .flatten();
-    if swarm.is_none() && delegation.is_none() {
+    let workspace = session
+        .workspace_guidance
+        .is_none()
+        .then(|| tools.iter().find(|tool| tool.name == "workspace"))
+        .flatten();
+    if swarm.is_none() && delegation.is_none() && workspace.is_none() {
         return Ok(false);
     }
     let previous = session.clone();
-    let migrated =
-        session.first_provider_dispatch_at().is_some() || session.provider_session_id.is_some();
+    // Workspace guidance arrives with its tool, so its first capture is part of
+    // the tool-set change already recorded for that request, not a migration
+    // of a description the provider has already seen.
+    let migrated = (swarm.is_some() || delegation.is_some())
+        && (session.first_provider_dispatch_at().is_some()
+            || session.provider_session_id.is_some());
     if let Some(tool) = swarm {
         session.set_swarm_routing_prompt(tool.description.clone());
     }
     if let Some(tool) = delegation {
         session.set_delegation_guidance(tool.description.clone());
+    }
+    if let Some(tool) = workspace {
+        session.set_workspace_guidance(tool.description.clone());
     }
     if migrated {
         session.provider_session_id = None;
@@ -230,6 +254,58 @@ mod delegation_tests {
                 .unwrap()
                 .delegation_guidance,
             loaded.delegation_guidance
+        );
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    #[test]
+    fn workspace_guidance_freezes_with_its_tool_without_resetting_continuation() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        crate::instruction::SystemPromptComposer::new()
+            .ensure_global_store()
+            .unwrap();
+        let file = home.root().join("instructions/tools/workspace.md");
+        // The seeded resource is the managed source; edits replace it.
+        assert!(file.is_file());
+        std::fs::write(
+            &file,
+            "---\nid: workspace\nkind: tool-guidance\n---\nSYNTHETIC WORKSPACE FIRST",
+        )
+        .unwrap();
+        let mut session = Session::create(None, None);
+        session.provider_session_id = Some("KEEP-CONTINUATION".into());
+        let mut tools = vec![ToolDefinition {
+            name: "workspace".into(),
+            description: "STRUCTURAL TOOL".into(),
+            input_schema: serde_json::json!({}),
+        }];
+        preview(&session, &mut tools).unwrap();
+        assert!(session.workspace_guidance.is_none());
+        assert!(tools[0].description.starts_with("STRUCTURAL TOOL\n\n"));
+        assert!(tools[0].description.ends_with("SYNTHETIC WORKSPACE FIRST"));
+        let expected = tools[0].description.clone();
+        // Arriving with its tool is part of that recorded tool-set change.
+        assert!(!commit(&mut session, &tools).unwrap());
+        assert_eq!(
+            session.provider_session_id.as_deref(),
+            Some("KEEP-CONTINUATION")
+        );
+        std::fs::write(&file, "invalid source").unwrap();
+        let loaded = Session::load(&session.id).unwrap();
+        tools[0].description = "STRUCTURAL TOOL".into();
+        preview(&loaded, &mut tools).unwrap();
+        assert_eq!(tools[0].description, expected);
+        let mut split = Session::create(Some(session.id.clone()), None);
+        split.inherit_continuation_state_from(&loaded);
+        assert_eq!(split.workspace_guidance, loaded.workspace_guidance);
+        assert_eq!(
+            Session::load_for_remote_startup(&session.id)
+                .unwrap()
+                .workspace_guidance,
+            loaded.workspace_guidance
         );
     }
 }

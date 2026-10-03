@@ -32,6 +32,7 @@ impl App {
     /// registry, each change announced once and persisted before the request.
     pub(super) async fn local_tool_definitions(&mut self) -> anyhow::Result<Vec<ToolDefinition>> {
         let mut live = self.registry.definitions(None).await;
+        crate::tool::retain_workspace_tool_for_session(&mut live, &self.session);
         // A tool the runtime would reject by name is not advertised
         // (INT-01/WP-06 R26); the person is told when that set changes.
         let withheld = crate::tool::withhold_rejected_tool_names(&mut live, self.provider.as_ref());

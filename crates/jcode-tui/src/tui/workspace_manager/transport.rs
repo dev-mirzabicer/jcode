@@ -891,6 +891,9 @@ fn closeout(
                         CloseoutAction::ApproveRemoval { .. } => "Removal approved".to_string(),
                         CloseoutAction::Finish => "Removal finished".to_string(),
                         CloseoutAction::ApplyRecovery { .. } => "Recovery applied".to_string(),
+                        CloseoutAction::DeclareNoLoss { .. } => {
+                            "Agent declared no information loss".to_string()
+                        }
                         CloseoutAction::ReviewRemoval | CloseoutAction::ReviewRecovery { .. } => {
                             "Done".to_string()
                         }

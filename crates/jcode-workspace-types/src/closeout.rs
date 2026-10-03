@@ -10,12 +10,42 @@ use std::path::PathBuf;
 pub enum CloseoutAction {
     Refresh,
     Preserve,
-    Disposition { decision: CloseoutDecision },
+    Disposition {
+        decision: CloseoutDecision,
+    },
     ReviewRemoval,
-    ApproveRemoval { review: ReviewId },
+    ApproveRemoval {
+        review: ReviewId,
+    },
     Finish,
-    ReviewRecovery { choice: CloseoutRecoveryAction },
-    ApplyRecovery { review: ReviewId },
+    ReviewRecovery {
+        choice: CloseoutRecoveryAction,
+    },
+    ApplyRecovery {
+        review: ReviewId,
+    },
+    /// Agent-only: complete a human-issued conditional authorization after the
+    /// agent determined that removal loses no information. Structural
+    /// findings cannot be waived by the assessment.
+    DeclareNoLoss {
+        review: ReviewId,
+        assessment: String,
+    },
+}
+
+/// Who admitted a closeout action. Trusted clients hold human-response
+/// authority; an agent acts for its placed Session and never approves.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseoutActor {
+    #[default]
+    TrustedClient,
+    Agent,
+}
+impl CloseoutActor {
+    pub fn is_trusted_client(&self) -> bool {
+        *self == Self::TrustedClient
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -30,7 +60,10 @@ pub struct CloseoutActionSpec {
 pub struct CloseoutActionRecord {
     pub request: RequestId,
     pub spec: CloseoutActionSpec,
+    /// The trusted client identity, or the Session ID for an agent action.
     pub initiated_by: String,
+    #[serde(default, skip_serializing_if = "CloseoutActor::is_trusted_client")]
+    pub actor: CloseoutActor,
     pub run_id: String,
     /// Domain receipt, not proof that the execution output has been sealed.
     pub result: Option<CloseoutActionResult>,

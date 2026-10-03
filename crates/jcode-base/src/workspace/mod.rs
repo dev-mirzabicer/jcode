@@ -13,6 +13,10 @@ mod closeout;
 mod use_gate;
 pub use use_gate::WorkspaceUseLease;
 mod context_scope;
+mod discovery;
+#[cfg(test)]
+mod discovery_tests;
+pub use discovery::{MEMBER_PREVIEW, location_context_text};
 mod grants;
 pub use context_scope::ContextScopePlan;
 mod native_mutation;

@@ -93,6 +93,8 @@ struct SessionToolPolicy {
 pub(crate) mod child_policy;
 mod native_files;
 pub(crate) mod subagent;
+pub(crate) mod workspace;
+pub use workspace::retain_for_session as retain_workspace_tool_for_session;
 
 static SESSION_TOOL_POLICIES: LazyLock<StdRwLock<HashMap<String, SessionToolPolicy>>> =
     LazyLock::new(|| StdRwLock::new(HashMap::new()));
@@ -537,6 +539,13 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
+            // Advertised only to placed primary Sessions by the Agent tool surface.
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                workspace::WORKSPACE_TOOL,
+                workspace::WorkspaceTool::new,
+            );
             let nonzero: Vec<String> = timings
                 .iter()
                 .filter(|(_, ms)| *ms > 0)

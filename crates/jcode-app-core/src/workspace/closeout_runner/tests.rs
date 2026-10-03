@@ -434,3 +434,288 @@ fn owned_closeout_adapter_stop_is_terminal_and_new_attempt_is_explicit() {
             fixture.cleanup().await;
         });
 }
+
+impl Fixture {
+    async fn begin_conditional(&self, conditional: bool) -> CloseoutRecord {
+        let service = WorkspaceService::new(&self.state);
+        let CloseoutResponse::Record(record) = self
+            .call(CloseoutRequest::Begin {
+                request: RequestId::new(),
+                expected_revision: service.status().unwrap().revision,
+                spec: CloseoutSpec {
+                    location: self.location,
+                    expected_generation: 1,
+                    preservation_directory: None,
+                    conditional_no_loss: conditional,
+                    full_archive: true,
+                },
+            })
+            .await
+        else {
+            panic!()
+        };
+        *record
+    }
+    /// A primary placed in a registered location of the checkout's project,
+    /// or a standalone root outside it. Never a cwd inside the checkout.
+    fn placed_session(&self, name: &str, in_project: bool) -> crate::session::Session {
+        let service = WorkspaceService::new(&self.state);
+        let root = self.temporary.as_ref().unwrap().path().join(name);
+        std::fs::create_dir(&root).unwrap();
+        let registration = if in_project {
+            let Entity::Location(checkout) =
+                service.inspect(EntityId::Location(self.location)).unwrap()
+            else {
+                panic!()
+            };
+            Registration::Directory {
+                home: checkout.home.unwrap(),
+            }
+        } else {
+            Registration::Standalone
+        };
+        let EntityId::Location(location) = change(
+            &service,
+            OrganizationChange::RegisterLocation {
+                name: name.into(),
+                path: root.clone(),
+                registration,
+            },
+        ) else {
+            panic!()
+        };
+        let placement = if in_project {
+            let Entity::Location(checkout) =
+                service.inspect(EntityId::Location(self.location)).unwrap()
+            else {
+                panic!()
+            };
+            match checkout.home.unwrap() {
+                Home::Project(project) => Placement::Project(project),
+                Home::WorkArea(area) => Placement::WorkArea(area),
+            }
+        } else {
+            Placement::Standalone(location)
+        };
+        let prepared = service
+            .prepare_primary_location(placement, Some(&root), OperationId::new())
+            .unwrap();
+        let mut session = crate::session::Session::create_with_id(
+            format!("session_agent_closeout_{name}_{}", RequestId::new()),
+            None,
+            None,
+        );
+        session.working_dir = Some(root.to_string_lossy().into());
+        session.location = Some(prepared.location.clone());
+        session
+    }
+    async fn agent(
+        &self,
+        session: &crate::session::Session,
+        record: &CloseoutRecord,
+        action: CloseoutAction,
+    ) -> Result<CloseoutActionRecord> {
+        agent_action_at(
+            self.state.clone(),
+            self.home.clone(),
+            session.clone(),
+            RequestId::new(),
+            CloseoutActionSpec {
+                operation: record.operation,
+                expected_revision: record.revision,
+                action,
+            },
+        )
+        .await
+    }
+    async fn current(&self, operation: OperationId) -> CloseoutRecord {
+        WorkspaceService::new(&self.state)
+            .inspect_closeout(operation)
+            .unwrap()
+    }
+}
+
+fn settled(record: CloseoutActionRecord) -> CloseoutActionResult {
+    assert!(record.issue.is_none(), "{record:?}");
+    record.result.unwrap()
+}
+
+#[test]
+fn agent_closeout_needs_scope_never_approves_and_finishes_only_its_conditional_declaration() {
+    let _environment = crate::storage::lock_test_env();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let fixture = Fixture::new();
+            let agent = fixture.placed_session("control", true);
+            let peer = fixture.placed_session("peer", true);
+            let outsider = fixture.placed_session("outside", false);
+            let mut record = fixture.begin_conditional(true).await;
+
+            // Read-only discovery is not write scope.
+            let denied = fixture
+                .agent(&outsider, &record, CloseoutAction::Refresh)
+                .await
+                .unwrap_err();
+            assert_eq!(denied.code, IssueCode::PermissionRequired);
+
+            let refreshed = fixture
+                .agent(&agent, &record, CloseoutAction::Refresh)
+                .await
+                .unwrap();
+            assert_eq!(refreshed.actor, CloseoutActor::Agent);
+            assert_eq!(refreshed.initiated_by, agent.id);
+            let CloseoutActionResult::Record(next) = settled(refreshed) else {
+                panic!()
+            };
+            record = *next;
+            let CloseoutActionResult::Record(next) = settled(
+                fixture
+                    .agent(&agent, &record, CloseoutAction::Preserve)
+                    .await
+                    .unwrap(),
+            ) else {
+                panic!()
+            };
+            record = *next;
+            let CloseoutActionResult::Review(review) = settled(
+                fixture
+                    .agent(&agent, &record, CloseoutAction::ReviewRemoval)
+                    .await
+                    .unwrap(),
+            ) else {
+                panic!()
+            };
+            assert!(review.issues.is_empty(), "{review:?}");
+            record = fixture.current(record.operation).await;
+
+            // Agents never approve, recover or finish someone else's removal.
+            for action in [
+                CloseoutAction::ApproveRemoval { review: review.id },
+                CloseoutAction::ReviewRecovery {
+                    choice: CloseoutRecoveryAction::RestartPreparation,
+                },
+                CloseoutAction::Finish,
+            ] {
+                let error = fixture.agent(&agent, &record, action).await.unwrap_err();
+                assert_eq!(error.code, IssueCode::PermissionRequired, "{error:?}");
+            }
+            // A trusted client cannot impersonate the agent's declaration.
+            let impersonated = dispatch_at(
+                fixture.state.clone(),
+                fixture.home.clone(),
+                CloseoutRequest::Execute {
+                    request: RequestId::new(),
+                    spec: CloseoutActionSpec {
+                        operation: record.operation,
+                        expected_revision: record.revision,
+                        action: CloseoutAction::DeclareNoLoss {
+                            review: review.id,
+                            assessment: "synthetic".into(),
+                        },
+                    },
+                },
+                "fixture-human-client".into(),
+            )
+            .await;
+            assert!(matches!(
+                impersonated,
+                WorkspaceResponse::Error(Issue {
+                    code: IssueCode::PermissionRequired,
+                    ..
+                })
+            ));
+
+            let CloseoutActionResult::Record(authorized) = settled(
+                fixture
+                    .agent(
+                        &agent,
+                        &record,
+                        CloseoutAction::DeclareNoLoss {
+                            review: review.id,
+                            assessment: "synthetic no-loss assessment".into(),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            ) else {
+                panic!()
+            };
+            assert_eq!(authorized.stage, CloseoutStage::Authorized);
+            assert!(matches!(
+                &authorized.authorization.as_ref().unwrap().source,
+                CloseoutAuthorizationSource::Conditional { session, .. } if *session == agent.id
+            ));
+            record = *authorized;
+            let error = fixture
+                .agent(&peer, &record, CloseoutAction::Finish)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, IssueCode::PermissionRequired);
+            let CloseoutActionResult::Record(closed) = settled(
+                fixture
+                    .agent(&agent, &record, CloseoutAction::Finish)
+                    .await
+                    .unwrap(),
+            ) else {
+                panic!()
+            };
+            assert_eq!(closed.stage, CloseoutStage::Closed);
+            assert!(!fixture.checkout.exists());
+            fixture.cleanup().await;
+        });
+}
+
+#[test]
+fn agent_declaration_without_human_conditional_authority_is_refused_and_recorded() {
+    let _environment = crate::storage::lock_test_env();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let fixture = Fixture::new();
+            let agent = fixture.placed_session("control", true);
+            let mut record = fixture.begin_conditional(false).await;
+            for action in [CloseoutAction::Refresh, CloseoutAction::Preserve] {
+                let CloseoutActionResult::Record(next) =
+                    settled(fixture.agent(&agent, &record, action).await.unwrap())
+                else {
+                    panic!()
+                };
+                record = *next;
+            }
+            let CloseoutActionResult::Review(review) = settled(
+                fixture
+                    .agent(&agent, &record, CloseoutAction::ReviewRemoval)
+                    .await
+                    .unwrap(),
+            ) else {
+                panic!()
+            };
+            record = fixture.current(record.operation).await;
+            let refused = fixture
+                .agent(
+                    &agent,
+                    &record,
+                    CloseoutAction::DeclareNoLoss {
+                        review: review.id,
+                        assessment: "synthetic".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                refused.issue.as_ref().map(|issue| issue.code),
+                Some(IssueCode::PermissionRequired),
+                "{refused:?}"
+            );
+            let current = fixture.current(record.operation).await;
+            assert_eq!(current.stage, CloseoutStage::ReadyForApproval);
+            assert!(current.authorization.is_none());
+            assert!(fixture.checkout.join("payload").is_file());
+            fixture.cleanup().await;
+        });
+}

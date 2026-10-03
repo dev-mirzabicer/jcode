@@ -176,6 +176,7 @@ pub(crate) fn closeout_action(action: &CloseoutAction) -> &'static str {
         CloseoutAction::Finish => "finish removal",
         CloseoutAction::ReviewRecovery { .. } => "review recovery",
         CloseoutAction::ApplyRecovery { .. } => "apply recovery",
+        CloseoutAction::DeclareNoLoss { .. } => "agent no-loss declaration",
     }
 }
 

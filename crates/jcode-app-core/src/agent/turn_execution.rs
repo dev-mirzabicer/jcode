@@ -1111,7 +1111,7 @@ impl Agent {
                 !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
             });
         }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        Self::apply_session_tool_surface(&mut tools, &self.session);
         crate::tool::withhold_rejected_tool_names(&mut tools, self.provider.as_ref());
         crate::tool::instruction_guidance::preview(&self.session, &mut tools)
             .map_err(|error| crate::protocol::ContextServiceError::Runtime(error.to_string()))?;
@@ -1127,8 +1127,15 @@ impl Agent {
                 !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
             });
         }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        Self::apply_session_tool_surface(&mut tools, &self.session);
         tools
+    }
+
+    /// Session-scoped exposure: self-development tools and the placed-primary
+    /// workspace tool.
+    fn apply_session_tool_surface(tools: &mut Vec<ToolDefinition>, session: &Session) {
+        Self::apply_selfdev_tool_surface(tools, session.is_canary);
+        crate::tool::retain_workspace_tool_for_session(tools, session);
     }
 
     /// Expose the `selfdev` tool only while running in self-development mode.
@@ -1193,7 +1200,7 @@ impl Agent {
                 !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
             });
         }
-        Self::apply_selfdev_tool_surface(&mut tools, session.is_canary);
+        Self::apply_session_tool_surface(&mut tools, session);
         crate::tool::instruction_guidance::preview(session, &mut tools)?;
         Ok(tools)
     }

@@ -178,8 +178,95 @@ async fn execute_admitted(
     })
     .await
     .map_err(problem)??;
+    run_admitted(service, session_root, request, record)
+        .await
+        .map(|record| CloseoutResponse::Action(Box::new(record)))
+}
+
+/// Agent closeout work for the caller's authoritative Session. The base owner
+/// restricts the action set and scope; execution reuses the same supervisor.
+/// The agent's call waits for its step to settle. Cancelling that wait leaves
+/// the step under its execution owner, inspectable by request.
+#[cfg(target_os = "macos")]
+pub(crate) async fn agent_action(
+    session: crate::session::Session,
+    request: RequestId,
+    spec: CloseoutActionSpec,
+) -> Result<CloseoutActionRecord> {
+    agent_action_at(
+        crate::storage::durable_state_dir(),
+        crate::storage::jcode_dir().map_err(problem)?,
+        session,
+        request,
+        spec,
+    )
+    .await
+}
+
+#[cfg(target_os = "macos")]
+async fn agent_action_at(
+    state_root: PathBuf,
+    session_root: PathBuf,
+    session: crate::session::Session,
+    request: RequestId,
+    spec: CloseoutActionSpec,
+) -> Result<CloseoutActionRecord> {
+    let service = WorkspaceService::new(&state_root);
+    let permit = mutation_permit("closeout-agent-action")?;
+    let record = crate::runtime_lifecycle::admission::scope(permit, {
+        let service = service.clone();
+        let session_root = session_root.clone();
+        async move {
+            let prepare = service.clone();
+            let record = crate::runtime_lifecycle::admission::spawn_blocking(move || {
+                prepare.admit_agent_closeout_action(&session, request, spec)
+            })
+            .await
+            .map_err(problem)??;
+            run_admitted(service, session_root, request, record).await
+        }
+    })
+    .await?;
     if record.result.is_some() || record.issue.is_some() {
-        return Ok(CloseoutResponse::Action(Box::new(record)));
+        return Ok(record);
+    }
+    let store = ExecutionStore::open(&session_root).map_err(problem)?;
+    crate::execution::control_transport::control_in_store(
+        &store,
+        &record.run_id,
+        crate::execution::ControlOperation::Wait,
+    )
+    .await
+    .map_err(problem)?;
+    crate::runtime_lifecycle::admission::spawn_blocking(move || {
+        service.inspect_closeout_action(request)
+    })
+    .await
+    .map_err(problem)?
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn agent_action(
+    _session: crate::session::Session,
+    _request: RequestId,
+    _spec: CloseoutActionSpec,
+) -> Result<CloseoutActionRecord> {
+    Err(Issue {
+        code: IssueCode::UnsupportedCapability,
+        detail: "Native checkout closeout requires the supported macOS filesystem/process adapters"
+            .into(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+async fn run_admitted(
+    service: WorkspaceService,
+    session_root: PathBuf,
+    request: RequestId,
+    record: CloseoutActionRecord,
+) -> Result<CloseoutActionRecord> {
+    if record.result.is_some() || record.issue.is_some() {
+        return Ok(record);
     }
     let invocation = service.closeout_action_invocation(&record)?;
     let ctx = ToolContext {
@@ -263,7 +350,6 @@ async fn execute_admitted(
     })
     .await
     .map_err(problem)?
-    .map(|v| CloseoutResponse::Action(Box::new(v)))
 }
 
 #[cfg(target_os = "macos")]

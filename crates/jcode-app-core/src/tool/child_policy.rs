@@ -19,6 +19,9 @@ pub(crate) const ADMIN_TOOLS: &[&str] = &[
     "selfdev",
     "schedule",
     "debug_socket",
+    // Workspace discovery, access proposals and closeout belong to the
+    // original primary parent; children never receive the tool.
+    "workspace",
 ];
 
 /// Installed only from validated Session state, never from tool arguments or prose.
