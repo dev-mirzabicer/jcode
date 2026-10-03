@@ -116,10 +116,10 @@ fn workspace(id: u64, response: WorkspaceResponse) -> ServerEvent {
     }
 }
 
-fn find<'a>(
-    sent: &'a [(u64, Request)],
+fn find(
+    sent: &[(u64, Request)],
     pred: impl Fn(&WorkspaceRequest) -> bool,
-) -> (u64, &'a WorkspaceRequest) {
+) -> (u64, &WorkspaceRequest) {
     sent.iter()
         .find_map(|(id, request)| match request {
             Request::Workspace { request, .. } if pred(request) => Some((*id, &**request)),
@@ -1129,4 +1129,85 @@ fn interrupted_initialization_resumes_its_own_request_and_damage_offers_nothing(
     assert!(!actions::available(&m).iter().any(|spec| spec.key == 'I'));
     key(&mut m, KeyCode::Char('I'));
     assert!(m.confirm.is_none() && wire.drain(&mut m).is_empty());
+}
+
+#[test]
+fn directory_proposal_prefills_its_listed_choice_and_newer_pages_advance_the_review_revision() {
+    let (mut m, mut wire) = ready(false);
+    wire.drain(&mut m);
+    let docs = Location {
+        id: LocationId::new(),
+        name: "Docs".into(),
+        home: None,
+        kind: LocationKind::Directory,
+        observed_path: "/synthetic/docs".into(),
+        volume_uuid: "VOL".into(),
+        binding_generation: 1,
+        lifecycle: LocationLifecycle::Ready,
+        retired: false,
+        revision: 1,
+    };
+    m.known
+        .insert(docs.id.to_string(), Entity::Location(docs.clone()));
+    m.switch(Section::Permissions);
+    let sent = wire.drain(&mut m);
+    let proposal = AccessProposal {
+        id: ProposalId::new(),
+        session: "session_x".into(),
+        target: WriteTarget::Root(docs.id),
+        revision: 8,
+        state: AccessProposalState::Pending,
+        reason: String::new(),
+        grant: None,
+    };
+    // Another client advanced the catalog; this list was read at revision 8.
+    let (id, _) = find(&sent, |r| {
+        matches!(
+            r,
+            WorkspaceRequest::Permissions {
+                request: PermissionRequest::List { .. }
+            }
+        )
+    });
+    let page = PermissionPage {
+        revision: 8,
+        total: 1,
+        items: vec![PermissionItem::Proposal(proposal.clone())],
+        next: None,
+    };
+    assert!(m.accept(
+        id,
+        workspace(
+            id,
+            WorkspaceResponse::Permissions(Box::new(PermissionResponse::Page(page)))
+        )
+    ));
+    m.perms.selected = Some(proposal.id.to_string());
+    key(&mut m, KeyCode::Char('a'));
+    let (_, form) = m.form.clone().unwrap();
+    let value = form.value("target").to_string();
+    assert_eq!(
+        value,
+        format!("directory:{}", docs.id),
+        "the prefill names a listed choice"
+    );
+    m.key(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let sent = wire.drain(&mut m);
+    let (_, request) = find(&sent, |r| {
+        matches!(
+            r,
+            WorkspaceRequest::Permissions {
+                request: PermissionRequest::Review { .. }
+            }
+        )
+    });
+    assert!(matches!(
+        request,
+        WorkspaceRequest::Permissions {
+            request: PermissionRequest::Review {
+                expected_revision: 8,
+                ..
+            }
+        }
+    ));
 }

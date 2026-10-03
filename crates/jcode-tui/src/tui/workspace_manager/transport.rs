@@ -21,7 +21,7 @@ pub(crate) enum View {
     Entity,
     EntitySessions(EntityId),
     Sessions,
-    SessionView,
+    SessionLocation,
     Scope(String),
     Operations,
     Closeouts,
@@ -593,11 +593,13 @@ fn workspace(
             }
         }
         (View::Known, R::Page(page)) => {
+            manager.observe_revision(page.revision);
             for entity in page.items {
                 manager.known.insert(entity.id().to_string(), entity);
             }
         }
         (View::OrgPage, R::Page(page)) => {
+            manager.observe_revision(page.revision);
             for entity in &page.items {
                 manager
                     .known
@@ -626,12 +628,14 @@ fn workspace(
             manager.sessions.rows = rows;
         }
         (View::Operations, R::Operations(page)) => {
+            manager.observe_revision(page.revision);
             if manager.ops.selected.is_none() {
                 manager.ops.selected = page.items.first().map(|entry| entry.operation.operation());
             }
             manager.ops.page = Some(page);
         }
         (View::Closeouts, R::Operations(page)) => {
+            manager.observe_revision(page.revision);
             let first = page.items.first().map(|entry| entry.operation.operation());
             manager.closeouts.page = Some(page);
             if manager.closeouts.selected.is_none()
@@ -696,6 +700,7 @@ fn workspace(
         }
         (View::Permissions, R::Permissions(response)) => match *response {
             PermissionResponse::Page(page) => {
+                manager.observe_revision(page.revision);
                 if manager.perms.selected.is_none() {
                     manager.perms.selected = page.items.first().map(describe::permission_key);
                 }

@@ -111,9 +111,24 @@ pub(crate) fn audience(manager: &WorkspaceManager, audience: &Audience) -> Strin
 }
 
 /// Form choice (kind, value) for an existing write target.
-pub(crate) fn target_choice(target: &WriteTarget) -> (&'static str, String) {
+/// The form value for a write target. A root uses its location's actual kind,
+/// matching the choice list, so a prefilled directory shows as that directory.
+pub(crate) fn target_choice(
+    manager: &WorkspaceManager,
+    target: &WriteTarget,
+) -> (&'static str, String) {
     match target {
-        WriteTarget::Root(id) => ("root", format!("checkout:{id}")),
+        WriteTarget::Root(id) => {
+            let kind = match manager.known.get(&id.to_string()) {
+                Some(Entity::Location(location)) => match location.kind {
+                    LocationKind::Directory => "directory",
+                    LocationKind::Standalone { .. } => "standalone",
+                    LocationKind::Checkout { .. } => "checkout",
+                },
+                _ => "checkout",
+            };
+            ("root", format!("{kind}:{id}"))
+        }
         WriteTarget::ProjectMembers(id) => ("project", format!("project:{id}")),
         WriteTarget::WorkAreaMembers(id) => ("area", format!("area:{id}")),
     }

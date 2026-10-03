@@ -667,7 +667,7 @@ impl WorkspaceManager {
     pub(crate) fn inspect_session(&mut self, session: String) {
         if self.caps.session_inspection {
             self.queue(Op::location(
-                transport::View::SessionView,
+                transport::View::SessionLocation,
                 PrimaryLocationCommand::InspectSession { session },
             ));
         }
@@ -971,6 +971,17 @@ impl WorkspaceManager {
             }
             form.error = Some(error);
             self.form = Some((kind, form));
+        }
+    }
+
+    /// Lists carry the catalog revision they were read at. The catalog only
+    /// moves forward, so a newer page means the human has seen newer state;
+    /// later reviews bind to it instead of a stale status read.
+    pub(crate) fn observe_revision(&mut self, revision: Revision) {
+        if let Some(Ok(status)) = &mut self.catalog
+            && revision > status.revision
+        {
+            status.revision = revision;
         }
     }
 

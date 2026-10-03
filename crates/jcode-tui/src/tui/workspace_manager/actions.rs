@@ -923,10 +923,10 @@ pub(crate) fn run(manager: &mut WorkspaceManager, action: Action) {
         Action::Approve => {
             if let Some(PermissionItem::Proposal(proposal)) = selected_permission(manager).cloned() {
                 open(manager, FormKind::Grant(Some(proposal.id)));
+                let (kind, value) = describe::target_choice(manager, &proposal.target);
                 if let Some((_, form)) = &mut manager.form {
                     form.set("audience_kind", "session");
                     form.set("session", proposal.session.clone());
-                    let (kind, value) = describe::target_choice(&proposal.target);
                     form.set("target_kind", kind);
                     form.set("target", value);
                 }
@@ -1815,7 +1815,7 @@ pub(crate) fn open(manager: &mut WorkspaceManager, kind: FormKind) {
             if let Audience::Session(session) = &item.grant.audience {
                 form.set("session", session.clone());
             }
-            let (kind, value) = describe::target_choice(&item.grant.target);
+            let (kind, value) = describe::target_choice(manager, &item.grant.target);
             form.set("target_kind", kind);
             form.set("target", value);
             form

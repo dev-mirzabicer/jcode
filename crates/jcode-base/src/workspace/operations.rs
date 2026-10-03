@@ -200,7 +200,7 @@ impl WorkspaceService {
             last_row = Some(*row);
         }
         let next = (rows.len() > limit as usize)
-            .then(|| last_row)
+            .then_some(last_row)
             .flatten()
             .map(|row| Cursor {
                 revision,
