@@ -565,6 +565,20 @@ try:
     keys(tid, 'shift+s')
     until(tid, lambda s: s['connected'] and s['capabilities']['runtime'], 'reconnected after TUI Start', 180)
 
+    step('runtime: reviewed restart from the TUI reaches a new incarnation without intentional stop')
+    before = json.loads(cli('runtime', 'status', '--json').stdout)['response']['value']['runtime']
+    open_manager(tid, '/runtime')
+    until(tid, lambda s: s['section'] == 'runtime' and s['runtime']['desired_stopped'] is False, 'runtime status before restart')
+    keys(tid, 'shift+r'); until(tid, lambda s: s['form'] and 'Restart' in s['form']['title'], 'restart form')
+    review = submit_and_confirm(tid, 'Restart the runtime')
+    assert any('fresh runtime starts' in line for line in review['lines']), review
+    def restarted():
+        status = json.loads(cli('runtime', 'status', '--json').stdout)
+        value = (status.get('response') or {}).get('value') or {}
+        return status if status.get('live_response') and value.get('runtime') not in (None, before) and not value.get('desired_stopped') else None
+    wait(restarted, 'new runtime incarnation', 180)
+    until(tid, lambda s: s['connected'] and s['capabilities']['runtime'], 'reconnected after TUI restart', 180)
+
     step('crash during a turn: recovery selection Leave stopped')
     fixture_connect(); gate_entered.clear(); gate_release.clear()
     f.subscribe(launched); f.send({'type': 'message', 'id': 9002, 'content': 'hold this turn again'})
