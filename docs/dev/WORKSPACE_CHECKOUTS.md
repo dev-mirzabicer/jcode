@@ -6,9 +6,8 @@ TUI. An authenticated same-user client can review and execute operations through
 `workspace_capabilities.checkout_version=1` negotiates this surface. Ordinary
 managed primary launch remains gated (`managed_rollout=false`), and no agent
 workspace tool, checkout deletion, hosted fork, integration target, or final
-closeout skill is exposed by this service. The human management mode is a
-separate consumer. The client must not claim that this backend is a completed
-human-facing clone form.
+closeout skill is exposed by this service. The [human management mode](../WORKSPACE_MANAGEMENT.md)
+is a separate consumer of these operations.
 
 ## Deliberate clone journey
 

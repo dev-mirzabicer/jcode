@@ -154,7 +154,13 @@ revision-bound continuation. The page-size bound is not a member-count ceiling.
 An old server must be probed before sending catalog requests.
 
 There is no alternative full workspace CLI or new agent-facing permission tool.
-The later basic management client and final SDK reconciliation consume these owners.
+The [workspace management mode](../WORKSPACE_MANAGEMENT.md) consumes these owners;
+final SDK reconciliation remains separate. Its read-only `operations` and
+`startup_copy_plans` requests (`workspace_capabilities.management_version=1`) list
+durable clone, closeout, Startup Context copy, launch and location operations
+newest first, and report the plan revisions a copy review needs. A never-created
+catalog is reported as typed `not_initialized`; an interrupted initialization
+names its recorded request, which is the only one that can finish it.
 
 ### Staged permission catalog
 

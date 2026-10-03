@@ -1,8 +1,8 @@
 # Reviewed scope for new primary contexts
 
-This backend extends the existing Clear, Split and Transfer owners. It does not
-activate the later workspace management TUI or advertise an agent administration
-tool. Managed rollout remains separately gated. Native enforcement is described
+This backend extends the existing Clear, Split and Transfer owners. The
+[workspace management mode](WORKSPACE_MANAGEMENT.md) offers the reviewed carry
+choice (Sessions, `n`). No agent administration tool is advertised. Managed rollout remains separately gated. Native enforcement is described
 in [native write scope](dev/NATIVE_WRITE_SCOPE.md).
 
 ## Review and choice
@@ -95,8 +95,8 @@ Ack is not publication. After an uncertain result, inspect the original review's
 retained scope status instead of allocating a new review and repeating effects.
 
 The native administrative recovery operations remain the workspace service
-contract. C01's later management client consumes them without rewriting Session
-files or sequencing its own permission transaction.
+contract. The management mode consumes them (Sessions, `R` and `X`) without
+rewriting Session files or sequencing its own permission transaction.
 
 ## Verification boundaries
 

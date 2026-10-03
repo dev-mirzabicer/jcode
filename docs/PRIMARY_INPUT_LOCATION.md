@@ -2,9 +2,9 @@
 
 This is the C01 backend contract for durable primary input and explicit location
 changes. [Reviewed new-context scope](PRIMARY_CONTEXT_SCOPE.md) documents grant
-carry and continuation publication. These backends do not expose the later
-workspace management TUI, runtime service supervision, or C04/C05's final interface
-and corpus.
+carry and continuation publication. The human client for location changes and legacy
+adoption is the [workspace management mode](WORKSPACE_MANAGEMENT.md). C04/C05's
+final interface and corpus remain separate.
 
 ## Owners and availability
 

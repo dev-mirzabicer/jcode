@@ -5,6 +5,12 @@ without creating an agent Session. Use the same global `--socket PATH` for every
 step when controlling a named runtime. These are same-user administrative controls,
 not a physical-human attestation or an OS sandbox.
 
+Inside an attached TUI, `/runtime` opens the same reviewed controls in the
+[workspace management mode](WORKSPACE_MANAGEMENT.md): status, Stop and Restart
+reviews, waiting Cancel, option change, Retry, typed Force, interrupted-turn
+decisions and, while stopped, an explicit Start that runs `jcode runtime start`
+for that socket.
+
 ## Inspect and start
 
 ```sh
