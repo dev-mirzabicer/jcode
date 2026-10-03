@@ -451,6 +451,29 @@ pub(crate) fn available(manager: &WorkspaceManager) -> Vec<ActionSpec> {
                 if manager.closeouts.pane == CloseoutPane::Inventory && open && !busy {
                     actions.push(spec('d', "Disposition", Action::Disposition));
                 }
+                let paged = match manager.closeouts.pane {
+                    CloseoutPane::Inventory => {
+                        !manager.closeouts.inventory_previous.is_empty()
+                            || manager
+                                .closeouts
+                                .inventory
+                                .as_ref()
+                                .is_some_and(|p| p.next.is_some())
+                    }
+                    CloseoutPane::Removal => {
+                        !manager.closeouts.removal_previous.is_empty()
+                            || manager
+                                .closeouts
+                                .removal
+                                .as_ref()
+                                .is_some_and(|p| p.next.is_some())
+                    }
+                    _ => false,
+                };
+                if paged {
+                    actions.push(spec('[', "Prev page", Action::Older));
+                    actions.push(spec(']', "Next page", Action::Newer));
+                }
                 actions.push(spec('g', "Removal progress", Action::RemovalPane));
                 actions.push(spec('H', "History", Action::HistoryPane));
                 if manager.closeouts.pane != CloseoutPane::Record {
@@ -1044,36 +1067,12 @@ pub(crate) fn run(manager: &mut WorkspaceManager, action: Action) {
             }
         }
         Action::InventoryPane => {
-            if let Some(record) = &manager.closeouts.record
-                && let Some(digest) = record.inventory_digest.clone()
-            {
-                let operation = record.operation;
-                manager.closeouts.pane = CloseoutPane::Inventory;
-                manager.queue(Op::closeout(
-                    View::CloseoutInventory,
-                    CloseoutRequest::Inventory {
-                        operation,
-                        digest,
-                        after: manager.closeouts.inventory_after,
-                        limit: 200,
-                    },
-                ));
-            }
+            manager.closeouts.pane = CloseoutPane::Inventory;
+            load_inventory(manager);
         }
         Action::RemovalPane => {
-            if let Some(record) = &manager.closeouts.record {
-                let (operation, expected_revision) = (record.operation, record.revision);
-                manager.closeouts.pane = CloseoutPane::Removal;
-                manager.queue(Op::closeout(
-                    View::CloseoutRemoval,
-                    CloseoutRequest::RemovalProgress {
-                        operation,
-                        expected_revision,
-                        after: 0,
-                        limit: 200,
-                    },
-                ));
-            }
+            manager.closeouts.pane = CloseoutPane::Removal;
+            load_removal(manager);
         }
         Action::HistoryPane => {
             if let Some(record) = &manager.closeouts.record {
@@ -1216,8 +1215,97 @@ fn reset_org_page(manager: &mut WorkspaceManager) {
     manager.load_org();
 }
 
+/// Closeout inventories and removal journals can be large; page them.
+const INVENTORY_PAGE: u32 = 200;
+
+/// Inventory pages are bound to the inventory digest. A different digest
+/// (a refreshed inventory) starts again from its first entry.
+pub(crate) fn load_inventory(manager: &mut WorkspaceManager) {
+    let Some(record) = &manager.closeouts.record else {
+        return;
+    };
+    let Some(digest) = record.inventory_digest.clone() else {
+        return;
+    };
+    let operation = record.operation;
+    if manager
+        .closeouts
+        .inventory
+        .as_ref()
+        .is_some_and(|page| page.operation != operation || page.digest != digest)
+    {
+        manager.closeouts.inventory_after = 0;
+        manager.closeouts.inventory_previous.clear();
+        manager.closeouts.entry = 0;
+    }
+    manager.queue(Op::closeout(
+        View::CloseoutInventory,
+        CloseoutRequest::Inventory {
+            operation,
+            digest,
+            after: manager.closeouts.inventory_after,
+            limit: INVENTORY_PAGE,
+        },
+    ));
+}
+
+pub(crate) fn load_removal(manager: &mut WorkspaceManager) {
+    let Some(record) = &manager.closeouts.record else {
+        return;
+    };
+    let (operation, expected_revision) = (record.operation, record.revision);
+    if manager
+        .closeouts
+        .removal
+        .as_ref()
+        .is_some_and(|page| page.operation != operation || page.revision != expected_revision)
+    {
+        manager.closeouts.removal_after = 0;
+        manager.closeouts.removal_previous.clear();
+    }
+    manager.queue(Op::closeout(
+        View::CloseoutRemoval,
+        CloseoutRequest::RemovalProgress {
+            operation,
+            expected_revision,
+            after: manager.closeouts.removal_after,
+            limit: INVENTORY_PAGE,
+        },
+    ));
+}
+
 fn page(manager: &mut WorkspaceManager, forward: bool) {
     match manager.section {
+        Section::Closeout => match manager.closeouts.pane {
+            CloseoutPane::Inventory => {
+                let next = manager.closeouts.inventory.as_ref().and_then(|p| p.next);
+                if forward {
+                    let Some(next) = next else { return };
+                    let current = std::mem::replace(&mut manager.closeouts.inventory_after, next);
+                    manager.closeouts.inventory_previous.push(current);
+                } else if let Some(previous) = manager.closeouts.inventory_previous.pop() {
+                    manager.closeouts.inventory_after = previous;
+                } else {
+                    return;
+                }
+                manager.closeouts.entry = 0;
+                load_inventory(manager);
+            }
+            CloseoutPane::Removal => {
+                let next = manager.closeouts.removal.as_ref().and_then(|p| p.next);
+                if forward {
+                    let Some(next) = next else { return };
+                    let current = std::mem::replace(&mut manager.closeouts.removal_after, next);
+                    manager.closeouts.removal_previous.push(current);
+                } else if let Some(previous) = manager.closeouts.removal_previous.pop() {
+                    manager.closeouts.removal_after = previous;
+                } else {
+                    return;
+                }
+                load_removal(manager);
+            }
+            _ => {}
+        },
         Section::Organization => {
             if forward {
                 if let Some(next) = manager.org.page.as_ref().and_then(|p| p.next.clone()) {

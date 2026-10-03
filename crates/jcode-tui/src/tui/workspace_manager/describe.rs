@@ -306,6 +306,15 @@ fn state_tone(state: OperationState) -> Tone {
     }
 }
 
+/// Inventory paths are relative to the checkout; its root has an empty path.
+fn entry_path(path: &std::path::Path) -> String {
+    if path.as_os_str().is_empty() {
+        "(checkout root)".into()
+    } else {
+        path.display().to_string()
+    }
+}
+
 pub(super) fn rows(manager: &WorkspaceManager) -> Vec<Row> {
     match manager.section {
         Section::Organization => {
@@ -1507,9 +1516,15 @@ fn closeout_detail(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) 
                     lines,
                     Tone::Accent,
                     format!(
-                        "Inventory {} of {} (↑↓ select · d disposition)",
-                        page.entries.len(),
-                        page.total
+                        "Inventory {}–{} of {} (↑↓ select · d disposition{})",
+                        manager.closeouts.inventory_after + u64::from(!page.entries.is_empty()),
+                        manager.closeouts.inventory_after + page.entries.len() as u64,
+                        page.total,
+                        if page.next.is_some() || !manager.closeouts.inventory_previous.is_empty() {
+                            " · [ ] page"
+                        } else {
+                            ""
+                        }
                     ),
                 );
                 for (index, entry) in page.entries.iter().enumerate() {
@@ -1528,7 +1543,7 @@ fn closeout_detail(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) 
                         format!(
                             "{marker} {:?} {} {} B{}",
                             entry.kind,
-                            entry.path.display(),
+                            entry_path(&entry.path),
                             entry.bytes,
                             if entry.blockers.is_empty() {
                                 String::new()
@@ -1567,7 +1582,7 @@ fn closeout_detail(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) 
                         Tone::Warn,
                         format!(
                             "In progress: {} ({:?})",
-                            pending.path.display(),
+                            entry_path(&pending.path),
                             pending.progress
                         ),
                     );
@@ -1576,7 +1591,7 @@ fn closeout_detail(manager: &WorkspaceManager, lines: &mut Vec<(Tone, String)>) 
                     push(
                         lines,
                         Tone::Muted,
-                        format!("  {:?} {}", entry.progress, entry.path.display()),
+                        format!("  {:?} {}", entry.progress, entry_path(&entry.path)),
                     );
                 }
             }

@@ -1233,3 +1233,114 @@ fn organization_rows_group_by_kind_and_name_within_a_page() {
     let texts: Vec<String> = describe::rows(&m).into_iter().map(|row| row.text).collect();
     assert_eq!(texts, vec!["P  Alpha", "P  beta", "R  tool"]);
 }
+
+#[test]
+fn large_closeout_inventories_page_and_a_refreshed_digest_starts_over() {
+    let (mut m, mut wire) = ready(false);
+    wire.drain(&mut m);
+    m.switch(Section::Closeout);
+    wire.drain(&mut m);
+    let operation = OperationId::new();
+    let record = |digest: &str| CloseoutRecord {
+        operation,
+        request: RequestId::new(),
+        spec: CloseoutSpec {
+            location: LocationId::new(),
+            expected_generation: 1,
+            preservation_directory: None,
+            conditional_no_loss: false,
+            full_archive: false,
+        },
+        revision: 5,
+        stage: CloseoutStage::NeedsDecision,
+        initiated_by: "client".into(),
+        inventory_digest: Some(digest.into()),
+        inventory_entries: 450,
+        preservation_directory: "/tmp/p".into(),
+        preservation_volume_ownership: None,
+        authorization: None,
+        preservation_digest: None,
+        quarantine: None,
+        removed_entries: 0,
+        issues: vec![],
+    };
+    let entry = |n: u64| CloseoutEntry {
+        id: format!("e{n}"),
+        path: if n == 0 {
+            "".into()
+        } else {
+            format!("f{n}").into()
+        },
+        kind: CloseoutEntryKind::File,
+        bytes: 1,
+        sha256: None,
+        link_target: None,
+        links: 1,
+        mode: 0o644,
+        facts: vec![],
+        blockers: vec![],
+    };
+    let page = |digest: &str, after: u64, limit: u64| CloseoutInventoryPage {
+        operation,
+        digest: digest.into(),
+        total: 450,
+        entries: (after..(after + limit).min(450)).map(entry).collect(),
+        next: (after + limit < 450).then_some(after + limit),
+    };
+    m.closeouts.selected = Some(operation);
+    m.closeouts.record = Some(record("d1"));
+    let inventory = |m: &mut WorkspaceManager, wire: &mut Wire, digest: &str| -> Option<u64> {
+        let sent = wire.drain(m);
+        let (id, request) = sent.iter().find_map(|(id, r)| match r {
+            Request::Workspace { request, .. } => match &**request {
+                WorkspaceRequest::Closeout {
+                    request:
+                        CloseoutRequest::Inventory {
+                            after, digest: d, ..
+                        },
+                } => Some((*id, (*after, d.clone()))),
+                _ => None,
+            },
+            _ => None,
+        })?;
+        assert_eq!(request.1, digest);
+        let response = CloseoutResponse::Inventory(page(digest, request.0, 200));
+        assert!(m.accept(
+            id,
+            workspace(id, WorkspaceResponse::Closeout(Box::new(response)))
+        ));
+        Some(request.0)
+    };
+    key(&mut m, KeyCode::Char('i'));
+    assert_eq!(inventory(&mut m, &mut wire, "d1"), Some(0));
+    assert!(frame(&mut m, 120, 32).contains("(checkout root)"));
+    key(&mut m, KeyCode::Char(']'));
+    assert_eq!(inventory(&mut m, &mut wire, "d1"), Some(200));
+    key(&mut m, KeyCode::Char(']'));
+    assert_eq!(inventory(&mut m, &mut wire, "d1"), Some(400));
+    assert!(frame(&mut m, 120, 32).contains("401–450 of 450"));
+    key(&mut m, KeyCode::Char(']'));
+    assert_eq!(
+        inventory(&mut m, &mut wire, "d1"),
+        None,
+        "no page past the end"
+    );
+    key(&mut m, KeyCode::Char('['));
+    assert_eq!(inventory(&mut m, &mut wire, "d1"), Some(200));
+    // A refreshed inventory has a new digest; its first page is read again.
+    let operation_record = CloseoutResponse::Record(Box::new(record("d2")));
+    m.queue(Op::closeout(
+        transport::View::CloseoutRecord,
+        CloseoutRequest::Inspect { operation },
+    ));
+    let sent = wire.drain(&mut m);
+    let (id, _) = sent
+        .iter()
+        .find(|(_, r)| matches!(r, Request::Workspace { request, .. } if matches!(**request, WorkspaceRequest::Closeout { request: CloseoutRequest::Inspect { .. } })))
+        .unwrap();
+    assert!(m.accept(
+        *id,
+        workspace(*id, WorkspaceResponse::Closeout(Box::new(operation_record)))
+    ));
+    assert_eq!(inventory(&mut m, &mut wire, "d2"), Some(0));
+}

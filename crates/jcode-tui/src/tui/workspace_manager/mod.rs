@@ -234,6 +234,10 @@ pub(crate) struct Closeouts {
     pub recovery: Option<CloseoutRecoveryReview>,
     pub inventory: Option<CloseoutInventoryPage>,
     pub inventory_after: u64,
+    /// Offsets of earlier inventory pages, for Prev page.
+    pub inventory_previous: Vec<u64>,
+    pub removal_after: u64,
+    pub removal_previous: Vec<u64>,
     pub entry: usize,
     pub removal: Option<CloseoutRemovalPage>,
     pub history: Option<CloseoutHistory>,

@@ -137,7 +137,7 @@ for this checkout and this closeout only; the agent route that uses it is not ye
 exposed.
 
 Then: refresh the inventory (`f`), record dispositions (`d` from the inventory
-pane `i`), preserve (`p`), review removal (`w`), approve with the typed word
+pane `i`, which pages with `[` and `]` for large checkouts), preserve (`p`), review removal (`w`), approve with the typed word
 (`a`), and finish removal with the typed word (`F`). Live work, stale reviews,
 changed paths and unpreserved data block removal. Revoke an unfinished closeout
 with `X`. Recovery reviews (`y`/`Y`), removal progress (`g`) and checkout history

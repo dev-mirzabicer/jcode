@@ -794,7 +794,21 @@ fn closeout(
                 manager.load_closeouts();
             }
             if manager.closeouts.selected == Some(operation) {
+                // An open pane follows the record it describes.
+                let inventory_stale = record.inventory_digest.is_some()
+                    && manager.closeouts.inventory.as_ref().is_none_or(|page| {
+                        page.operation != operation
+                            || Some(&page.digest) != record.inventory_digest.as_ref()
+                    });
+                let removal_stale = manager.closeouts.removal.as_ref().is_none_or(|page| {
+                    page.operation != operation || page.revision != record.revision
+                });
                 manager.closeouts.record = Some(*record);
+                match manager.closeouts.pane {
+                    CloseoutPane::Inventory if inventory_stale => actions::load_inventory(manager),
+                    CloseoutPane::Removal if removal_stale => actions::load_removal(manager),
+                    _ => {}
+                }
             }
         }
         (View::CloseoutReview, CloseoutResponse::Review(review)) => {
