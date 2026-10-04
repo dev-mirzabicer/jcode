@@ -413,7 +413,9 @@ impl PrimaryHost {
                 repositories.clone(),
             )
             .await?;
-            let agent = if location_repair {
+            // Boxed: the Agent stays alive across the registration await, and
+            // its inline size would otherwise enlarge every caller's future.
+            let agent = Box::new(if location_repair {
                 Agent::restore_primary_for_location_repair(
                     session,
                     provider,
@@ -423,21 +425,13 @@ impl PrimaryHost {
                 )
             } else {
                 Agent::restore_primary(session, provider, registry, repositories.clone(), owner)
-            }?;
+            }?);
             // Same tool surface as launch and new contexts. A restored primary
             // (reload continuation, detached input, recovery) may make its first
             // request before any client subscribes; without this its frozen tool
             // set would lose MCP tools and regain them on attach.
-            agent
-                .registry()
-                .register_mcp_tools_for_dir(
-                    None,
-                    Some(pool.clone()),
-                    Some(session.to_string()),
-                    agent.working_dir().map(std::path::PathBuf::from),
-                )
-                .await;
-            Ok((agent, previous))
+            register_restored_mcp(&agent, pool, session).await;
+            Ok((*agent, previous))
         })
         .await;
         match result {
@@ -975,4 +969,24 @@ pub(crate) fn scope_rejection(
                 detail: format!("{error:#}"),
             }),
     }
+}
+
+/// Restore is awaited inside client tasks whose stacks are close to their
+/// limit in unoptimized builds. Keeping the registration future's concrete type
+/// in this non-inlined function means restore's state holds only a pointer.
+#[inline(never)]
+fn register_restored_mcp(
+    agent: &Agent,
+    pool: &Arc<crate::mcp::SharedMcpPool>,
+    session: &str,
+) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+    let registry = agent.registry();
+    let pool = pool.clone();
+    let session = session.to_string();
+    let cwd = agent.working_dir().map(std::path::PathBuf::from);
+    Box::pin(async move {
+        registry
+            .register_mcp_tools_for_dir(None, Some(pool), Some(session), cwd)
+            .await;
+    })
 }
