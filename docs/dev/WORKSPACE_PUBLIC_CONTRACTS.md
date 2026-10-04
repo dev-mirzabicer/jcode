@@ -26,7 +26,8 @@ predates that contract. `WorkspaceRequest::required_capability` (TypeScript
 `requiredWorkspaceCapability`) names the contract each request needs, and the
 SDKs send a request only when its exact version is advertised.
 `primary_control_capabilities.session_inspection_version` separately gates
-`inspect_session`.
+`inspect_session`, and `session_placement_version` gates `propose_placement`
+and `place` for unplaced sessions ([rollout guide](../WORKSPACE_ROLLOUT.md)).
 
 The Harness `workspace` route refuses `closeout` requests: closeout keeps its
 dedicated route, version and reply envelope.
@@ -96,5 +97,7 @@ daemon and the curated bridge.
 
 Harness API 1.13 adds `workspace_probe`/`workspace`, the
 `workspace_capabilities`/`workspace` events and
-`primary_control_capabilities.session_inspection_version`. Older clients ignore
-the new events; older runtimes are refused before a request is sent.
+`primary_control_capabilities.session_inspection_version`. Harness API 1.14 adds
+`session_placement_version` with the `propose_placement`/`place` location
+commands and the `proposal` response. Older clients ignore the new fields and
+responses; older runtimes are refused before a request is sent.

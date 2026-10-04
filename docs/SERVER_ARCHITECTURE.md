@@ -94,9 +94,24 @@ Connection teardown releases subscriptions and editor leases without closing
 the primary or discarding its output. Explicit runtime exit and reload remain
 separate operations. Explicitly temporary servers retain their owner/idle policy.
 
-Run/REPL inference remains process-owned. This change does not install a login
-service or give standalone callers detached execution guarantees. Managed
-workspace launch and its human controls remain separately gated.
+Run/REPL inference remains process-owned and does not get detached execution
+guarantees. The macOS login service is described in
+[runtime control](RUNTIME_CONTROL.md); managed placement in
+[managed placement rollout](WORKSPACE_ROLLOUT.md).
+
+### Worker thread stack
+
+Each client connection runs as one Tokio task whose future holds the whole
+attach and request-dispatch path. In the unoptimized `selfdev` profile that path
+uses about 1.7 MB of stack, close to Tokio's 2 MiB default; one value held
+across an `.await` once overflowed it and crashed the daemon on attach. Both
+runtimes in `src/main.rs` therefore set `RUNTIME_THREAD_STACK_BYTES` (16 MiB).
+This reserves address space per worker thread; pages are committed only when
+touched, and resident memory is unchanged in measurement.
+
+`scripts/measure_client_stack.py BINARY` lists the largest client-path frames
+from a built binary, and `--report CRASH.ips BINARY…` sums the exact frames of a
+crashed thread in each binary. Re-measure when client-path futures grow.
 
 ### Client delivery
 
@@ -244,11 +259,11 @@ new directory is an explicit input, never inferred from navigation or cwd alone.
 
 ### Staged public launch adapters
 
-`features.managed_primary_launch` defaults to false. It controls only the new
-creation route, not attachment-independent primary lifetime or the broader
-workspace rollout. Leave it disabled in ordinary operation until workspace
-management and permission controls are available. Isolated acceptance fixtures
-can exercise the production route with the flag enabled.
+`features.managed_primary_launch` defaults to false. It turns on managed
+creation, location changes, legacy adoption and scoped new contexts, and
+requires every primary to be placed before it runs. Attachment-independent
+primary lifetime does not depend on it. Enabling it and placing existing
+sessions is described in [managed placement rollout](WORKSPACE_ROLLOUT.md).
 
 Before Subscribe, `primary_launch_probe` reports version 1 and enabled state.
 `primary_launch` accepts a `PrimaryLaunchRequest` and returns its durable receipt

@@ -2,7 +2,9 @@
 
 This backend extends the existing Clear, Split and Transfer owners. The
 [workspace management mode](WORKSPACE_MANAGEMENT.md) offers the reviewed carry
-choice (Sessions, `n`). No agent administration tool is advertised. Managed rollout remains separately gated. Native enforcement is described
+choice (Sessions, `n`). No agent administration tool is advertised. Scoped new contexts follow the
+rollout flag ([managed placement rollout](WORKSPACE_ROLLOUT.md)); an unplaced
+session must be placed before Clear, Split or Transfer. Native enforcement is described
 in [native write scope](dev/NATIVE_WRITE_SCOPE.md).
 
 ## Review and choice

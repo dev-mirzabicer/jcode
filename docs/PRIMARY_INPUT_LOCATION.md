@@ -16,11 +16,10 @@ No new scheduler, conversation store or permission authority is introduced.
 
 A dedicated authenticated control connection can send `primary_control_probe`.
 Version 1 advertises durable input separately from `location_enabled`. Location
-changes require the existing, default-off `features.managed_primary_launch`
-rollout gate. Inspection and cancellation of existing requests remain available
-when new changes are disabled. They are exercised with isolated fixture configuration until the
-required human management surface is available. An unknown or unsupported
-capability is not a successful operation.
+changes require the default-off `features.managed_primary_launch` rollout flag
+([managed placement rollout](WORKSPACE_ROLLOUT.md)). Inspection and
+cancellation of existing requests remain available when new changes are
+disabled. An unknown or unsupported capability is not a successful operation.
 
 On the current runtime, ordinary message and soft-input Ack follows durable
 intake, which also makes the public MessageAccepted event truthful. Other Ack

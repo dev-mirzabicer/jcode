@@ -611,14 +611,23 @@ first page.
 committed placement, cwd and pending moves. It requires
 `session_inspection_version = 1` from the primary-control probe.
 
+Harness API v1.14 adds placement for unplaced sessions once managed launch is
+rolled out. `primaryLocation({action: "propose_placement", session})` returns
+`{status: "proposal"}` with candidates that keep the session's working
+directory and a default index (absent for a broad root such as home). Send the
+chosen candidate back with `{action: "place", request: {request, session,
+working_dir, expected_catalog_revision, placement}}`; retrying the same request
+returns its original record. Both require `session_placement_version = 1`. See
+[managed placement rollout](../../docs/WORKSPACE_ROLLOUT.md).
+
 See [public workspace contracts](../../docs/dev/WORKSPACE_PUBLIC_CONTRACTS.md)
 for consumer examples.
 
-### Explicit managed primary preparation (staged)
+### Explicit managed primary preparation
 
 Harness API v1.7 adds `launchPrimary(request)` with the `primary_launch_v1`
-capability. The runtime must also report version-1 launch readiness. Ordinary
-rollout remains disabled until workspace controls are available. This method
+capability. The runtime must also report version-1 launch readiness, which
+follows `features.managed_primary_launch` ([rollout](../../docs/WORKSPACE_ROLLOUT.md)). This method
 returns the durable primary receipt, then `attachSession(receipt.session)` uses
 the normal attachment path. It does not silently switch the caller's attachment.
 Retain the request UUID and unchanged settings for safe retry. Placement and cwd

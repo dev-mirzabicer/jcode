@@ -5,8 +5,8 @@ management. The catalog alone does **not** enable managed primary placement,
 write enforcement, clone provisioning, checkout removal or agent tools.
 Independent primary hosting and scoped native enforcement now have their own
 owners, and [reviewed checkout provisioning](WORKSPACE_CHECKOUTS.md) is a
-separate service. Their ordinary managed rollout retains its human-control
-gate. Existing primary sessions,
+separate service. Managed launch and placement follow
+`features.managed_primary_launch` (see [managed placement rollout](../WORKSPACE_ROLLOUT.md)). Existing primary sessions,
 Startup Context, instruction stores, execution storage and context projection retain
 their existing owners and behavior.
 
@@ -140,7 +140,7 @@ Before attaching a Session, an authenticated same-user daemon client may send:
 ```
 
 The reply is `workspace_capabilities`, with `catalog_version: 1` and
-`managed_rollout: false`. Permissions and checkout administration negotiate
+`managed_rollout` reflecting `features.managed_primary_launch`. Permissions and checkout administration negotiate
 their own optional version fields. Do not infer ordinary managed launch or
 agent-tool exposure from the presence of a backend capability.
 
@@ -156,7 +156,7 @@ An old server must be probed before sending catalog requests.
 
 There is no alternative full workspace CLI. The
 [workspace management mode](../WORKSPACE_MANAGEMENT.md) consumes these owners, and
-Harness v1.13 plus both SDKs expose the same typed requests
+Harness v1.13 (v1.14 for session placement) plus both SDKs expose the same typed requests
 ([public contracts](WORKSPACE_PUBLIC_CONTRACTS.md)). The read-only `operations` and
 `startup_copy_plans` requests (`workspace_capabilities.management_version=1`) list
 durable clone, closeout, Startup Context copy, launch and location operations
@@ -203,8 +203,8 @@ The 200-record transport page bound is not an organizational member limit.
 
 The [native write-scope boundary](NATIVE_WRITE_SCOPE.md) describes invocation-time
 consumption, complete destination admission, verified file effects and the explicit
-platform/external-effect limits. New-context migration and ordinary rollout remain
-separate from catalog availability.
+platform/external-effect limits. New-context migration and managed placement follow
+the rollout flag, not catalog availability.
 
 ## Verification
 

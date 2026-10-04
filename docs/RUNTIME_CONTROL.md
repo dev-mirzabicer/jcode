@@ -160,6 +160,11 @@ takes over when it exits, for example after a reviewed restart. Uninstall is
 refused while the supervised runtime runs; stop it first. Other platforms report
 login-service supervision as unsupported.
 
+`status` reports whether the service is installed and loaded and its process.
+Whether the installed definition matches the current plan is reported only when
+a plan is compared (`install` does this before writing); plain status leaves it
+unknown rather than guessing.
+
 ## Power
 
 With `power.prevent_sleep_while_streaming` enabled (the default), the runtime

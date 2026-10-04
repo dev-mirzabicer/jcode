@@ -1,8 +1,9 @@
 # Native write-scope boundary
 
 Managed Sessions use the catalog's current scope at native file mutation admission.
-The ordinary managed-launch rollout remains disabled until its human management
-path is available. Catalog capability negotiation alone does not enable migration.
+Enforcement applies to placed sessions; with `features.managed_primary_launch`
+on, unplaced primaries cannot run until placed ([managed placement rollout](../WORKSPACE_ROLLOUT.md)).
+Catalog capability negotiation alone does not enable migration.
 Placed sessions request access through the [`workspace` tool](../WORKSPACE_AGENT_TOOL.md);
 a proposal never changes scope until a trusted client approves it.
 

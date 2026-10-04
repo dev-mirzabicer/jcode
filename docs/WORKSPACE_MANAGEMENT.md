@@ -177,15 +177,17 @@ supervision state, the macOS login service and interrupted turns.
 `jcode runtime …` remains the scripted and offline control. See
 [runtime control](RUNTIME_CONTROL.md).
 
-## Staged features
+## Managed placement
 
-`features.managed_primary_launch` still gates managed launch, location changes,
+`features.managed_primary_launch` turns on managed launch, location changes,
 legacy adoption and scoped new contexts. With it off, these actions say that they
-are staged. Catalog organization, cloning, permissions, closeout, backups and
-runtime control do not depend on it. The agent [`workspace` tool](WORKSPACE_AGENT_TOOL.md)
-is offered only to placed sessions, which this flag gates, so with it off no
-session sees the tool. Access proposals that placed agents create appear under
-Permissions.
+are staged. With it on, every primary session needs a placement before it runs;
+the TUI asks with a placement review on the first message, and `/place` opens
+it directly. See [managed placement rollout](WORKSPACE_ROLLOUT.md). Catalog
+organization, cloning, permissions, closeout, backups and runtime control do not
+depend on the flag. The agent [`workspace` tool](WORKSPACE_AGENT_TOOL.md) is
+offered only to placed sessions. Access proposals that placed agents create
+appear under Permissions.
 
 Related: [primary input and location](PRIMARY_INPUT_LOCATION.md),
 [new-context scope](PRIMARY_CONTEXT_SCOPE.md),

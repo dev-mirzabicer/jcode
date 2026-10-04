@@ -15,9 +15,11 @@ session that is later adopted receives it once through an appended tool-set
 notice. Children cannot call it even through a cached definition: `workspace`
 is in the child policy's administrative tool list.
 
-Placed sessions currently arise only from managed launch, legacy adoption and
-scoped new contexts, which stay behind `features.managed_primary_launch`. With
-that flag off, no session is offered the tool. WP-12 owns the combined rollout.
+Placed sessions arise from managed launch, placement of an unplaced session
+(the TUI placement review, `/place`, `jcode run --place` or `/workspace`
+adoption) and scoped new contexts, all behind
+`features.managed_primary_launch`. With that flag off, no new session is offered
+the tool. See [managed placement rollout](WORKSPACE_ROLLOUT.md).
 
 ## Actions
 

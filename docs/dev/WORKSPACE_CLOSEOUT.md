@@ -10,7 +10,8 @@ checkout deletion. Harness API v1.10 and both SDKs consume that same service;
 remaining caller/admission and preservation cases, final combined runtime
 verification and activation remain WP-07 work.
 Agents reach a narrower route through the [`workspace` tool](../WORKSPACE_AGENT_TOOL.md)
-(see "Agent route" below). Ordinary managed rollout remains gated.
+(see "Agent route" below), which placed sessions receive once managed placement is
+rolled out ([managed placement rollout](../WORKSPACE_ROLLOUT.md)).
 
 ## Native control and retained execution
 
