@@ -196,6 +196,11 @@ try:
     assert len(runs) == 4 and all(row[0] == 'completed' for row in runs), runs
     assert inspect_input(safe_id)['state'] == 'committed'
     replay_move = rpc(admin,'primary_location',command={'action':'change','request':busy_request})
+    # The replay can meet the control lease while its commit finishes; Busy is
+    # transient and the same request is retried.
+    while replay_move['response'].get('status') == 'rejected' and replay_move['response']['issue']['code'] == 'busy':
+        time.sleep(0.2)
+        replay_move = rpc(admin,'primary_location',command={'action':'change','request':busy_request})
     assert replay_move['response']['record']['state'] == 'complete'
     assert len(captured) == 3 and not failures
     second_messages = captured[1]['messages']
@@ -239,7 +244,11 @@ try:
     split = rpc(attached, 'split')
     assert split['type'] == 'split_response', split
     clone = json.loads((f.home/'sessions'/f"{split['new_session_id']}.json").read_text())
-    assert clone['location'] == replaced['location'] and clone['system_prompt'] == replaced['system_prompt']
+    # A split publishes its own location record (own revision and operation,
+    # WP-05 scoped contexts) for the same placement, cwd and historical cwd.
+    for key in ('placement', 'cwd', 'initial_cwd'):
+        assert clone['location'][key] == replaced['location'][key], key
+    assert clone['system_prompt'] == replaced['system_prompt']
     assert not clone.get('primary_inputs')
     assert rpc(attached, 'clear')['type'] == 'done'
     fresh_id = [event['session_id'] for event in f.events if event['type'] == 'session'][-1]
@@ -261,13 +270,38 @@ try:
     f.reader.close(); f.client.close()
     recovery_release.set()
     f.start(); admin = connect()
-    wait(lambda: rpc(admin,'primary_input_inspect',session=fresh_id,input=queued['id'])['receipt']['state'] == 'committed', 'accepted input did not recover after crash')
-    wait(lambda: len(captured) == 5, 'recovery did not dispatch the new pending input')
+    # An unexpected exit restores the runtime but never resumes inference by
+    # itself (WP-09, R33): the interrupted primary becomes a recovery item and
+    # its accepted input waits, durable, for a trusted decision.
+    def runtime(*args):
+        out = subprocess.run([f.BIN,'--no-update','--no-selfdev','--socket',str(f.sockpath),'runtime',*args,'--json'],env=f.env,capture_output=True,text=True,timeout=90)
+        assert out.returncode == 0, (args, out.stdout[-2000:], out.stderr[-2000:])
+        return json.loads(out.stdout)
+    item = wait(lambda: next((i for i in (runtime('status').get('supervision') or {}).get('recoveries', []) if i['session'] == fresh_id and not i.get('resolved')), None), 'crash recovery item for the interrupted primary')
+    time.sleep(2)
+    assert rpc(admin,'primary_input_inspect',session=fresh_id,input=queued['id'])['receipt']['state'] == 'accepted'
+    assert len(captured) == 4, 'no inference before the recovery decision'
+    runtime('recover','continue',item['id'])
+    wait(lambda: rpc(admin,'primary_input_inspect',session=fresh_id,input=queued['id'])['receipt']['state'] == 'committed', 'accepted input did not recover after the continue decision')
+    wait(lambda: any('RECOVERY-QUEUED' in str(m.get('content','')) for m in captured[-1]['messages']), 'recovery did not dispatch the pending input')
     assert rpc(admin,'primary_input',input=queued)['receipt']['state'] == 'committed'
-    recovered = json.loads((f.home/'sessions'/f'{fresh_id}.json').read_text())
-    assert len(recovered['primary_inputs']) == 2
+    # The Session checkpoint records both accepted inputs once committed.
+    def persisted_inputs():
+        inputs = json.loads((f.home/'sessions'/f'{fresh_id}.json').read_text()).get('primary_inputs') or []
+        return inputs if {entry['id'] for entry in inputs} == {recovery_initial['id'], queued['id']} else None
+    inputs = wait(persisted_inputs, 'recovered inputs checkpointed once each')
+    (f.ROOT/'recovered-primary-inputs.json').write_text(json.dumps(inputs, indent=1))
+    assert len(inputs) == 2, inputs
     assert sum('RECOVERY-QUEUED' in str(message.get('content','')) for message in captured[-1]['messages']) == 1
     assert not failures
+    # The selected continuation and the queued input are the only calls after
+    # the decision; the SDK checks below must add none.
+    def settled():
+        before = len(captured); time.sleep(3)
+        return len(captured) if len(captured) == before else None
+    recovered_calls = wait(settled, 'recovered turns settle')
+    # One selected continuation, then the queued input: no replay.
+    assert recovered_calls == 6, recovered_calls
     api_path = ipc/'api.sock'
     bridge_log = (f.ROOT/'primary-api-bridge.log').open('wb')
     bridge = subprocess.Popen([f.BIN,'--no-update','--no-selfdev','--socket',str(f.sockpath),'api-bridge','--api-socket',str(api_path)],env=f.env,stdout=bridge_log,stderr=bridge_log)
@@ -298,7 +332,8 @@ try:
     (f.ROOT/'public-client.stdout').write_text(public.stdout)
     (f.ROOT/'public-client.stderr').write_text(public.stderr)
     assert public.returncode == 0, public.stderr
-    assert len(list((f.home/'sessions').glob('*.json'))) == session_count and len(captured) == 5
+    sessions_after = len(list((f.home/'sessions').glob('*.json')))
+    assert sessions_after == session_count and len(captured) == recovered_calls, (sessions_after, session_count, len(captured), recovered_calls)
     result.update(public_sdk=json.loads(public.stdout))
     result.update(status='passed' , profile_replacement_history=True, split_location=True, clear_current_cwd=True, accepted_crash_recovery=True, session=session, provider_calls=len(captured), idle_no_inference=True,
                   lost_ack_replay=True, conflict_rejected=True, full_tool_batch_boundary=True,
