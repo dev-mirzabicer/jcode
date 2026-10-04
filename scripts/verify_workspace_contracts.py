@@ -189,7 +189,9 @@ try:
         return [c['change'] for c in changes if c['change'].get('name') == 'workspace' or c['change'].get('definition', {}).get('name') == 'workspace']
     added = workspace_changes(tool_set['changes'])
     assert len(added) == 1 and added[0]['kind'] == 'added', tool_set['changes']
-    result['unrelated_tool_set_changes'] = [c['change'] for c in tool_set['changes'] if c['change'] not in added]
+    # The restored Session keeps its whole surface, including MCP tools; the
+    # workspace tool is the only change.
+    assert all(c['change'] in added for c in tool_set['changes']), tool_set['changes']
     assert saved(legacy)['messages'][:len(before_adoption['messages'])] == before_adoption['messages']
     again = turn(legacy, [])[0]
     assert advertised(again)['workspace'] == advertised(adopted_requests[0])['workspace']
@@ -293,6 +295,7 @@ console.log(JSON.stringify({{session:record.session,operation:begun.response.val
     stop_daemon(); f.start(); admin = connect()
     resumed = turn(session, [])[0]
     assert advertised(resumed)['workspace'] == before
+    assert set(advertised(resumed)) == set(advertised(requests[0])), sorted(set(advertised(resumed)) ^ set(advertised(requests[0])))
     result['restart_tool_prefix_stable'] = True
     assert not errors, errors
     result.update(status='passed', provider_calls=len(captured), session=session)
