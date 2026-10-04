@@ -3857,6 +3857,19 @@ impl App {
             }
         };
 
+        // A local (process-owned) session cannot be placed from this client;
+        // refuse before the message enters history, keeping it in the composer.
+        if !self.is_remote && self.session.requires_placement() {
+            self.input = raw_input;
+            self.cursor_pos = submitted_cursor_pos;
+            self.pasted_contents = submitted_pasted_contents;
+            self.push_display_message(DisplayMessage::error(format!(
+                "{}. Local sessions cannot be placed here: use the shared runtime (the default `jcode`) and its placement review, or `jcode repl --place`.",
+                crate::workspace::PLACEMENT_REQUIRED
+            )));
+            return;
+        }
+
         // Leaving the preview should happen as soon as the user acts on it.
         self.onboarding_preview_mode = false;
 

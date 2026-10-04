@@ -77,7 +77,7 @@ pub async fn place_process_primary(agent: &mut Agent) -> Result<Option<String>> 
 pub fn require_process_primary_placed(agent: &Agent) -> Result<()> {
     ensure!(
         !agent.startup_context_session().requires_placement(),
-        "{} Add --place to use the proposed placement for this directory, or launch it from /workspace.",
+        "{}. Add --place to use the proposed placement for this directory, or place it in /workspace → Sessions.",
         crate::workspace::PLACEMENT_REQUIRED
     );
     Ok(())
