@@ -280,7 +280,10 @@ pub(super) async fn run_live_turn_if_idle(
 }
 
 /// Durable intake does not construct a provider or reopen a cold Session.
-fn validate_input_recipient(sessions: &SessionAgents, session: &str) -> anyhow::Result<()> {
+fn validate_input_recipient(
+    sessions: &SessionAgents,
+    session: &str,
+) -> anyhow::Result<crate::session::Session> {
     crate::primary::PrimaryLease::validate_identity(session)?;
     let stored = crate::session::Session::load_startup_stub(session)?;
     anyhow::ensure!(
@@ -295,7 +298,7 @@ fn validate_input_recipient(sessions: &SessionAgents, session: &str) -> anyhow::
         &crate::storage::durable_state_dir(),
     ))?;
     let _owner = sessions.claim(session)?;
-    Ok(())
+    Ok(stored)
 }
 
 pub(super) async fn submit_primary_input(
@@ -325,7 +328,14 @@ pub(super) async fn submit_client_input(
     use sha2::{Digest, Sha256};
     sessions.configure_input_delivery(swarm.clone());
     let receipt = crate::runtime_lifecycle::admission::control(|| -> anyhow::Result<_> {
-        validate_input_recipient(sessions, &request.input.session)?;
+        let stored = validate_input_recipient(sessions, &request.input.session)?;
+        // A human message to an unplaced primary is refused before it is
+        // accepted, so the client keeps it for resending after placement.
+        anyhow::ensure!(
+            !stored.requires_placement(),
+            "{}",
+            crate::workspace::placement_required_for_input()
+        );
         anyhow::ensure!(
             request.input.client_request_digest.is_none(),
             "Client cannot supply a prepared input digest"

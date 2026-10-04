@@ -2396,6 +2396,7 @@ pub async fn run_single_message_command(
     message: &str,
     emit_json: bool,
     emit_ndjson: bool,
+    place: bool,
 ) -> Result<()> {
     let provider = if emit_json || emit_ndjson {
         super::provider_init::init_provider_quiet(choice, model).await?
@@ -2461,6 +2462,11 @@ pub async fn run_single_message_command(
             }
         }
     };
+    if place && let Some(placed) = crate::primary::place_process_primary(&mut agent).await? {
+        eprintln!("Placed this session: {placed}");
+    }
+    // Refuse before the message is recorded in an unplaced Session.
+    crate::primary::require_process_primary_placed(&agent)?;
     let provider = agent.provider_handle();
     prepare_run_mcp(&agent).await;
 

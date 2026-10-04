@@ -102,6 +102,14 @@ pub(crate) struct Args {
     #[arg(long, global=true, conflicts_with_all=["agent","resume"])]
     pub(crate) primary_launch: Option<std::path::PathBuf>,
 
+    /// For `run` and `repl` once managed launch is rolled out: give an
+    /// unplaced session the proposed workspace placement for its directory
+    /// (the registered location containing it, or a new standalone location
+    /// at its Git root or the directory itself). Broad roots such as the home
+    /// directory are refused. The TUI asks with a review instead.
+    #[arg(long, global = true, conflicts_with = "primary_launch")]
+    pub(crate) place: bool,
+
     /// Named provider profile from [providers.<name>] in config.toml.
     /// Implies --provider openai-compatible for OpenAI-compatible profiles.
     #[arg(long, global = true)]

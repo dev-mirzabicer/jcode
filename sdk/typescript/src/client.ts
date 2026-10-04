@@ -575,16 +575,29 @@ export class JcodeClient extends EventEmitter {
       const probe = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
       if (probe.session_inspection_version !== 1) throw new HarnessError("unsupported_capability", "Session location inspection requires session_inspection_version=1");
       const reply = await this.expectReply({req:"primary_location",command},"primary_location");
-      if (reply.response.status === "state" || (reply.response.status === "session" && reply.response.view.session !== command.session)) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
+      if (reply.response.status === "state" || reply.response.status === "proposal" || (reply.response.status === "session" && reply.response.view.session !== command.session)) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
       return reply.response;
     }
-    const adoption = await this.requirePrimaryControl(command.action === "change" || command.action === "adopt_legacy");
+    if (command.action === "propose_placement") {
+      await this.requireSessionPlacement();
+      const reply = await this.expectReply({req:"primary_location",command},"primary_location");
+      if (reply.response.status === "state" || reply.response.status === "session" || (reply.response.status === "proposal" && reply.response.proposal.session !== command.session)) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
+      return reply.response;
+    }
+    if (command.action === "place") await this.requireSessionPlacement();
+    const adoption = await this.requirePrimaryControl(command.action === "change" || command.action === "adopt_legacy" || command.action === "place");
     if (command.action === "adopt_legacy" && adoption !== 1) throw new HarnessError("unsupported_capability", "Explicit legacy adoption requires legacy_adoption_version=1");
-    const expected = command.action === "change" || command.action === "adopt_legacy" ? command.request.request : command.operation;
-    const expectedSession = command.action === "change" || command.action === "adopt_legacy" ? command.request.session : undefined;
+    const expected = command.action === "change" || command.action === "adopt_legacy" || command.action === "place" ? command.request.request : command.operation;
+    const expectedSession = command.action === "change" || command.action === "adopt_legacy" || command.action === "place" ? command.request.session : undefined;
     const reply = await this.expectReply({req:"primary_location",command},"primary_location");
-    if (reply.ev !== "primary_location" || reply.response.status === "session" || (reply.response.status === "state" && (reply.response.record.operation !== expected || (expectedSession !== undefined && reply.response.record.input.session !== expectedSession)))) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
+    if (reply.ev !== "primary_location" || reply.response.status === "session" || reply.response.status === "proposal" || (reply.response.status === "state" && (reply.response.record.operation !== expected || (expectedSession !== undefined && reply.response.record.input.session !== expectedSession)))) throw new HarnessError("unexpected_reply","Primary location identity mismatch");
     return reply.response;
+  }
+
+  private async requireSessionPlacement(): Promise<void> {
+    if (!this.supports("primary_control_v1")) throw new HarnessError("unsupported_capability", "Primary controls require primary_control_v1");
+    const probe = await this.expectReply({req:"primary_control_probe"},"primary_control_capabilities");
+    if (probe.session_placement_version !== 1) throw new HarnessError("unsupported_capability", "Session placement review requires session_placement_version=1");
   }
 
   async launchPrimary(request: import("./protocol.js").PrimaryLaunchRequest): Promise<import("./protocol.js").PrimaryLaunchRecord> {

@@ -157,6 +157,7 @@ impl Op {
                 command,
                 PrimaryLocationCommand::Change { .. }
                     | PrimaryLocationCommand::AdoptLegacy { .. }
+                    | PrimaryLocationCommand::Place { .. }
                     | PrimaryLocationCommand::Cancel { .. }
             ),
             Op::Runtime { request, .. } => matches!(
@@ -246,6 +247,13 @@ impl Op {
                 PrimaryLocationCommand::InspectSession { session } => {
                     format!("inspect session {session}")
                 }
+                PrimaryLocationCommand::ProposePlacement { session } => {
+                    format!("review placement for session {session}")
+                }
+                PrimaryLocationCommand::Place { request } => format!(
+                    "place session {} (request {})",
+                    request.session, request.request
+                ),
             },
             Op::Runtime { request, .. } => match request {
                 RuntimeRequest::Begin { request, .. } => {
@@ -373,6 +381,13 @@ fn location_matches(command: &PrimaryLocationCommand, response: &PrimaryLocation
             PrimaryLocationCommand::AdoptLegacy { request },
             PrimaryLocationResponse::State { record },
         ) => record.input.request == request.request,
+        (PrimaryLocationCommand::Place { request }, PrimaryLocationResponse::State { record }) => {
+            record.input.request == request.request
+        }
+        (
+            PrimaryLocationCommand::ProposePlacement { session },
+            PrimaryLocationResponse::Proposal { proposal },
+        ) => proposal.session == *session,
         (
             PrimaryLocationCommand::Inspect { operation }
             | PrimaryLocationCommand::Cancel { operation },
@@ -1045,7 +1060,9 @@ fn location(
             let session = record.input.session.clone();
             if matches!(
                 command,
-                PrimaryLocationCommand::Change { .. } | PrimaryLocationCommand::AdoptLegacy { .. }
+                PrimaryLocationCommand::Change { .. }
+                    | PrimaryLocationCommand::AdoptLegacy { .. }
+                    | PrimaryLocationCommand::Place { .. }
             ) {
                 // Accepted, even if pending: the request now has its own
                 // durable operation identity and can be inspected or cancelled.
@@ -1075,6 +1092,8 @@ fn location(
             );
             manager.inspect_session(session);
         }
+        // The placement review owns its own proposals; the manager never asks.
+        PrimaryLocationResponse::Proposal { .. } => {}
         PrimaryLocationResponse::Rejected { issue } => {
             let label = Op::Location { view, command }.label();
             issue_note(manager, &format!("Rejected: {label}"), &issue);

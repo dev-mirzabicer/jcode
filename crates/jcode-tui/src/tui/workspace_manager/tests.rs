@@ -56,6 +56,7 @@ fn answer_probes(m: &mut WorkspaceManager, wire: &mut Wire, launch: bool) {
                 legacy_adoption_version: Some(1),
                 context_scope_version: Some(1),
                 session_inspection_version: Some(1),
+                session_placement_version: Some(1),
             },
             Request::PrimaryLaunchProbe { .. } => ServerEvent::PrimaryLaunchCapabilities {
                 id,

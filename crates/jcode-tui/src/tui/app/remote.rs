@@ -88,6 +88,8 @@ pub(super) enum RemoteEventOutcome {
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
     app.dispatch_remote_task_requests(remote).await;
     app.dispatch_remote_workspace_requests(remote).await;
+    app.dispatch_placement_review(remote).await;
+    let resent = app.resend_after_placement(remote).await;
     app.dispatch_remote_instruction_request(remote).await;
     app.dispatch_remote_context_editor_actions(remote).await;
     app.dispatch_remote_startup_context_request(remote).await;
@@ -100,7 +102,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             .is_some_and(|state| state.kind == crate::tui::PickerKind::Model),
     });
     let mut needs_redraw =
-        crate::tui::periodic_redraw_required(app) | app.take_instruction_recovery_redraw();
+        resent | crate::tui::periodic_redraw_required(app) | app.take_instruction_recovery_redraw();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();

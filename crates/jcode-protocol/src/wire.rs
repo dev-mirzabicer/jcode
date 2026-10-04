@@ -1231,6 +1231,9 @@ pub enum ServerEvent {
         /// Read-only `inspect_session` location view for trusted management.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_inspection_version: Option<u32>,
+        /// `propose_placement` and `place` for an unplaced Session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_placement_version: Option<u32>,
     },
     #[serde(rename = "scoped_context_created")]
     ScopedContextCreated {

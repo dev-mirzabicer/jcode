@@ -159,6 +159,67 @@ pub enum PrimaryLocationCommand {
     InspectSession {
         session: String,
     },
+    /// Reviewable placements for an unplaced Session, derived from the
+    /// catalog and its recorded cwd. Requires `session_placement_version`.
+    /// Changes nothing.
+    ProposePlacement {
+        session: String,
+    },
+    /// Give an unplaced Session one reviewed placement, adopting it in place
+    /// with its recorded cwd. A new standalone root is registered first.
+    /// Requires `session_placement_version`.
+    Place {
+        request: SessionPlacementRequest,
+    },
+}
+
+/// One reviewable way to place an unplaced Session. Every candidate keeps
+/// the Session's recorded working directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacementCandidate {
+    pub placement: PrimaryPlacement,
+    /// The registered root containing the working directory, or the new
+    /// standalone root.
+    pub root: PathBuf,
+    /// Display name of the placed entity. A new standalone location uses its
+    /// root's directory name.
+    pub name: String,
+    /// Home project of a project-owned placement.
+    pub project: Option<String>,
+    /// The root is the home directory, a filesystem root or a volume root.
+    /// Such a root is offered but never proposed by default.
+    pub broad: bool,
+}
+
+/// Placement choices for an unplaced Session. The owner computes them; a
+/// client presents them and sends the chosen one back with `Place`. Other
+/// placements, or a different cwd, remain available through workspace
+/// management's legacy adoption.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacementProposal {
+    pub session: String,
+    /// The Session's recorded working directory. Every candidate keeps it.
+    pub working_dir: PathBuf,
+    pub catalog_revision: Revision,
+    pub candidates: Vec<PlacementCandidate>,
+    /// Index of the proposed candidate, absent when no choice is safe to
+    /// propose (for example a home-directory cwd).
+    pub default: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPlacementRequest {
+    pub request: RequestId,
+    pub session: String,
+    /// The working directory the review showed. The Session keeps it; a
+    /// different recorded value makes the review stale.
+    pub working_dir: PathBuf,
+    /// Revision the review was computed at. A changed catalog makes it stale.
+    pub expected_catalog_revision: Revision,
+    pub placement: PrimaryPlacement,
 }
 
 /// Committed Session location, as the Session owner persisted it.
@@ -193,5 +254,26 @@ pub struct SessionLocationView {
 pub enum PrimaryLocationResponse {
     State { record: Box<LocationChangeRecord> },
     Session { view: Box<SessionLocationView> },
+    Proposal { proposal: Box<PlacementProposal> },
     Rejected { issue: crate::Issue },
+}
+
+/// Stable prefix of the refusal for an unplaced primary once managed launch
+/// is rolled out. Clients recognize it to offer the placement review.
+pub const PLACEMENT_REQUIRED: &str = "This session has no workspace placement yet";
+
+/// Refusal for new input to an unplaced primary. The input was not accepted.
+pub fn placement_required_for_input() -> String {
+    format!(
+        "{PLACEMENT_REQUIRED}. Nothing was sent: place it with /place or in /workspace → Sessions, then send again."
+    )
+}
+
+/// Refusal for an unplaced primary's provider turn.
+pub fn placement_required_for_turn() -> String {
+    format!("{PLACEMENT_REQUIRED}. Place it with /place or in /workspace → Sessions.")
+}
+
+pub fn is_placement_required(message: &str) -> bool {
+    message.contains(PLACEMENT_REQUIRED)
 }

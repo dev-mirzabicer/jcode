@@ -299,6 +299,12 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.handle_placement_key(code, modifiers) {
+        app.dispatch_placement_review(remote).await;
+        app.dispatch_remote_workspace_requests(remote).await;
+        return Ok(());
+    }
+
     if app.handle_workspace_key(code, modifiers) {
         app.dispatch_remote_workspace_requests(remote).await;
         return Ok(());
@@ -1125,6 +1131,7 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
                 if app.handle_workspace_command(trimmed) {
+                    app.dispatch_placement_review(remote).await;
                     app.dispatch_remote_workspace_requests(remote).await;
                     return Ok(());
                 }

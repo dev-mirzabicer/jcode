@@ -3744,6 +3744,23 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // palette so it wins when both could be visible).
     input_ui::draw_prompt_history_search_overlay(frame, app, chunks[8]);
 
+    // Placement review floats over the finished frame so the conversation
+    // and the held message stay visible behind it.
+    if app.draw_placement_review(frame, area)
+        && let Some(capture) = debug_capture.as_mut()
+    {
+        capture.render_order.push("placement_review".into());
+        let buffer = frame.buffer_mut();
+        let rows = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        capture.rendered_text.overlay_text = Some(rows.join("\n"));
+    }
+
     // Observe the rendered messages area for the anchor-stability (smoothness)
     // report. Runs on the final buffer so it sees exactly what the user sees.
     smoothness::observe_frame(

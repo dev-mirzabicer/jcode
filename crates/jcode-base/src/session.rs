@@ -1070,6 +1070,14 @@ impl Session {
 
     /// An interrupted preparation remains inspectable, but cannot become a live
     /// primary merely because a partial Session file is present.
+    /// Managed launch is rolled out and this primary has no placement yet.
+    /// It may be inspected but cannot accept new work until it is placed.
+    pub fn requires_placement(&self) -> bool {
+        crate::config::config().features.managed_primary_launch
+            && self.isolated_child.is_none()
+            && self.location.is_none()
+    }
+
     pub fn require_native_scope_route(&self, internal_tools: bool) -> anyhow::Result<()> {
         if self.location.is_none() && self.isolated_child.is_none() {
             anyhow::ensure!(
@@ -1080,10 +1088,9 @@ impl Session {
                 .require_legacy_scope_absent(&self.id)?;
         }
         anyhow::ensure!(
-            !crate::config::config().features.managed_primary_launch
-                || self.isolated_child.is_some()
-                || self.location.is_some(),
-            "Legacy primary requires explicit placement and cwd adoption before continuing; inspect history or use workspace management"
+            !self.requires_placement(),
+            "{}",
+            jcode_workspace_types::placement_required_for_turn()
         );
         anyhow::ensure!(
             self.location.is_none() || !internal_tools,

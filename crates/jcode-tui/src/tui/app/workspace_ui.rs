@@ -4,6 +4,7 @@
 use super::{App, DisplayMessage};
 use crate::protocol::ServerEvent;
 use crate::tui::backend::RemoteConnection;
+use crate::tui::placement_review::{self, PlacementReview};
 use crate::tui::workspace_manager::{Intent, OfflineRuntime, Section, WorkspaceManager};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::cell::RefCell;
@@ -16,6 +17,10 @@ pub(super) struct WorkspaceUi {
     owned: HashSet<u64>,
     service: Option<oneshot::Receiver<Result<String, String>>>,
     start: Option<oneshot::Receiver<Result<String, String>>>,
+    /// First-send placement review for an unplaced session.
+    pub placement: Option<PlacementReview>,
+    /// The placement completed and the composer's message should be sent.
+    pub resend_after_placement: bool,
 }
 
 /// Parse `/workspace [section]` and `/runtime`. Other `/runtime` subcommands
@@ -54,6 +59,17 @@ impl App {
 
     pub(super) fn handle_workspace_command(&mut self, command: &str) -> bool {
         let trimmed = command.trim();
+        if trimmed == "/place" {
+            if self.is_remote {
+                self.open_placement_review(false);
+            } else {
+                self.push_display_message(DisplayMessage::system(
+                    "Placement is managed by the shared runtime; this local session has none."
+                        .to_string(),
+                ));
+            }
+            return true;
+        }
         if trimmed != "/workspace"
             && !trimmed.starts_with("/workspace ")
             && trimmed != "/runtime"
@@ -114,6 +130,144 @@ impl App {
         true
     }
 
+    /// Open the placement review for the attached session. `resend` sends the
+    /// composer's message once placement completes.
+    pub(super) fn open_placement_review(&mut self, resend: bool) {
+        let Some(session) = self.remote_session_id.clone() else {
+            return;
+        };
+        match &mut self.workspace_ui.placement {
+            Some(review) if review.session == session => review.resend |= resend,
+            _ => self.workspace_ui.placement = Some(PlacementReview::open(session, resend)),
+        }
+        self.force_full_redraw = true;
+    }
+
+    pub(super) fn placement_review_visible(&self) -> bool {
+        self.workspace_ui.placement.is_some()
+    }
+
+    pub(super) fn handle_placement_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        let Some(review) = &mut self.workspace_ui.placement else {
+            return false;
+        };
+        let outcome = review.key(code, modifiers);
+        self.apply_placement_outcome(outcome);
+        self.force_full_redraw = true;
+        true
+    }
+
+    fn apply_placement_outcome(&mut self, outcome: placement_review::Outcome) {
+        use placement_review::Outcome;
+        match outcome {
+            Outcome::None => {}
+            Outcome::Close => {
+                self.workspace_ui.placement = None;
+                self.set_status_notice("Session not placed; your message is still in the composer");
+            }
+            Outcome::OpenWorkspace => {
+                self.workspace_ui.placement = None;
+                self.handle_workspace_command("/workspace sessions");
+            }
+            Outcome::Placed { summary } => {
+                let resend = self
+                    .workspace_ui
+                    .placement
+                    .take()
+                    .is_some_and(|review| review.resend);
+                self.set_status_notice(summary);
+                self.workspace_ui.resend_after_placement = resend && !self.input.trim().is_empty();
+            }
+        }
+    }
+
+    /// Accept only replies to the placement review's own request.
+    pub(super) fn reduce_placement_event(
+        &mut self,
+        event: ServerEvent,
+    ) -> Result<bool, Box<ServerEvent>> {
+        let id = match &event {
+            ServerEvent::PrimaryLocationResponse { id, .. } | ServerEvent::Error { id, .. } => *id,
+            _ => return Err(Box::new(event)),
+        };
+        let Some(review) = &mut self.workspace_ui.placement else {
+            return Err(Box::new(event));
+        };
+        if !review.owns(id) {
+            return Err(Box::new(event));
+        }
+        let outcome = review.accept(event);
+        self.apply_placement_outcome(outcome);
+        self.force_full_redraw = true;
+        Ok(true)
+    }
+
+    /// Send the review's queued request, if any.
+    pub(super) async fn dispatch_placement_review(&mut self, remote: &mut RemoteConnection) {
+        let Some(review) = &mut self.workspace_ui.placement else {
+            return;
+        };
+        let id = remote.reserve_context_request_id();
+        if let Some(request) = review.reserve(id)
+            && let Err(error) = remote.send_reserved_workspace_request(request).await
+        {
+            review.transport_failed(&format!("{error:#}"));
+            self.force_full_redraw = true;
+        }
+    }
+
+    /// Send the held message after a completed placement through the
+    /// ordinary Enter path. Called from the tick loop only, outside key
+    /// handling.
+    pub(super) async fn resend_after_placement(&mut self, remote: &mut RemoteConnection) -> bool {
+        if !std::mem::take(&mut self.workspace_ui.resend_after_placement) {
+            return false;
+        }
+        if let Err(error) =
+            super::remote::handle_remote_key(self, KeyCode::Enter, KeyModifiers::empty(), remote)
+                .await
+        {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Could not send the held message after placement: {error:#}"
+            )));
+        }
+        true
+    }
+
+    pub(super) fn placement_review_debug(&self) -> serde_json::Value {
+        let review = self.workspace_ui.placement.as_ref();
+        serde_json::json!({
+            "visible": review.is_some(),
+            "session": review.map(|review| &review.session),
+            "resend": review.map(|review| review.resend),
+            "stage": review.map(|review| format!("{:?}", review.stage)),
+            "selected": review.map(|review| review.selected),
+            "candidates": review.and_then(|review| review.proposal.as_ref()).map(|proposal| {
+                proposal.candidates.iter().map(|candidate| serde_json::json!({
+                    "placement": candidate.placement,
+                    "root": candidate.root,
+                    "name": candidate.name,
+                    "broad": candidate.broad,
+                })).collect::<Vec<_>>()
+            }),
+            "default": review.and_then(|review| review.proposal.as_ref()).map(|proposal| proposal.default),
+            "composer": self.input,
+            "resend_pending": self.workspace_ui.resend_after_placement,
+        })
+    }
+
+    pub(super) fn draw_placement_overlay(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+    ) -> bool {
+        let Some(review) = &self.workspace_ui.placement else {
+            return false;
+        };
+        review.render(frame, area);
+        true
+    }
+
     /// Accept only replies to requests this manager reserved.
     pub(super) fn reduce_workspace_event(
         &mut self,
@@ -147,6 +301,14 @@ impl App {
 
     pub(super) fn reconnect_workspace_manager(&mut self, session: &str) {
         self.workspace_ui.owned.clear();
+        // An in-flight review reply cannot arrive on the new connection.
+        if let Some(review) = &mut self.workspace_ui.placement {
+            if review.session == session {
+                review.transport_failed("connection was replaced");
+            } else {
+                self.workspace_ui.placement = None;
+            }
+        }
         if let Some(manager) = &self.workspace_ui.manager {
             manager.borrow_mut().reconnect(session);
         }
@@ -154,6 +316,14 @@ impl App {
 
     /// The attached session changed on the same connection (Clear, resume).
     pub(super) fn retarget_workspace_manager(&mut self, session: &str) {
+        if self
+            .workspace_ui
+            .placement
+            .as_ref()
+            .is_some_and(|review| review.session != session)
+        {
+            self.workspace_ui.placement = None;
+        }
         if let Some(manager) = &self.workspace_ui.manager {
             let mut manager = manager.borrow_mut();
             if manager.session != session {

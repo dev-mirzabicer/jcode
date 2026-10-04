@@ -59,6 +59,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Manage projects, checkouts, sessions, permissions, closeout and backups",
     ),
     RegisteredCommand::public(
+        "/place",
+        "Review and choose this session's workspace placement",
+    ),
+    RegisteredCommand::public(
         "/runtime",
         "Runtime status, stop, restart and interrupted turns",
     ),

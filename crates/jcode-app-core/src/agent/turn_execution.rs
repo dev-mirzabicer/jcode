@@ -1595,6 +1595,45 @@ impl Agent {
 
     /// Start an interactive REPL
     pub async fn repl(&mut self) -> Result<()> {
+        self.repl_with_placement(false).await
+    }
+
+    /// Once managed launch is rolled out an unplaced Session cannot run. With
+    /// `place`, it takes its proposed placement before the first message and
+    /// after `clear`; otherwise the message is refused before it is recorded.
+    async fn ready_for_repl_input(&mut self, place: bool) -> bool {
+        if !self.startup_context_session().requires_placement() {
+            return true;
+        }
+        if !place {
+            if let Err(error) = crate::primary::require_process_primary_placed(self) {
+                eprintln!(
+                    "
+{error}
+"
+                );
+            }
+            return false;
+        }
+        match crate::primary::place_process_primary(self).await {
+            Ok(placed) => {
+                if let Some(placed) = placed {
+                    println!("Placed this session: {placed}");
+                }
+                true
+            }
+            Err(error) => {
+                eprintln!(
+                    "
+Placement failed: {error:#}
+"
+                );
+                false
+            }
+        }
+    }
+
+    pub async fn repl_with_placement(&mut self, place: bool) -> Result<()> {
         println!("J-Code - Coding Agent");
         println!("Type your message, or 'quit' to exit.");
 
@@ -1647,6 +1686,9 @@ impl Agent {
                         println!("Activating skill: {}", activation.skill_id);
                         println!("{}\n", activation.description);
                         if let Some(prompt) = invocation.prompt {
+                            if !self.ready_for_repl_input(place).await {
+                                continue;
+                            }
                             if let Err(error) = self.observe_startup_context_before_user_turn() {
                                 eprintln!(
                                     "\nStartup Context warning: the latest file observation could not be saved, so no stale marker was claimed: {error}\n"
@@ -1675,6 +1717,9 @@ impl Agent {
                 continue;
             }
 
+            if !self.ready_for_repl_input(place).await {
+                continue;
+            }
             if let Err(error) = self.observe_startup_context_before_user_turn() {
                 eprintln!(
                     "\nStartup Context warning: the latest file observation could not be saved, so no stale marker was claimed: {error}\n"

@@ -35,6 +35,9 @@ mod primary_launch;
 #[cfg(test)]
 mod primary_launch_tests;
 mod primary_location;
+mod session_placement;
+#[cfg(test)]
+mod session_placement_tests;
 pub use primary_controls::PrimaryControlLease;
 pub use primary_launch::PrimaryLaunchLease;
 pub use primary_location::PreparedPrimaryLocation;

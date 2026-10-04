@@ -279,6 +279,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 &message,
                 json,
                 ndjson,
+                args.place,
             )
             .await?;
         }
@@ -381,7 +382,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     );
                 }
             }
-            agent.repl().await?;
+            agent.repl_with_placement(args.place).await?;
         }
         Some(Command::Update) => {
             hot_exec::run_update()?;

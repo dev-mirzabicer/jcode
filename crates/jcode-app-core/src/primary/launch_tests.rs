@@ -579,7 +579,7 @@ fn legacy_adoption_uses_the_real_idle_primary_control_without_inference() -> Res
         crate::config::Config::invalidate_cache();
         // Inspection remains available. An unreviewed primary cannot dispatch.
         let failure = agent.lock().await.run_once_capture("SYNTHETIC RETAINED LEGACY INPUT").await.unwrap_err();
-        assert!(failure.to_string().contains("Legacy primary requires explicit placement"));
+        assert!(crate::workspace::is_placement_required(&failure.to_string()));
         assert_eq!(provider.0.load(Ordering::SeqCst),0);
         let before = Session::load(&id)?;
         let result = host.request_location(PrimaryLocationCommand::AdoptLegacy{request:input.clone()}).await;

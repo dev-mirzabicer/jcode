@@ -599,6 +599,10 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         event => event,
     };
+    let event = match app.reduce_placement_event(event) {
+        Ok(accepted) => return accepted,
+        Err(event) => *event,
+    };
     let event = match app.reduce_workspace_event(event) {
         Ok(accepted) => return accepted,
         Err(event) => *event,
@@ -1209,9 +1213,16 @@ pub(in crate::tui::app) fn handle_server_event(
                     "Rejected input remains in its client journal: {error}"
                 ))),
             }
-            app.push_display_message(DisplayMessage::error(format!(
-                "Input was not accepted: {message}"
-            )));
+            if crate::workspace::is_placement_required(&message) {
+                // The message is back in the composer; the review sends it
+                // once the session is placed.
+                app.open_placement_review(true);
+                app.set_status_notice("Place this session to send your message");
+            } else {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Input was not accepted: {message}"
+                )));
+            }
             true
         }
         ServerEvent::PrimaryClientInputsCancelled { receipts, .. } => {
@@ -1572,6 +1583,9 @@ pub(in crate::tui::app) fn handle_server_event(
             message,
             retry_after_secs,
         } => {
+            if crate::workspace::is_placement_required(&message) {
+                app.open_placement_review(false);
+            }
             if app.current_message_id == Some(id) && app.queued_instruction_error.is_some() {
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;

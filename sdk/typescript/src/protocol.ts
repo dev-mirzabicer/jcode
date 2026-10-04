@@ -48,11 +48,16 @@ export interface GrantCarryChoice { review: string; carry: boolean }
 export interface WorkspaceGrantDefinition { id:string; audience:{kind:"session"|"project"|"work_area"|"checkout"; id:string}; target:{kind:"root"|"project_members"|"work_area_members"; id:string}; state:"disabled"|"active"|"revoked"; revision:number; copied_from:string|null; authorization?:{client:string;request:string;installation:string}|null }
 export interface GrantCarryReview { id:string; source:string; session_revision:number; catalog_revision:number; direct_grants:WorkspaceGrantDefinition[] }
 export interface LegacyLocationAdoptionRequest { request:string; session:string; expected_working_dir:string|null; expected_catalog_revision:number; placement:WorkspacePlacement; cwd:string }
-export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"adopt_legacy"; request:LegacyLocationAdoptionRequest} | {action:"inspect"|"cancel"; operation:string} | {action:"inspect_session"; session:string};
+export type PrimaryPlacementChoice = { kind: "existing"; placement: WorkspacePlacement } | { kind: "standalone"; root: string };
+/** One reviewable placement for an unplaced Session. Every candidate keeps the Session's recorded working directory. */
+export interface PlacementCandidate { placement:PrimaryPlacementChoice; root:string; name:string; project:string|null; broad:boolean }
+export interface PlacementProposal { session:string; working_dir:string; catalog_revision:number; candidates:PlacementCandidate[]; default:number|null }
+export interface SessionPlacementRequest { request:string; session:string; working_dir:string; expected_catalog_revision:number; placement:PrimaryPlacementChoice }
+export type PrimaryLocationCommand = {action:"change"; request:LocationChangeRequest} | {action:"adopt_legacy"; request:LegacyLocationAdoptionRequest} | {action:"inspect"|"cancel"; operation:string} | {action:"inspect_session"; session:string} | {action:"propose_placement"; session:string} | {action:"place"; request:SessionPlacementRequest};
 export interface LocationChangeRecord { legacy_origin?:{working_dir:string|null}|null; operation:string; input:LocationChangeRequest; state:"pending"|"complete"|"cancelled"|"failed"|"recovery_required"; effective_revision:number|null; notice_message:string|null; issue:{code:WorkspaceIssueCode; detail:string}|null }
 /** Committed Session placement and cwd for trusted move/adoption review. */
 export interface SessionLocationView { session:string; location:{placement:WorkspacePlacement; cwd:string; initial_cwd:string; revision:number}|null; legacy_working_dir:string|null; isolated_child:boolean; pending:LocationChangeRecord[]; catalog_revision:number|null; catalog_issue:{code:WorkspaceIssueCode; detail:string}|null }
-export type PrimaryLocationResponse = {status:"state"; record:LocationChangeRecord} | {status:"session"; view:SessionLocationView} | {status:"rejected"; issue:{code:WorkspaceIssueCode; detail:string}};
+export type PrimaryLocationResponse = {status:"state"; record:LocationChangeRecord} | {status:"session"; view:SessionLocationView} | {status:"proposal"; proposal:PlacementProposal} | {status:"rejected"; issue:{code:WorkspaceIssueCode; detail:string}};
 
 export type ExecutionState = "prepared" | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type OutputSize = number | "very_small" | "small" | "medium" | "large" | "very_large";
@@ -272,7 +277,7 @@ export type ApiEvent =
   | {ev: "grant_carry_review"; review:GrantCarryReview}
   | {ev: "scoped_context_rejected"; source_session:string; issue:{code:WorkspaceIssueCode;detail:string}}
   | {ev: "scoped_context_created"; source_session:string;session_id:string;kind:NewContextKind}
-  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean; legacy_adoption_version?:number|null; context_scope_version?:number|null; session_inspection_version?:number|null}
+  | {ev: "primary_control_capabilities"; input_version:number; location_version:number; location_enabled:boolean; legacy_adoption_version?:number|null; context_scope_version?:number|null; session_inspection_version?:number|null; session_placement_version?:number|null}
   | {ev: "primary_input_receipt"; receipt:PrimaryInputReceipt}
   | {ev: "primary_input_detail"; receipt:PrimaryInputReceipt; input:PrimaryInputEnvelope}
   | {ev: "primary_location"; response:PrimaryLocationResponse}

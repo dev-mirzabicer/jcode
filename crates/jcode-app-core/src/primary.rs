@@ -13,6 +13,8 @@ use tokio::task::{AbortHandle, JoinSet};
 mod launch;
 mod location;
 mod new_context;
+mod placement;
+pub use placement::{place_process_primary, require_process_primary_placed};
 mod shutdown;
 pub use new_context::{
     prepare_local_clear_session, prepare_split_session, prepare_transfer_session,

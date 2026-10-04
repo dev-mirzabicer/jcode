@@ -36,6 +36,7 @@ impl PrimaryHost {
         let target = match &command {
             PrimaryLocationCommand::Change { request } => Some(request.session.as_str()),
             PrimaryLocationCommand::AdoptLegacy { request } => Some(request.session.as_str()),
+            PrimaryLocationCommand::Place { request } => Some(request.session.as_str()),
             _ => None,
         };
         if launch_enabled()
@@ -60,15 +61,23 @@ impl PrimaryHost {
         if let PrimaryLocationCommand::InspectSession { session } = command {
             return inspect_session_location(session).await;
         }
+        if let PrimaryLocationCommand::ProposePlacement { session } = command {
+            return propose_session_placement(session).await;
+        }
         if !launch_enabled()
             && matches!(
                 &command,
-                PrimaryLocationCommand::Change { .. } | PrimaryLocationCommand::AdoptLegacy { .. }
+                PrimaryLocationCommand::Change { .. }
+                    | PrimaryLocationCommand::AdoptLegacy { .. }
+                    | PrimaryLocationCommand::Place { .. }
             )
         {
             return PrimaryLocationResponse::Rejected { issue: Issue { code: IssueCode::UnsupportedCapability, detail: "Managed location controls are staged until workspace management is available".into() } };
         }
-        let result = self.location_command(command).await;
+        let result = match command {
+            PrimaryLocationCommand::Place { request } => self.place_session(request).await,
+            command => self.location_command(command).await,
+        };
         match result {
             Ok(record) => PrimaryLocationResponse::State {
                 record: Box::new(record),
@@ -83,6 +92,41 @@ impl PrimaryHost {
                     }),
             },
         }
+    }
+
+    /// Resolve a reviewed placement, registering a new standalone root if
+    /// chosen, then adopt the Session in place through the legacy adoption
+    /// control. Retrying the same request converges on its first effects.
+    async fn place_session(
+        self: &Arc<Self>,
+        request: SessionPlacementRequest,
+    ) -> Result<LocationChangeRecord> {
+        let permit = crate::runtime_lifecycle::admission::preparation(
+            "primary-placement",
+            Some(request.session.clone()),
+        )?;
+        let resolved = crate::runtime_lifecycle::admission::scope(permit, async {
+            let request = request.clone();
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let stored = crate::session::Session::load_startup_stub(&request.session)?;
+                Ok(WorkspaceService::new(&crate::storage::durable_state_dir())
+                    .resolve_session_placement(&request, &stored)?)
+            })
+            .await?
+        })
+        .await?;
+        let (placement, expected_catalog_revision) = resolved;
+        self.location_command(PrimaryLocationCommand::AdoptLegacy {
+            request: LegacyLocationAdoptionRequest {
+                request: request.request,
+                session: request.session,
+                expected_working_dir: Some(request.working_dir.clone()),
+                expected_catalog_revision,
+                placement,
+                cwd: request.working_dir,
+            },
+        })
+        .await
     }
 
     async fn location_command(
@@ -117,8 +161,12 @@ impl PrimaryHost {
             PrimaryLocationCommand::Inspect { operation } => {
                 Ok(workspace.inspect_location_change(operation)?)
             }
-            PrimaryLocationCommand::InspectSession { .. } => {
+            PrimaryLocationCommand::InspectSession { .. }
+            | PrimaryLocationCommand::ProposePlacement { .. } => {
                 anyhow::bail!("Session inspection returns a view, not a location change")
+            }
+            PrimaryLocationCommand::Place { .. } => {
+                anyhow::bail!("Session placement resolves before its adoption control")
             }
             PrimaryLocationCommand::Cancel { operation } => {
                 let record = workspace.inspect_location_change(operation)?;
@@ -189,6 +237,31 @@ impl PrimaryHost {
 }
 
 /// Read-only. Loads only the Session's startup metadata, never a live Agent.
+async fn propose_session_placement(session: String) -> PrimaryLocationResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let stored =
+            crate::session::Session::load_startup_stub(&session).map_err(|error| Issue {
+                code: IssueCode::InvalidIdentity,
+                detail: format!("Read authoritative Session {session}: {error:#}"),
+            })?;
+        WorkspaceService::new(&crate::storage::durable_state_dir())
+            .propose_session_placement(&stored)
+    })
+    .await;
+    match result {
+        Ok(Ok(proposal)) => PrimaryLocationResponse::Proposal {
+            proposal: Box::new(proposal),
+        },
+        Ok(Err(issue)) => PrimaryLocationResponse::Rejected { issue },
+        Err(error) => PrimaryLocationResponse::Rejected {
+            issue: Issue {
+                code: IssueCode::RecoveryRequired,
+                detail: format!("Placement review worker stopped: {error}"),
+            },
+        },
+    }
+}
+
 async fn inspect_session_location(session: String) -> PrimaryLocationResponse {
     let result = tokio::task::spawn_blocking(move || {
         let stored =

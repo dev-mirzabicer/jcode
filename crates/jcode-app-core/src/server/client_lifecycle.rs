@@ -4850,6 +4850,7 @@ fn primary_control_read(request: &Request) -> Option<ServerEvent> {
             legacy_adoption_version: Some(1),
             context_scope_version: Some(1),
             session_inspection_version: Some(1),
+            session_placement_version: Some(1),
         }),
         Request::PrimaryInputRead { id, session, input } => {
             let result = (|| -> Result<_> {
@@ -4972,6 +4973,13 @@ async fn append_context_message(
 }
 
 fn accept_processing_input(agent: &Agent, message: &ProcessingMessage) -> Result<()> {
+    // Refuse before acceptance so the prompt stays with its client instead of
+    // entering history ahead of a turn that cannot run.
+    anyhow::ensure!(
+        !agent.startup_context_session().requires_placement(),
+        "{}",
+        crate::workspace::placement_required_for_input()
+    );
     let (content, origin) = match &message.queued_messages {
         Some(entries) => {
             let (text, origin) = crate::todo::render_queued_messages(

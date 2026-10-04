@@ -43,6 +43,7 @@ pub(crate) use redraw_schedule::{
     redraw_interval_with_policy,
 };
 pub(crate) mod instruction_manager;
+pub mod placement_review;
 mod remote_diff;
 pub mod screenshot;
 pub(crate) mod session_facts;
@@ -191,6 +192,10 @@ pub trait TuiState {
         false
     }
     fn draw_task_monitor(&self, _frame: &mut Frame, _area: ratatui::layout::Rect) -> bool {
+        false
+    }
+    /// Draw the placement review over the finished frame, if open.
+    fn draw_placement_review(&self, _frame: &mut Frame, _area: ratatui::layout::Rect) -> bool {
         false
     }
     // ---- Transcript ----

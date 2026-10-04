@@ -41,6 +41,9 @@ pub enum ApiEvent {
         /// Read-only `inspect_session` location view.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_inspection_version: Option<u32>,
+        /// `propose_placement` and `place` for an unplaced Session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_placement_version: Option<u32>,
     },
     GrantCarryReview {
         review: crate::GrantCarryReview,

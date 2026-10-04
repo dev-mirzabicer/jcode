@@ -912,6 +912,20 @@ impl JcodeClient {
         }
     }
 
+    fn require_session_placement(&self) -> Result<()> {
+        self.require_capability("primary_control_v1")?;
+        match self.request_ok(ApiRequest::PrimaryControlProbe)?.event {
+            ApiEvent::PrimaryControlCapabilities {
+                session_placement_version: Some(1),
+                ..
+            } => Ok(()),
+            _ => Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "Session placement review requires session_placement_version=1",
+            )),
+        }
+    }
+
     fn require_context_scope(&self, mutation: bool) -> Result<()> {
         if !self.supports("primary_control_v1") {
             return Err(Error::new(
@@ -990,10 +1004,18 @@ impl JcodeClient {
         ) {
             self.require_session_inspection()?;
         }
+        if matches!(
+            &command,
+            jcode_harness_api::PrimaryLocationCommand::ProposePlacement { .. }
+                | jcode_harness_api::PrimaryLocationCommand::Place { .. }
+        ) {
+            self.require_session_placement()?;
+        }
         let adoption = self.require_primary_control(Some(matches!(
             command,
             jcode_harness_api::PrimaryLocationCommand::Change { .. }
                 | jcode_harness_api::PrimaryLocationCommand::AdoptLegacy { .. }
+                | jcode_harness_api::PrimaryLocationCommand::Place { .. }
         )))?;
         if matches!(
             &command,
@@ -1012,6 +1034,9 @@ impl JcodeClient {
             jcode_harness_api::PrimaryLocationCommand::AdoptLegacy { request } => {
                 Some(request.session.clone())
             }
+            jcode_harness_api::PrimaryLocationCommand::Place { request } => {
+                Some(request.session.clone())
+            }
             _ => None,
         };
         let expected = match &command {
@@ -1025,7 +1050,11 @@ impl JcodeClient {
             | jcode_harness_api::PrimaryLocationCommand::Cancel { operation } => {
                 operation.to_string()
             }
-            jcode_harness_api::PrimaryLocationCommand::InspectSession { session } => {
+            jcode_harness_api::PrimaryLocationCommand::Place { request } => {
+                request.request.to_string()
+            }
+            jcode_harness_api::PrimaryLocationCommand::InspectSession { session }
+            | jcode_harness_api::PrimaryLocationCommand::ProposePlacement { session } => {
                 session.clone()
             }
         };
@@ -1045,6 +1074,9 @@ impl JcodeClient {
                     }
                     jcode_harness_api::PrimaryLocationResponse::Session { view } => {
                         view.session == expected
+                    }
+                    jcode_harness_api::PrimaryLocationResponse::Proposal { proposal } => {
+                        proposal.session == expected
                     }
                     jcode_harness_api::PrimaryLocationResponse::Rejected { .. } => true,
                 } =>

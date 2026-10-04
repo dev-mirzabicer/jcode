@@ -127,6 +127,9 @@ impl App {
         if cmd == "workspace-manager-state" {
             return self.workspace_debug().to_string();
         }
+        if cmd == "placement-review-state" {
+            return self.placement_review_debug().to_string();
+        }
         if cmd == "context-editor-state" {
             return serde_json::to_string_pretty(&self.context_editor_debug_summary())
                 .unwrap_or_else(|_| "{}".to_string());

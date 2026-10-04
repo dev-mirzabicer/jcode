@@ -616,6 +616,14 @@ impl crate::tui::TuiState for App {
         self.draw_workspace_overlay(frame, area)
     }
 
+    fn draw_placement_review(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+    ) -> bool {
+        self.draw_placement_overlay(frame, area)
+    }
+
     fn draw_task_monitor(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) -> bool {
         let Some(monitor) = &self.task_ui.monitor else {
             return false;
