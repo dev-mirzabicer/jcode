@@ -787,7 +787,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             checkout_version: Some(1),
                             closeout_version: cfg!(target_os = "macos").then_some(2),
                             management_version: Some(1),
-                            managed_rollout: false,
+                            managed_rollout: crate::primary::launch_enabled(),
                         },
                     )
                     .await?;
@@ -3752,7 +3752,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     checkout_version: Some(1),
                     closeout_version: cfg!(target_os = "macos").then_some(2),
                     management_version: Some(1),
-                    managed_rollout: false,
+                    managed_rollout: crate::primary::launch_enabled(),
                 });
             }
             Request::Workspace { id, request } => {

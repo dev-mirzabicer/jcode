@@ -123,7 +123,9 @@ impl WorkspaceService {
     }
     /// A derived row can prove a contradiction, never reconstruct permission.
     /// Genuine pre-catalog legacy state remains usable without initialization.
-    pub(super) fn catalog_present(&self) -> Result<bool> {
+    /// Whether a catalog was ever created here. Absence is the genuinely
+    /// uninitialized state; a damaged catalog still counts as present.
+    pub fn catalog_present(&self) -> Result<bool> {
         let present = |path: &Path| match std::fs::symlink_metadata(path) {
             Ok(_) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -454,6 +456,6 @@ pub(crate) fn status(connection: &Connection) -> Result<CatalogStatus> {
         installation: installation.parse().map_err(corrupt)?,
         schema: version,
         revision: revision.try_into().map_err(corrupt)?,
-        managed_rollout: false,
+        managed_rollout: crate::config::config().features.managed_primary_launch,
     })
 }

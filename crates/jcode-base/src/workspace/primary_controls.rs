@@ -26,6 +26,11 @@ impl WorkspaceService {
                 "Invalid primary Session identity",
             ));
         }
+        // A never-initialized catalog has no controls to order. Report that
+        // fact rather than a missing lease directory.
+        if !self.catalog_present()? {
+            return Err(Issue::not_initialized());
+        }
         let catalog = self.lease(false)?;
         let file = storage::private_file(
             &self

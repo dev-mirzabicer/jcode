@@ -218,6 +218,12 @@ impl Agent {
             Some(self.session_id().into()),
         )?;
         let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
+        // An unplaced Session can only gain a location through a catalog
+        // operation. Without a catalog none can be pending, and the scope
+        // gate below explains what the Session needs.
+        if self.session.location.is_none() && !workspace.catalog_present()? {
+            return Ok(());
+        }
         let _control = workspace.primary_control_lease(self.session_id())?;
         for record in workspace.pending_location_changes(self.session_id())? {
             let current = self.session.location.as_ref();

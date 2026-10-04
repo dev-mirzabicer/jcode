@@ -450,7 +450,10 @@ fn service_status() -> Result<String, String> {
                     format!(
                         "Login service {}: installed{}, {}{}{}",
                         status.label,
-                        if status.current { "" } else { " (definition differs from current plan)" },
+                        match status.current {
+                            Some(false) => " (definition differs from the reviewed plan)",
+                            _ => "",
+                        },
                         if status.loaded { "loaded" } else { "not loaded" },
                         status.pid.map(|pid| format!(", pid {pid}")).unwrap_or_default(),
                         status.last_exit.map(|exit| format!(", last exit {exit}")).unwrap_or_default(),

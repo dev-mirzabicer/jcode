@@ -47,8 +47,10 @@ pub struct ServiceStatus {
     pub label: String,
     pub definition: PathBuf,
     pub installed: bool,
-    /// The installed definition equals the current plan byte for byte.
-    pub current: bool,
+    /// Whether the installed definition equals a reviewed plan byte for byte.
+    /// `None` when the status was read without a plan to compare against.
+    #[serde(default)]
+    pub current: Option<bool>,
     pub loaded: bool,
     pub pid: Option<u32>,
     pub last_exit: Option<String>,
@@ -267,7 +269,7 @@ pub fn install(plan: &ServicePlan, confirmed_digest: &str) -> Result<ServiceStat
         "Service plan digest does not match its rendering"
     );
     let current = status_for(plan)?;
-    if current.loaded && current.current {
+    if current.loaded && current.current == Some(true) {
         return Ok(current);
     }
     ensure!(
@@ -326,7 +328,7 @@ pub fn uninstall(socket: &Path) -> Result<ServiceStatus> {
         label,
         definition,
         installed: false,
-        current: false,
+        current: None,
         loaded: false,
         pid: None,
         last_exit: None,
@@ -348,9 +350,11 @@ fn parse_print(text: &str) -> (Option<u32>, Option<String>) {
 
 pub fn status_for(plan: &ServicePlan) -> Result<ServiceStatus> {
     let mut status = status(&plan.socket)?;
-    status.current = std::fs::read(&plan.definition)
-        .map(|bytes| bytes == render(plan).as_bytes())
-        .unwrap_or(false);
+    status.current = Some(
+        std::fs::read(&plan.definition)
+            .map(|bytes| bytes == render(plan).as_bytes())
+            .unwrap_or(false),
+    );
     Ok(status)
 }
 
@@ -373,7 +377,7 @@ pub fn status(socket: &Path) -> Result<ServiceStatus> {
         label,
         definition,
         installed,
-        current: false,
+        current: None,
         loaded,
         pid,
         last_exit,
