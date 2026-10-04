@@ -494,7 +494,7 @@ try:
             rows = subprocess.run(['ps', '-axo', 'pid=,ppid=,command='], capture_output=True, text=True).stdout.splitlines()
             # Only this fixture's workers: a developer's own runtime may hold
             # workers (and their assertions) for unrelated running commands.
-            workers = {row.split()[0] for row in rows if '__jcode-command-worker' in row and str(f.BIN) in row}
+            workers = {row.split()[0] for row in rows if '__jcode-command-worker' in row and (str(f.BIN) in row or str(f.ROOT) in row)}
             return [row for row in rows if 'caffeinate' in row and row.split()[1] in workers]
         held = wait(worker_assertions, 'native worker assertion', 20)
         operation = reviewed('stop', '--strategy', 'interrupt', '--tasks', 'keep-supported')
