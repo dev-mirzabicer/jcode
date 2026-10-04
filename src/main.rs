@@ -127,6 +127,7 @@ fn run_main() -> Result<()> {
             return jcode::execution::command_worker::child_main(&id);
         }
         return tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(RUNTIME_THREAD_STACK_BYTES)
             .enable_all()
             .build()?
             .block_on(jcode::execution::command_worker::worker_main(&id));
@@ -159,11 +160,21 @@ fn run_main() -> Result<()> {
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(RUNTIME_THREAD_STACK_BYTES)
         .enable_all()
         .build()?;
 
     runtime.block_on(async { jcode::run().await })
 }
+
+/// Stack for Tokio worker and blocking threads. The default is 2 MiB. The
+/// `selfdev` profile builds at `opt-level = 0`, where large async state
+/// machines keep big frames: the shared daemon's client attach path measured
+/// about 1.7 MB in October 2026, and one extra value held across an `.await`
+/// crashed the daemon. 16 MiB is address space reserved per thread, not
+/// resident memory; pages are committed only when touched. Re-measure with
+/// `scripts/measure_client_stack.py` when client-path futures change.
+const RUNTIME_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// True when invoked as `jcode setup-hotkey --listen-macos-hotkey`.
 fn is_macos_hotkey_listener_invocation() -> bool {
