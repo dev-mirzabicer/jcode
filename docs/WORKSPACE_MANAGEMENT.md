@@ -136,8 +136,11 @@ IDs, including after a client restart.
 
 Begin from a checkout with `o`. The **Don't ask for approval if there are no
 ambiguities** checkbox is off by default. It records a conditional authorization
-for this checkout and this closeout only; the agent route that uses it is not yet
-exposed.
+for this checkout and this closeout only. An agent placed with write scope over
+the checkout can then prepare it and, only when it finds no information loss,
+declare that and finish the removal through its
+[`workspace` tool](WORKSPACE_AGENT_TOOL.md). Agents never approve removal; with
+the checkbox off, you approve here.
 
 Then: refresh the inventory (`f`), record dispositions (`d` from the inventory
 pane `i`, which pages with `[` and `]` for large checkouts), preserve (`p`), review removal (`w`), approve with the typed word
@@ -179,7 +182,10 @@ supervision state, the macOS login service and interrupted turns.
 `features.managed_primary_launch` still gates managed launch, location changes,
 legacy adoption and scoped new contexts. With it off, these actions say that they
 are staged. Catalog organization, cloning, permissions, closeout, backups and
-runtime control do not depend on it. Agent-facing workspace tools are not exposed.
+runtime control do not depend on it. The agent [`workspace` tool](WORKSPACE_AGENT_TOOL.md)
+is offered only to placed sessions, which this flag gates, so with it off no
+session sees the tool. Access proposals that placed agents create appear under
+Permissions.
 
 Related: [primary input and location](PRIMARY_INPUT_LOCATION.md),
 [new-context scope](PRIMARY_CONTEXT_SCOPE.md),

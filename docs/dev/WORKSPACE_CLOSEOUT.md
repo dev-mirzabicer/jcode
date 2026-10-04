@@ -9,7 +9,8 @@ supervisor. It has been exercised with owned disposable fixtures, not real user
 checkout deletion. Harness API v1.10 and both SDKs consume that same service;
 remaining caller/admission and preservation cases, final combined runtime
 verification and activation remain WP-07 work.
-There is no workspace agent tool or ordinary managed-rollout activation here.
+Agents reach a narrower route through the [`workspace` tool](../WORKSPACE_AGENT_TOOL.md)
+(see "Agent route" below). Ordinary managed rollout remains gated.
 
 ## Native control and retained execution
 
@@ -371,8 +372,8 @@ trusted retain-files recovery remains available instead of guessed removal.
 A restored older catalog cannot manufacture receipts for later filesystem
 effects. If those effects cannot be reconciled, resumed removal stays blocked;
 the trusted retain-files alternative remains available without deleting data.
-The ordinary agent capability remains gated; native and Harness/SDK trusted
-clients use these same operations. Final combined and activated-runtime
+Native and Harness/SDK trusted clients use these same operations; the agent
+route below uses them with an agent actor. Final combined and activated-runtime
 verification remains part of the package's integration boundary.
 
 Closed is published only after the original/quarantine paths are absent and the
@@ -449,3 +450,22 @@ They are mechanism evidence for the implemented foundation, not acceptance of
 R25–R29, final native closeout, the future management TUI or C05 guidance. The
 package's final acceptance record must map all requirements to activated
 production-path evidence and record failed attempts and platform boundaries.
+
+## Agent route
+
+`WorkspaceService::admit_agent_closeout_action` admits a step for an
+authoritative placed primary Session, never for model-supplied identity. The
+stored `CloseoutActionRecord` carries `actor: agent` and the Session ID as
+`initiated_by`; trusted-client records omit `actor` and keep their original
+run identity. Agents may refresh, preserve, record dispositions (authored by
+the Session), review removal, declare no loss and finish. Each needs the
+checkout in the Session's current write scope.
+
+`DeclareNoLoss` is agent-only: trusted clients approve instead. It calls
+`declare_closeout_no_loss`, which requires the human-issued conditional flag
+from Begin, the exact current review, complete preservation, no unresolved
+findings and no live work. An agent `Finish` requires that the closeout's
+authorization is this Session's own conditional declaration. Removal approval
+and recovery decisions are refused for agents both at admission and when the
+action executes. Steps run under the same supervisor and retained execution as
+trusted actions.

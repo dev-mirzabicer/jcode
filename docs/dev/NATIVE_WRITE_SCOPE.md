@@ -2,8 +2,9 @@
 
 Managed Sessions use the catalog's current scope at native file mutation admission.
 The ordinary managed-launch rollout remains disabled until its human management
-path is available. Catalog capability negotiation alone does not enable migration
-or expose an agent access-request tool.
+path is available. Catalog capability negotiation alone does not enable migration.
+Placed sessions request access through the [`workspace` tool](../WORKSPACE_AGENT_TOOL.md);
+a proposal never changes scope until a trusted client approves it.
 
 ## Ownership and invocation
 

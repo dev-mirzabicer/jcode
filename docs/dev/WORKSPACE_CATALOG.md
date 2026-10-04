@@ -2,7 +2,7 @@
 
 The catalog is the private organization and recovery foundation for workspace
 management. The catalog alone does **not** enable managed primary placement,
-write enforcement, clone provisioning, checkout removal or new agent tools.
+write enforcement, clone provisioning, checkout removal or agent tools.
 Independent primary hosting and scoped native enforcement now have their own
 owners, and [reviewed checkout provisioning](WORKSPACE_CHECKOUTS.md) is a
 separate service. Their ordinary managed rollout retains its human-control
@@ -15,8 +15,9 @@ their existing owners and behavior.
 `jcode-workspace-types` contains UUID-backed identities and typed requests, views,
 reviews and receipts. `jcode-base::workspace::WorkspaceService` owns relationships,
 transactions, physical bindings and recovery. `jcode-app-core::workspace` dispatches
-trusted same-user client requests without creating an inference Session. No ordinary
-agent tool can issue these administrative requests through a workspace tool.
+trusted same-user client requests without creating an inference Session. The agent
+[`workspace` tool](../WORKSPACE_AGENT_TOOL.md) reads catalog facts and proposes access
+for its own Session; it cannot issue these administrative requests.
 Same-user shell/IPC is not adversarial containment or physical-human attestation.
 
 Projects are named containers. Repositories have explicit logical identity and may
@@ -153,9 +154,10 @@ The same adapter works for already attached clients. Lists include total and
 revision-bound continuation. The page-size bound is not a member-count ceiling.
 An old server must be probed before sending catalog requests.
 
-There is no alternative full workspace CLI or new agent-facing permission tool.
-The [workspace management mode](../WORKSPACE_MANAGEMENT.md) consumes these owners;
-final SDK reconciliation remains separate. Its read-only `operations` and
+There is no alternative full workspace CLI. The
+[workspace management mode](../WORKSPACE_MANAGEMENT.md) consumes these owners, and
+Harness v1.13 plus both SDKs expose the same typed requests
+([public contracts](WORKSPACE_PUBLIC_CONTRACTS.md)). The read-only `operations` and
 `startup_copy_plans` requests (`workspace_capabilities.management_version=1`) list
 durable clone, closeout, Startup Context copy, launch and location operations
 newest first, and report the plan revisions a copy review needs. A never-created
@@ -166,7 +168,7 @@ names its recorded request, which is the only one that can finish it.
 
 `workspace_capabilities.permissions_version=1` separately negotiates the
 permission catalog API. It does not enable managed rollout, mandatory legacy
-adoption, a workspace agent tool, or filesystem enforcement by itself.
+adoption, the workspace agent tool, or filesystem enforcement by itself.
 Older capabilities omit this field and must not be assumed to support it.
 
 The nested `permissions` request supports scope inspection, revision-bound grant

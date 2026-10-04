@@ -4,9 +4,10 @@ This is the current **service contract**, not the final workspace-management
 TUI. An authenticated same-user client can review and execute operations through
 `workspace` on the shared runtime without a provisional inference Session.
 `workspace_capabilities.checkout_version=1` negotiates this surface. Ordinary
-managed primary launch remains gated (`managed_rollout=false`), and no agent
-workspace tool, checkout deletion, hosted fork, integration target, or final
-closeout skill is exposed by this service. The [human management mode](../WORKSPACE_MANAGEMENT.md)
+managed primary launch remains gated (`managed_rollout=false`). This service
+exposes no agent clone operation, checkout deletion, hosted fork, integration
+target or final closeout skill; the agent [`workspace` tool](../WORKSPACE_AGENT_TOOL.md)
+only reads clone and location facts. The [human management mode](../WORKSPACE_MANAGEMENT.md)
 is a separate consumer of these operations.
 
 ## Deliberate clone journey

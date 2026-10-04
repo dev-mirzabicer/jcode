@@ -574,9 +574,45 @@ attempts use current reviewed state and a new UUID. Human approval remains bound
 to an exact review, and unregister/retain-files is distinct from deletion.
 
 These are trusted same-user controls, not an agent-access or physical-human
-attestation boundary. The ordinary workspace agent tool and final management
-experience remain separately staged. See [checkout closeout](../../docs/dev/WORKSPACE_CLOSEOUT.md)
-for retained data, recovery and native filesystem/process limitations.
+attestation boundary. Agents use their own narrower `workspace` tool, which can
+prepare and conditionally complete a closeout but never approve one. See
+[checkout closeout](../../docs/dev/WORKSPACE_CLOSEOUT.md) for retained data,
+recovery and native filesystem/process limitations.
+
+### Workspace catalog
+
+Harness API v1.13 adds `workspaceCapabilities()` and `workspace(request)` with
+the bridge capability `workspace_catalog_v1`. They expose the complete native
+catalog contract: organization reviews and receipts, catalog lists and
+sessions, volumes and clones, source trust, rebind, Startup Context copy,
+permissions (grants, access proposals, scope, carry), operation discovery and
+backup/export/import/restore. No Session is created or attached.
+
+Each request names one native contract (`requiredWorkspaceCapability`):
+`catalog`, `permissions`, `checkout`, `management` or `closeout`. The client
+probes the runtime and sends the request only when that exact version is
+advertised (`workspaceSupports`); an older runtime is refused before anything
+is sent. Checkout closeout keeps its dedicated `closeout()` method.
+
+A domain rejection is the `{kind: "error", value: issue}` response, not a
+thrown error. Replies are correlated structurally against the request
+(`matchesWorkspaceResponse`): a reply for another target, request, proposal,
+Session or response kind throws `unexpected_reply`. The same rules live in Rust
+(`WorkspaceRequest::matches_response`), and both SDKs evaluate the shared
+fixture `crates/jcode-workspace-types/src/workspace_correlation.json`.
+
+The connection is the authorizing trusted client for reviewed effects such as
+grant approval; request arguments never carry authority. Retain request and
+review UUIDs across uncertain replies and inspect the receipt before retrying.
+Pages carry a revision-bound continuation; a conflict means refresh from the
+first page.
+
+`primaryLocation({action: "inspect_session", session})` reads a Session's
+committed placement, cwd and pending moves. It requires
+`session_inspection_version = 1` from the primary-control probe.
+
+See [public workspace contracts](../../docs/dev/WORKSPACE_PUBLIC_CONTRACTS.md)
+for consumer examples.
 
 ### Explicit managed primary preparation (staged)
 
