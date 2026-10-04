@@ -1011,6 +1011,9 @@ fn restore_primary_preserves_busy_source_and_target_snapshots() -> Result<()> {
             &source_guard.provider_handle(),
             &target.provider_handle()
         ));
+        // A restored primary can make its first request before any client
+        // attaches, so it carries the same MCP surface as a launched one.
+        assert!(target.tool_names().await.iter().any(|name| name == "mcp"));
         Ok(())
     })
 }

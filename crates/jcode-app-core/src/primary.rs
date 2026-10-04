@@ -424,6 +424,19 @@ impl PrimaryHost {
             } else {
                 Agent::restore_primary(session, provider, registry, repositories.clone(), owner)
             }?;
+            // Same tool surface as launch and new contexts. A restored primary
+            // (reload continuation, detached input, recovery) may make its first
+            // request before any client subscribes; without this its frozen tool
+            // set would lose MCP tools and regain them on attach.
+            agent
+                .registry()
+                .register_mcp_tools_for_dir(
+                    None,
+                    Some(pool.clone()),
+                    Some(session.to_string()),
+                    agent.working_dir().map(std::path::PathBuf::from),
+                )
+                .await;
             Ok((agent, previous))
         })
         .await;
