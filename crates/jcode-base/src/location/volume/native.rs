@@ -33,6 +33,36 @@ impl VolumeEnvironment for NativeVolumes {
             "workspace volume binding requires the macOS adapter",
         ))
     }
+    fn identities(&self) -> Result<Vec<MountedVolume>> {
+        #[cfg(target_os = "macos")]
+        {
+            macos::mounted()?
+                .iter()
+                .map(|mount| macos::identity(mount))
+                .collect()
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(LocationError::new(
+            LocationIssue::Unsupported,
+            Path::new(""),
+            "workspace volume discovery requires the macOS adapter",
+        ))
+    }
+    fn containing_identity(&self, existing: &Path) -> Result<MountedVolume> {
+        #[cfg(target_os = "macos")]
+        {
+            let mount = macos::containing_mount(existing)?;
+            let volume = macos::identity(&mount)?;
+            macos::require_same_device(existing, &volume.mount)?;
+            Ok(volume)
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(LocationError::new(
+            LocationIssue::Unsupported,
+            existing,
+            "workspace volume binding requires the macOS adapter",
+        ))
+    }
 }
 
 pub(super) fn verify_archive_mount(mount: &Path, uuid: &str) -> anyhow::Result<()> {
@@ -204,6 +234,73 @@ mod macos {
             ));
         }
         Ok(())
+    }
+
+    /// The volume UUID straight from the kernel (`getattrlist`), the same value
+    /// `diskutil` reports as VolumeUUID, without spawning `diskutil`/`plutil`
+    /// for every mount. A volume without a kernel UUID uses the full inspection.
+    pub(super) fn identity(mount: &Path) -> Result<MountedVolume> {
+        #[repr(C)]
+        struct VolumeUuid {
+            length: u32,
+            uuid: [u8; 16],
+        }
+        let before = std::fs::metadata(mount).map_err(|e| LocationError::io(mount, e))?;
+        let canonical = mount
+            .canonicalize()
+            .map_err(|e| LocationError::io(mount, e))?;
+        if containing_mount(&canonical)? != canonical {
+            return Err(LocationError::new(
+                LocationIssue::WrongVolume,
+                mount,
+                "selected path is not the reported mounted volume",
+            ));
+        }
+        let name = CString::new(canonical.as_os_str().as_bytes())
+            .map_err(|e| LocationError::io(mount, e))?;
+        let mut request = libc::attrlist {
+            bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: 0,
+            volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID,
+            dirattr: 0,
+            fileattr: 0,
+            forkattr: 0,
+        };
+        let mut reply = VolumeUuid {
+            length: 0,
+            uuid: [0; 16],
+        };
+        // SAFETY: name is NUL-terminated; request and reply are valid writable
+        // allocations, and the reported size is exactly the reply's size.
+        let status = unsafe {
+            libc::getattrlist(
+                name.as_ptr(),
+                (&mut request as *mut libc::attrlist).cast(),
+                (&mut reply as *mut VolumeUuid).cast(),
+                std::mem::size_of::<VolumeUuid>(),
+                0,
+            )
+        };
+        let uuid = uuid::Uuid::from_bytes(reply.uuid);
+        if status != 0
+            || (reply.length as usize) < std::mem::size_of::<VolumeUuid>()
+            || uuid.is_nil()
+        {
+            return inspect(mount).map(Into::into);
+        }
+        let after = std::fs::metadata(&canonical).map_err(|e| LocationError::io(mount, e))?;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return Err(LocationError::new(
+                LocationIssue::ReplacedRoot,
+                mount,
+                "mount changed during inspection",
+            ));
+        }
+        Ok(MountedVolume {
+            identity: VolumeIdentity::parse(uuid.hyphenated().to_string())?,
+            mount: canonical,
+        })
     }
 
     pub(super) fn inspect(mount: &Path) -> Result<VolumeInfo> {

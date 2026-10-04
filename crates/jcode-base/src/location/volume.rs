@@ -95,9 +95,34 @@ impl std::fmt::Display for LocationError {
 impl std::error::Error for LocationError {}
 
 type Result<T> = std::result::Result<T, LocationError>;
+/// A mounted volume's identity, without the slower presentation facts
+/// (label, internal/external, writability, free space). Identity checks before
+/// filesystem effects need only this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountedVolume {
+    pub identity: VolumeIdentity,
+    pub mount: PathBuf,
+}
+impl From<VolumeInfo> for MountedVolume {
+    fn from(volume: VolumeInfo) -> Self {
+        Self {
+            identity: volume.identity,
+            mount: volume.mount,
+        }
+    }
+}
+
 trait VolumeEnvironment: Send + Sync {
     fn mounted(&self) -> Result<Vec<VolumeInfo>>;
     fn containing(&self, existing: &Path) -> Result<VolumeInfo>;
+    /// Every mounted volume's identity. Same coverage as `mounted`.
+    fn identities(&self) -> Result<Vec<MountedVolume>> {
+        Ok(self.mounted()?.into_iter().map(Into::into).collect())
+    }
+    /// Identity of the volume holding `existing`. Same checks as `containing`.
+    fn containing_identity(&self, existing: &Path) -> Result<MountedVolume> {
+        self.containing(existing).map(Into::into)
+    }
 }
 
 #[derive(Clone)]
@@ -163,9 +188,33 @@ impl LocationResolver {
         self.environment.containing(&path)
     }
 
+    /// Full facts for one mounted volume, found by identity.
     pub fn volume(&self, identity: &VolumeIdentity) -> Result<VolumeInfo> {
+        let mounted = self.locate_volume(identity)?;
+        let volume = self.environment.containing(&mounted.mount)?;
+        if &volume.identity != identity || volume.mount != mounted.mount {
+            return Err(LocationError::new(
+                LocationIssue::WrongVolume,
+                &mounted.mount,
+                "volume identity changed during inspection",
+            ));
+        }
+        Ok(volume)
+    }
+
+    /// Identity of the volume holding an existing path, without presentation facts.
+    pub fn containing_identity(&self, existing: &Path) -> Result<MountedVolume> {
+        let path = existing
+            .canonicalize()
+            .map_err(|e| LocationError::io(existing, e))?;
+        self.environment.containing_identity(&path)
+    }
+
+    /// The unique mount of a volume identity, without presentation facts.
+    pub fn locate_volume(&self, identity: &VolumeIdentity) -> Result<MountedVolume> {
         let mut found = self
-            .mounted_volumes()?
+            .environment
+            .identities()?
             .into_iter()
             .filter(|v| &v.identity == identity);
         let first = found.next().ok_or_else(|| {

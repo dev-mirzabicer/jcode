@@ -33,6 +33,14 @@ On macOS it obtains actual mount facts from `statfs`/`getfsstat`, then verifies
 read-only state and free bytes are observations, not identity or capacity guarantees.
 Ambiguous UUIDs and unavailable or unidentifiable volumes fail explicitly.
 
+Binding, resolution and effect-time checks need only identity. They read each mount's
+UUID from the kernel (`getattrlist` `ATTR_VOL_UUID`, the value `diskutil` reports) and
+spawn no process per mount; a volume without a kernel UUID falls back to the full
+inspection. Full `diskutil` facts are read only for volume listing and where
+writability matters (checkout destinations, new empty directories). Before this, every
+tool use or native write on a registered root inspected every mounted volume, about
+1.5 s per root on a machine with a dozen mounts.
+
 `PhysicalBinding` stores the volume UUID, volume-relative path, original observed path,
 root witness and binding generation. A witness contains inode and birth time. A live
 file descriptor plus device comparison protects the resolution observation from ordinary

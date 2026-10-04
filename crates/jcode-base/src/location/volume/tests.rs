@@ -362,3 +362,42 @@ fn native_external_volume_fixture() {
     fixture.close().unwrap();
     assert!(!path.exists());
 }
+
+/// The kernel identity probe used before every filesystem effect must name the
+/// same volume and mount as the full `diskutil` inspection, for every mounted
+/// volume on this machine, and must not spawn a process per mount.
+#[cfg(target_os = "macos")]
+#[test]
+fn native_kernel_identity_matches_full_inspection_for_every_mount() {
+    let environment = native::NativeVolumes;
+    let full = environment.mounted().unwrap();
+    let started = std::time::Instant::now();
+    let fast = environment.identities().unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        fast,
+        full.iter()
+            .cloned()
+            .map(MountedVolume::from)
+            .collect::<Vec<_>>()
+    );
+    // diskutil takes about 100 ms per mount; the kernel probe is microseconds.
+    assert!(
+        elapsed < std::time::Duration::from_millis(50 * fast.len() as u64),
+        "{elapsed:?}"
+    );
+
+    let resolver = LocationResolver::new();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    assert_eq!(
+        resolver.containing_identity(&root).unwrap(),
+        MountedVolume::from(resolver.containing_volume(&root).unwrap())
+    );
+    let binding = resolver.bind_directory(&root).unwrap();
+    let located = resolver.locate_volume(binding.volume()).unwrap();
+    assert_eq!(located, resolver.volume(binding.volume()).unwrap().into());
+    let resolved = resolver.resolve_directory(&binding).unwrap();
+    assert_eq!(resolved.volume, located);
+    assert_eq!(resolved.path, root);
+}

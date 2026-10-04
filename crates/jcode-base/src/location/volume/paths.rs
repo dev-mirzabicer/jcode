@@ -149,7 +149,8 @@ impl PathBinding {
 #[derive(Clone, Debug)]
 pub struct ResolvedPath {
     pub path: PathBuf,
-    pub volume: VolumeInfo,
+    /// Identity only. Callers needing writability or labels inspect the mount.
+    pub volume: MountedVolume,
     /// Inspection may follow a UUID to a new mount. This is not a Session cwd update.
     pub relocated: bool,
 }
@@ -180,7 +181,7 @@ impl LocationResolver {
                 "parent moved; review the destination again",
             ));
         }
-        if !resolved.volume.writable {
+        if !self.volume(&resolved.volume.identity)?.writable {
             return Err(LocationError::new(
                 LocationIssue::ReadOnlyVolume,
                 &resolved.path,
@@ -308,7 +309,7 @@ impl LocationResolver {
                 "parent changed before filesystem effect",
             ));
         }
-        if &self.containing_volume(&pinned.path)?.identity != binding.volume() {
+        if &self.containing_identity(&pinned.path)?.identity != binding.volume() {
             return Err(LocationError::new(
                 LocationIssue::WrongVolume,
                 &pinned.path,
@@ -324,7 +325,7 @@ impl LocationResolver {
             .canonicalize()
             .map_err(|e| LocationError::io(path, e))?;
         let pinned = PinnedDirectory::open(&path)?;
-        let volume = self.containing_volume(&path)?;
+        let volume = self.containing_identity(&path)?;
         // A verified mount-relative spelling is necessary for identity-based
         // remount resolution, including macOS's /Users Data-volume firmlink.
         let relative = relative_to_volume(&path, &volume.mount, &pinned.witness)?;
@@ -348,7 +349,7 @@ impl LocationResolver {
                 "binding has no generation",
             ));
         }
-        let volume = self.volume(&binding.volume)?;
+        let volume = self.locate_volume(&binding.volume)?;
         let physical = volume.mount.join(&binding.relative_path);
         let pinned = PinnedDirectory::open(&physical)?;
         if pinned.witness != binding.root_witness {
@@ -360,7 +361,7 @@ impl LocationResolver {
         }
         require_volume(
             &binding.volume,
-            &self.containing_volume(&physical)?,
+            &self.containing_identity(&physical)?.identity,
             &physical,
         )?;
         // Preserve the ordinary canonical spelling when it still names exactly
@@ -369,7 +370,7 @@ impl LocationResolver {
             Ok(old) if old.witness == pinned.witness => {
                 require_volume(
                     &binding.volume,
-                    &self.containing_volume(&old.path)?,
+                    &self.containing_identity(&old.path)?.identity,
                     &old.path,
                 )?;
                 old.verify()?;
@@ -407,7 +408,7 @@ impl LocationResolver {
                 }
                 Ok(_) => require_volume(
                     binding.volume(),
-                    &self.containing_volume(&resolved.path)?,
+                    &self.containing_identity(&resolved.path)?.identity,
                     &resolved.path,
                 )?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -439,7 +440,7 @@ impl LocationResolver {
                 let base = if let Some(binding) = saved_base {
                     require_volume(
                         selected,
-                        &self.resolve_path(binding)?.volume,
+                        &self.resolve_path(binding)?.volume.identity,
                         &binding.observed_path(),
                     )?;
                     self.resolve_path(binding)?.path
@@ -468,7 +469,7 @@ impl LocationResolver {
     /// acquire its own operation lease and check at the effect boundary.
     pub fn resolve_destination(&self, binding: &PathBinding) -> Result<ResolvedPath> {
         let resolved = self.resolve_path(binding)?;
-        require_writable(&resolved.volume)?;
+        require_writable(&self.volume(&resolved.volume.identity)?)?;
         match std::fs::symlink_metadata(&resolved.path) {
             Ok(_) => Err(LocationError::new(
                 LocationIssue::AlreadyExists,
@@ -498,8 +499,8 @@ fn validate_child(leaf: &std::ffi::OsStr, parent: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_volume(expected: &VolumeIdentity, actual: &VolumeInfo, path: &Path) -> Result<()> {
-    if expected != &actual.identity {
+fn require_volume(expected: &VolumeIdentity, actual: &VolumeIdentity, path: &Path) -> Result<()> {
+    if expected != actual {
         return Err(LocationError::new(
             LocationIssue::WrongVolume,
             path,
