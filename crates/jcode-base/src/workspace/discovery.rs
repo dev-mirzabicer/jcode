@@ -367,8 +367,12 @@ pub fn location_context_text(context: &LocationContext) -> String {
         ));
     }
     lines.push(
-        "Use the workspace tool to see paths, status, permission sources and the rest of the list."
-            .into(),
+        if context.members.as_ref().is_some_and(|members| members.more) {
+            "Use the workspace tool to see paths, status, permission sources and the rest of the list."
+        } else {
+            "Use the workspace tool to see paths, status and permission sources."
+        }
+        .into(),
     );
     lines.join("\n")
 }
