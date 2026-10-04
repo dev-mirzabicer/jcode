@@ -143,7 +143,12 @@ try:
     legacy = [e['session_id'] for e in events[id(legacy_a[0])] if e['type'] == 'session'][-1]
     legacy_b = conn()
     attach(legacy_b, legacy)
-    assert req(legacy_a, 'clear')['type'] == 'done'
+    # With managed launch rolled out, a legacy (unplaced) Session needs
+    # reviewed adoption before any managed continuation (WP-05). Clear is
+    # refused without creating a Session or moving either attachment.
+    refused = req(legacy_a, 'clear')
+    assert refused['type'] == 'error' and 'Adopt this legacy Session' in refused['message'], refused
+    assert req(legacy_a, 'state')['session_id'] == legacy
     assert req(legacy_b, 'state')['session_id'] == legacy
     close_channels()
     f.reader.close()
