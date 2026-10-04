@@ -13,10 +13,11 @@ real catalog or the user's runtime was touched.
 
 ## Exercised boundary
 
-Branch `mirza/sp58-c01-wp11-public-contracts` from `7bc478961`. The journey ran
-against an immutable copy of the `e544bf222` selfdev build (SHA-256 prefix
-`b1b2ad6db9361e1f`). Later commits change only documentation and the journey
-script.
+Branch `mirza/sp58-c01-wp11-public-contracts` from `7bc478961`. The journey
+passed against an immutable copy of the activated `de10c6fbc` build (SHA-256
+prefix `d981aa4fc0e0bcdc`), and earlier against `e544bf222`. Runs 1 to 6 failed
+on journey-script defects (tool-name matching, placement shape, expected member
+total, reading tool results from earlier turns), not product behavior.
 
 Journey: `scripts/run_isolated_test.py python3
 scripts/verify_workspace_contracts.py --binary <image> --artifact-dir <dir>`.
