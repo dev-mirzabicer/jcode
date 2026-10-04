@@ -2388,16 +2388,27 @@ Re-run with `--force` if you really want to stop the server.";
     Ok(())
 }
 
+/// How `jcode run` reports its turn and whether it may place its session.
+pub struct RunMessageOptions {
+    pub emit_json: bool,
+    pub emit_ndjson: bool,
+    /// Apply the proposed workspace placement to an unplaced session.
+    pub place: bool,
+}
+
 pub async fn run_single_message_command(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,
     resume_session: Option<&str>,
     agent_selection: Option<&str>,
     message: &str,
-    emit_json: bool,
-    emit_ndjson: bool,
-    place: bool,
+    options: RunMessageOptions,
 ) -> Result<()> {
+    let RunMessageOptions {
+        emit_json,
+        emit_ndjson,
+        place,
+    } = options;
     let provider = if emit_json || emit_ndjson {
         super::provider_init::init_provider_quiet(choice, model).await?
     } else {

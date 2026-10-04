@@ -277,9 +277,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 args.resume.as_deref(),
                 args.agent.as_deref(),
                 &message,
-                json,
-                ndjson,
-                args.place,
+                commands::RunMessageOptions {
+                    emit_json: json,
+                    emit_ndjson: ndjson,
+                    place: args.place,
+                },
             )
             .await?;
         }

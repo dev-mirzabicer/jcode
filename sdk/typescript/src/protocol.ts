@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 13;
+export const API_VERSION_MINOR = 14;
 import type {RuntimeControlRequest, RuntimeControlResponse} from "./runtime-control.js";
 export type * from "./runtime-control.js";
 import type {CloseoutRequest, CloseoutReply} from "./closeout.js";

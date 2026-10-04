@@ -143,10 +143,6 @@ impl App {
         self.force_full_redraw = true;
     }
 
-    pub(super) fn placement_review_visible(&self) -> bool {
-        self.workspace_ui.placement.is_some()
-    }
-
     pub(super) fn handle_placement_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         let Some(review) = &mut self.workspace_ui.placement else {
             return false;
