@@ -14,8 +14,8 @@ real catalog or the user's runtime was touched.
 ## Exercised boundary
 
 Branch `mirza/sp58-c01-wp11-public-contracts` from `7bc478961`. The journey
-passed against an immutable copy of the activated `de10c6fbc` build (SHA-256
-prefix `d981aa4fc0e0bcdc`), and earlier against `e544bf222`. Runs 1 to 6 failed
+passed against the repaired candidate (run 11), the activated `de10c6fbc`
+build (SHA-256 prefix `d981aa4fc0e0bcdc`) and earlier `e544bf222`. Runs 1 to 6 failed
 on journey-script defects (tool-name matching, placement shape, expected member
 total, reading tool results from earlier turns), not product behavior.
 
@@ -62,11 +62,39 @@ pre-existing `session_id='test'` rows in the developer's execution store
 (created before this package). Two further `tool::tests` failures in the
 parallel run pass serially.
 
-## Observations outside this package
+## Adjacent repairs
 
-- Every tool call in the fixture's managed sessions, including a plain `read`,
-  took about 4 s.
-- A subscribe-created Session revived by input after a daemon restart reported
-  `mcp` as removed in its tool set.
+Mirza's review asked about two problems the first journeys exposed. Both
+predate WP-11: an earlier session from WP-10 shows the same `mcp`
+removed/added churn, and the WP-07 use gate is the source of the slow reads.
+WP-11 fixed both, because its agent tool and its tool-prefix evidence depend on
+them:
 
-Neither involves the workspace tool. They are recorded for later owners.
+- **Volume identity.** Every tool use or native write touching a registered
+  root inspected every mounted volume with `diskutil`: about 1.5 s per root,
+  3.6 s per tool call on a machine with 12 mounts. Identity checks now read the
+  kernel UUID (`getattrlist`), which matches `diskutil` on every mount here
+  (`native_kernel_identity_matches_full_inspection_for_every_mount`, plus the
+  opt-in external-volume fixture on `/Volumes/Active`). Measured per-root
+  verification fell to about 1 ms. Journey tool calls fell from about 4 s to
+  0.04–0.12 s. Serial base `workspace::` fell from 7,122 s to 579 s.
+- **Restored primaries keep their MCP tools.** `PrimaryHost::restore` built the
+  Registry without MCP registration, so a reload continuation or detached input
+  sent its first request without `mcp` tools. The tool set then announced them
+  removed, and added again when a client attached. Restore now registers them like
+  launch and new contexts do. Red then green:
+  `restore_primary_preserves_busy_source_and_target_snapshots`. The journey now
+  requires the full tool surface after restart and a single tool-set change at
+  adoption.
+- **Stack headroom.** The first version of that repair held the restored Agent
+  inline across an await. In the `opt-level = 0` selfdev build, that added
+  about 440 KB to each client task's stack and crashed the fixture daemon on
+  attach (runs 9 and 10). The Agent is now boxed across the await. Measured
+  frame totals for the crashing stack:
+  - `de10c6fbc`: 1,790,224 B;
+  - unboxed: 2,229,264 B;
+  - fixed: 1,790,224 B.
+  The pre-existing headroom of about 1.79 MB used out of a 2 MiB worker stack
+  is handed to WP-12.
+
+The journey passed again (run 11) on the repaired build.
