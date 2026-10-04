@@ -1655,3 +1655,56 @@ fn session_location_inspection_requires_its_negotiated_version() {
         );
     }
 }
+
+#[test]
+fn placement_review_requires_its_negotiated_version_and_exact_session() {
+    use jcode_harness_api::PrimaryLocationCommand;
+    for version in [None, Some(1)] {
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = sent.clone();
+        let client = fake_harness_with_capabilities(
+            vec!["primary_control_v1".into()],
+            move |frame, writer| match &frame.request {
+                ApiRequest::PrimaryControlProbe => reply(
+                    frame,
+                    ApiEvent::PrimaryControlCapabilities {
+                        input_version: 1,
+                        location_version: 1,
+                        location_enabled: true,
+                        legacy_adoption_version: Some(1),
+                        context_scope_version: None,
+                        session_inspection_version: None,
+                        session_placement_version: version,
+                    },
+                    writer,
+                ),
+                ApiRequest::PrimaryLocation { .. } => {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    reply(
+                        frame,
+                        ApiEvent::PrimaryLocation {
+                            response: serde_json::from_value(serde_json::json!({"status":"proposal","proposal":{"session":"other","working_dir":"/fixture","catalog_revision":1,"candidates":[],"default":null}})).unwrap(),
+                        },
+                        writer,
+                    )
+                }
+                other => panic!("unexpected {other:?}"),
+            },
+        );
+        let error = client
+            .primary_location(PrimaryLocationCommand::ProposePlacement {
+                session: "wanted".into(),
+            })
+            .unwrap_err();
+        let expected = if version.is_some() {
+            ErrorKind::UnexpectedReply
+        } else {
+            ErrorKind::UnsupportedCapability
+        };
+        assert_eq!(error.kind, expected);
+        assert_eq!(
+            sent.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(version.is_some())
+        );
+    }
+}

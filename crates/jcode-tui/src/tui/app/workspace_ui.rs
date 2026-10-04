@@ -253,6 +253,12 @@ impl App {
             "default": review.and_then(|review| review.proposal.as_ref()).map(|proposal| proposal.default),
             "composer": self.input,
             "resend_pending": self.workspace_ui.resend_after_placement,
+            "user_display_messages": self
+                .display_messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
         })
     }
 

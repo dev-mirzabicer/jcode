@@ -77,3 +77,28 @@ test("session location inspection requires its capability and exact session", as
     assert.equal(locations, version === 1 ? 1 : 0);
   }
 });
+
+test("placement review requires its capability and correlates session and request", async () => {
+  const proposal = {session: "wanted", working_dir: "/fixture/repo", catalog_revision: 3, candidates: [{placement: {kind: "standalone", root: "/fixture/repo"}, root: "/fixture/repo", name: "repo", project: null, broad: false}], default: 0};
+  for (const version of [undefined, 1]) {
+    let locations = 0;
+    await withClient(["primary_control_v1"], (request, send) => {
+      if (request.req === "primary_control_probe") { send({v: 1, reply_to: request.id, ev: "primary_control_capabilities", input_version: 1, location_version: 1, location_enabled: true, legacy_adoption_version: 1, session_placement_version: version}); return; }
+      locations++;
+      if (request.command.action === "propose_placement") { send({v: 1, reply_to: request.id, ev: "primary_location", response: {status: "proposal", proposal: {...proposal, session: request.command.session}}}); return; }
+      send({v: 1, reply_to: request.id, ev: "primary_location", response: {status: "state", record: {operation: "other-request", input: {request: "other-request", session: "wanted", expected_session_revision: 0, expected_catalog_revision: 3, placement: {kind: "standalone", id: "l"}, cwd: "/fixture/repo"}, state: "complete"}}});
+    }, async (client) => {
+      const propose = client.primaryLocation({action: "propose_placement", session: "wanted"});
+      const place = () => client.primaryLocation({action: "place", request: {request: "this-request", session: "wanted", working_dir: "/fixture/repo", expected_catalog_revision: 3, placement: {kind: "standalone", root: "/fixture/repo"}}});
+      if (version === 1) {
+        const response = await propose;
+        assert.equal(response.status, "proposal");
+        await assert.rejects(place, (error: unknown) => error instanceof HarnessError && error.code === "unexpected_reply");
+      } else {
+        await assert.rejects(() => propose, (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+        await assert.rejects(place, (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+      }
+    });
+    assert.equal(locations, version === 1 ? 2 : 0);
+  }
+});

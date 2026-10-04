@@ -2186,3 +2186,35 @@ fn primary_control_capabilities_carry_session_inspection_version() {
         }
     ));
 }
+
+#[test]
+fn placement_review_crosses_the_bridge() {
+    let mut bridge = BridgeState::default();
+    let outbound = bridge.api_request_to_legacy(&json!({"id":71,"req":"primary_control_probe"}));
+    let Outbound::Legacy(wire) = &outbound[0] else {
+        panic!()
+    };
+    let reply = bridge.legacy_event_to_api(&json!({"type":"primary_control_capabilities","id":wire["id"],"input_version":1,"location_version":1,"location_enabled":true,"session_placement_version":1}));
+    assert!(matches!(
+        reply[0].event,
+        ApiEvent::PrimaryControlCapabilities {
+            session_placement_version: Some(1),
+            ..
+        }
+    ));
+
+    let outbound = bridge.api_request_to_legacy(&json!({"id":72,"req":"primary_location","command":{"action":"propose_placement","session":"session_fixture"}}));
+    let Outbound::Legacy(wire) = &outbound[0] else {
+        panic!()
+    };
+    assert_eq!(wire["command"]["action"], "propose_placement");
+    let reply = bridge.legacy_event_to_api(&json!({"type":"primary_location_response","id":wire["id"],"response":{"status":"proposal","proposal":{"session":"session_fixture","working_dir":"/fixture/repo","catalog_revision":3,"candidates":[{"placement":{"kind":"standalone","root":"/fixture/repo"},"root":"/fixture/repo","name":"repo","project":null,"broad":false}],"default":0}}}));
+    let ApiEvent::PrimaryLocation { response } = &reply[0].event else {
+        panic!("{:?}", reply[0].event)
+    };
+    let jcode_harness_api::PrimaryLocationResponse::Proposal { proposal } = response else {
+        panic!("{response:?}")
+    };
+    assert_eq!(proposal.default, Some(0));
+    assert_eq!(proposal.candidates.len(), 1);
+}

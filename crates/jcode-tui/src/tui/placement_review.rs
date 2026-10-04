@@ -17,7 +17,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use std::path::Path;
 
@@ -277,12 +277,14 @@ impl PlacementReview {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let width = area.width.saturating_sub(4).clamp(20, 76);
-        let lines = self.lines(width.saturating_sub(4) as usize);
-        let height = (lines.len() as u16 + 2).min(area.height);
-        if width < 20 || height < 5 {
+        // Below 24 columns the dialog cannot show its choices; the composer
+        // keeps the message and /workspace remains available.
+        if area.width < 24 || area.height < 6 {
             return;
         }
+        let width = area.width.saturating_sub(4).min(76);
+        let lines = self.lines(width.saturating_sub(4) as usize);
+        let height = (lines.len() as u16 + 2).min(area.height);
         let rect = Rect {
             x: area.x + (area.width - width) / 2,
             y: area.y + area.height.saturating_sub(height) / 2,
@@ -307,7 +309,7 @@ impl PlacementReview {
             width: inner.width.saturating_sub(2),
             ..inner
         };
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     fn lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -323,18 +325,26 @@ impl PlacementReview {
             .unwrap_or_default();
         lines.push(Line::from(vec![
             Span::styled("Working directory  ", muted),
-            Span::raw(truncate(&cwd, width.saturating_sub(19))),
+            Span::raw(truncate_start(&cwd, width.saturating_sub(19))),
         ]));
         lines.push(Line::raw(""));
         match &self.stage {
             Stage::Loading => lines.push(Line::styled("Reviewing placements…", muted)),
             Stage::Failed(message) => {
-                lines.push(Line::styled(message.clone(), error));
+                for row in wrap_words(message, width) {
+                    lines.push(Line::styled(row, error));
+                }
                 lines.push(Line::raw(""));
-                lines.push(Line::styled(
-                    "r review again · w open /workspace · Esc close (your message stays)",
-                    muted,
-                ));
+                for row in hints(
+                    &[
+                        "r review again",
+                        "w /workspace",
+                        "Esc close (message stays)",
+                    ],
+                    width,
+                ) {
+                    lines.push(Line::styled(row, muted));
+                }
                 return lines;
             }
             Stage::Choosing | Stage::Placing => {
@@ -354,10 +364,11 @@ impl PlacementReview {
                             style,
                         ),
                     ]));
-                    let mut detail = format!("    {}", candidate_scope(candidate));
-                    if candidate.broad {
-                        detail.push_str(" · broad");
-                    }
+                    let suffix = if candidate.broad { " · broad" } else { "" };
+                    let detail = format!(
+                        "    {}{suffix}",
+                        candidate_scope(candidate, width.saturating_sub(4 + suffix.len()))
+                    );
                     lines.push(Line::styled(
                         truncate(&detail, width),
                         if candidate.broad { warning } else { muted },
@@ -367,20 +378,22 @@ impl PlacementReview {
                 if self.stage == Stage::Placing {
                     lines.push(Line::styled("Placing…", muted));
                 } else if self.broad_armed {
-                    lines.push(Line::styled(
+                    for row in wrap_words(
                         "This gives the session write access to everything under that root. Press Enter again to confirm.",
-                        warning,
-                    ));
+                        width,
+                    ) {
+                        lines.push(Line::styled(row, warning));
+                    }
                 } else {
                     let action = if self.resend {
                         "Enter place and send"
                     } else {
                         "Enter place"
                     };
-                    lines.push(Line::styled(
-                        format!("{action} · ↑↓ choose · w /workspace · Esc cancel"),
-                        muted,
-                    ));
+                    for row in hints(&[action, "↑↓ choose", "w /workspace", "Esc cancel"], width)
+                    {
+                        lines.push(Line::styled(row, muted));
+                    }
                 }
             }
         }
@@ -413,13 +426,68 @@ fn candidate_title(candidate: &PlacementCandidate) -> String {
     }
 }
 
-fn candidate_scope(candidate: &PlacementCandidate) -> String {
+fn candidate_scope(candidate: &PlacementCandidate, width: usize) -> String {
     match &candidate.placement {
         PrimaryPlacement::Existing {
             placement: Placement::Project(_) | Placement::WorkArea(_),
         } => "writes: every root it contains".into(),
-        _ => format!("writes: {}", display_path(&candidate.root)),
+        _ => format!(
+            "writes: {}",
+            truncate_start(&display_path(&candidate.root), width.saturating_sub(8))
+        ),
     }
+}
+
+/// Join hints with " · ", starting a new row when the next would not fit.
+fn hints(parts: &[&str], width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let mut rows: Vec<String> = Vec::new();
+    for part in parts {
+        match rows.last_mut() {
+            Some(row) if row.width() + 3 + part.width() <= width => {
+                row.push_str(" · ");
+                row.push_str(part);
+            }
+            _ => rows.push(truncate(part, width)),
+        }
+    }
+    rows
+}
+
+/// Wrap at spaces into rows of at most `width` cells.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let mut rows: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match rows.last_mut() {
+            Some(row) if row.width() + 1 + word.width() <= width => {
+                row.push(' ');
+                row.push_str(word);
+            }
+            _ => rows.push(truncate(word, width)),
+        }
+    }
+    rows
+}
+
+/// Fit `text` into `width` cells keeping its end, which is the informative
+/// part of a path.
+fn truncate_start(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut used = 1;
+    let mut tail = Vec::new();
+    for c in text.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        used += w;
+        tail.push(c);
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
 }
 
 fn explain(issue: &Issue) -> String {

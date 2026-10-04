@@ -101,6 +101,17 @@ impl PrimaryHost {
         self: &Arc<Self>,
         request: SessionPlacementRequest,
     ) -> Result<LocationChangeRecord> {
+        // A retried request returns its recorded adoption instead of being
+        // reviewed again against a Session it already placed.
+        let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
+        let operation: OperationId = request.request.to_string().parse()?;
+        if let Ok(record) = workspace.inspect_location_change(operation) {
+            ensure!(
+                record.input.session == request.session,
+                "Placement request identity already belongs to another session"
+            );
+            return Ok(record);
+        }
         let permit = crate::runtime_lifecycle::admission::preparation(
             "primary-placement",
             Some(request.session.clone()),

@@ -226,3 +226,40 @@ fn the_dialog_renders_at_supported_sizes() {
         assert!(text.contains("repo"), "{width}x{height}");
     }
 }
+
+#[test]
+fn tiny_terminals_render_nothing_rather_than_overflow() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut review = PlacementReview::open("session_fixture".into(), true);
+    proposed(&mut review, proposal(false, Some(0)));
+    for (width, height) in [(10, 3), (23, 20), (30, 8), (80, 5)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| review.render(frame, frame.area()))
+            .unwrap();
+    }
+}
+
+#[test]
+fn long_paths_keep_their_end_and_hints_fit_the_width() {
+    let path = "/a/very/long/path/that/does/not/fit/into/the/dialog/project-name";
+    let cut = truncate_start(path, 20);
+    assert!(
+        cut.starts_with('…') && cut.ends_with("project-name"),
+        "{cut}"
+    );
+    for row in hints(
+        &[
+            "Enter place and send",
+            "↑↓ choose",
+            "w /workspace",
+            "Esc cancel",
+        ],
+        38,
+    ) {
+        assert!(
+            unicode_width::UnicodeWidthStr::width(row.as_str()) <= 38,
+            "{row}"
+        );
+    }
+}

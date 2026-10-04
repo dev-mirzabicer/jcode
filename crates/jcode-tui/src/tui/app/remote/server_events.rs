@@ -1215,7 +1215,16 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             if crate::workspace::is_placement_required(&message) {
                 // The message is back in the composer; the review sends it
-                // once the session is placed.
+                // once the session is placed. Its optimistic transcript entry
+                // goes, so the resend is not shown twice.
+                if !app.input.is_empty()
+                    && let Some(index) = app
+                        .display_messages
+                        .iter()
+                        .rposition(|shown| shown.role == "user" && shown.content == app.input)
+                {
+                    app.remove_display_message(index);
+                }
                 app.open_placement_review(true);
                 app.set_status_notice("Place this session to send your message");
             } else {
