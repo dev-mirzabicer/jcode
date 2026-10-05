@@ -285,13 +285,16 @@ try:
     wait(lambda: rpc(admin,'primary_input_inspect',session=fresh_id,input=queued['id'])['receipt']['state'] == 'committed', 'accepted input did not recover after the continue decision')
     wait(lambda: any('RECOVERY-QUEUED' in str(m.get('content','')) for m in captured[-1]['messages']), 'recovery did not dispatch the pending input')
     assert rpc(admin,'primary_input',input=queued)['receipt']['state'] == 'committed'
-    # The Session checkpoint records both accepted inputs once committed.
+    # The Session checkpoint records each input once: the two accepted
+    # inputs and the runtime-owned continuation that the decision delivered.
     def persisted_inputs():
         inputs = json.loads((f.home/'sessions'/f'{fresh_id}.json').read_text()).get('primary_inputs') or []
-        return inputs if {entry['id'] for entry in inputs} == {recovery_initial['id'], queued['id']} else None
+        return inputs if len(inputs) == 3 else None
     inputs = wait(persisted_inputs, 'recovered inputs checkpointed once each')
     (f.ROOT/'recovered-primary-inputs.json').write_text(json.dumps(inputs, indent=1))
-    assert len(inputs) == 2, inputs
+    ids = [entry['id'] for entry in inputs]
+    assert len(set(ids)) == 3 and {recovery_initial['id'], queued['id']} <= set(ids), inputs
+    assert not any(entry.get('rolled_back') for entry in inputs), inputs
     assert sum('RECOVERY-QUEUED' in str(message.get('content','')) for message in captured[-1]['messages']) == 1
     assert not failures
     # The selected continuation and the queued input are the only calls after
