@@ -52,19 +52,36 @@ pub fn preview(session: &Session, tools: &mut [ToolDefinition]) -> anyhow::Resul
 
 /// After successful request preflight, persist the exact description already
 /// counted for this request. Returns whether an old session needs continuation reset.
+///
+/// `tools` is the request's provider array. A tool that joined through an
+/// in-message tool-set notice is not in that array; the description the model
+/// was given is the one in the session's tool-set record, so it is taken from
+/// there.
 pub fn commit(session: &mut Session, tools: &[ToolDefinition]) -> anyhow::Result<bool> {
+    let offered: Vec<ToolDefinition> = session
+        .tool_set
+        .as_ref()
+        .map(|record| record.effective())
+        .unwrap_or_default();
+    let find = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .or_else(|| offered.iter().find(|tool| tool.name == name))
+            .cloned()
+    };
     let swarm = (crate::config::config().features.swarm && session.swarm_routing_prompt.is_none())
-        .then(|| tools.iter().find(|tool| tool.name == "swarm"))
+        .then(|| find("swarm"))
         .flatten();
     let delegation = session
         .delegation_guidance
         .is_none()
-        .then(|| tools.iter().find(|tool| tool.name == "subagent"))
+        .then(|| find("subagent"))
         .flatten();
     let workspace = session
         .workspace_guidance
         .is_none()
-        .then(|| tools.iter().find(|tool| tool.name == "workspace"))
+        .then(|| find("workspace"))
         .flatten();
     if swarm.is_none() && delegation.is_none() && workspace.is_none() {
         return Ok(false);
@@ -307,5 +324,50 @@ mod workspace_tests {
                 .workspace_guidance,
             loaded.workspace_guidance
         );
+    }
+
+    #[test]
+    fn workspace_guidance_announced_inside_a_message_freezes_from_the_tool_set_record() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let structural = |description: &str| ToolDefinition {
+            name: "workspace".into(),
+            description: description.into(),
+            input_schema: serde_json::json!({}),
+        };
+        let mut session = Session::create(None, None);
+        // Providers that take tool changes inside a message keep their first
+        // `tools` array; the workspace tool arrives in a persisted notice.
+        let mut record = jcode_session_types::StoredToolSet::new(vec![ToolDefinition {
+            name: "bash".into(),
+            description: "BASH".into(),
+            input_schema: serde_json::json!({}),
+        }]);
+        record
+            .changes
+            .push(jcode_session_types::StoredToolSetChange {
+                change: crate::message::ToolSetChange::Added {
+                    definition: structural("STRUCTURAL\n\nANNOUNCED TEXT"),
+                },
+                schema_changed: false,
+            });
+        session.set_tool_set(record);
+        let provider_array = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "BASH".into(),
+            input_schema: serde_json::json!({}),
+        }];
+        assert!(!commit(&mut session, &provider_array).unwrap());
+        assert_eq!(
+            session.workspace_guidance.as_deref(),
+            Some("STRUCTURAL\n\nANNOUNCED TEXT")
+        );
+        assert_eq!(
+            Session::load(&session.id).unwrap().workspace_guidance,
+            session.workspace_guidance
+        );
+        // Later requests reuse the frozen text, whatever the store now says.
+        let mut later = vec![structural("STRUCTURAL")];
+        preview(&session, &mut later).unwrap();
+        assert_eq!(later[0].description, "STRUCTURAL\n\nANNOUNCED TEXT");
     }
 }
