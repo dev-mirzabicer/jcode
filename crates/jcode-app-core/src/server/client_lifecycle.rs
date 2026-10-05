@@ -987,6 +987,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
     let mut client_selfdev = false;
 
     let client_start = std::time::Instant::now();
+    let mut preparation_stages: Vec<(&'static str, u128)> = Vec::new();
 
     let requested_target = initial_subscribe_target_session(&initial_request);
     let target_available = match requested_target {
@@ -1089,6 +1090,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                         return Ok(());
                     }
                 };
+            preparation_stages.push(("admitted", client_start.elapsed().as_millis()));
             let provider = provider_template.fork_for_new_session();
             let registry = crate::runtime_lifecycle::admission::scope(
                 permit.clone(),
@@ -1099,6 +1101,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 ),
             )
             .await?;
+            preparation_stages.push(("registry", client_start.elapsed().as_millis()));
             let prepared = crate::runtime_lifecycle::admission::scope(
                 permit.clone(),
                 crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
@@ -1136,6 +1139,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     return Ok(());
                 }
             };
+            preparation_stages.push(("agent", client_start.elapsed().as_millis()));
             prepared.set_memory_enabled(crate::config::config().features.memory);
             let id = prepared.session_id().to_string();
             let name = prepared.session_short_name().map(str::to_string);
@@ -1164,8 +1168,10 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 crate::session::remove_unpublished_session(&id)?;
                 return Err(error);
             }
+            preparation_stages.push(("owned", client_start.elapsed().as_millis()));
             let agent = Arc::new(Mutex::new(prepared));
             sessions.write().await.insert(id.clone(), agent.clone());
+            preparation_stages.push(("published", client_start.elapsed().as_millis()));
             (agent, provider, registry, id, name)
         };
     let mut swarm_enabled = crate::config::config().features.swarm;
@@ -1173,9 +1179,14 @@ pub(super) async fn handle_client_with_instruction_repositories(
     const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
     let mut client_primary_startup_activated = true;
     crate::logging::info(&format!(
-        "[TIMING] handle_client prepared primary: existing={}, total={}ms",
+        "[TIMING] handle_client prepared primary: existing={}, total={}ms, stages={}",
         target_available,
-        client_start.elapsed().as_millis()
+        client_start.elapsed().as_millis(),
+        preparation_stages
+            .iter()
+            .map(|(stage, at)| format!("{stage}@{at}ms"))
+            .collect::<Vec<_>>()
+            .join(" ")
     ));
     let connected_at = Instant::now();
     let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
