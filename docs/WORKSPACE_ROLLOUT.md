@@ -35,7 +35,8 @@ control work with the flag on or off.
 Placement keeps the session's working directory. The instructions and Startup
 Context already captured for that directory stay correct, and nothing in the
 conversation is rewritten. Placing appends one location notice that does not
-start a turn.
+start a turn. A session placed before its first request also receives the
+location facts a launched session starts with, inside that notice message.
 
 The runtime proposes placements for the session's working directory:
 

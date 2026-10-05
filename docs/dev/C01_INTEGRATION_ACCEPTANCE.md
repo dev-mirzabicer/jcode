@@ -117,6 +117,16 @@ both repaired:
   - the `propose_placement`/`place` location commands with
     `session_placement_version = 1` (Harness API 1.14) in both SDKs.
 
+The real rollout (below) found two more, also repaired:
+
+- A tool that a Claude session receives inside a tool-set notice never had its
+  managed guidance captured, so the description would have been re-rendered
+  from the live store on each request. The capture now reads the session's
+  tool-set record.
+- A session placed through the first-send review lacked the initial location
+  facts a launched session receives. They now join its one location notice
+  message, and the notice calls the old placement `Unplaced`.
+
 Truthfulness repairs: `WorkspaceProbe` and catalog status report
 `managed_rollout` from the flag, and `jcode runtime service status` reports
 definition currency as unknown unless it compared a plan.
@@ -146,6 +156,30 @@ Mechanism tests: base `workspace::session_placement` (7), TUI
 `placement_review_requires_its_negotiated_version_and_exact_session`,
 TypeScript `placement review requires its capability and correlates session
 and request`.
+
+## Real rollout
+
+Mirza's runtime was moved to managed placement on 2026-10-05:
+
+- **Catalog:** initialized, with backups `pre-organization` and
+  `jcode-project` taken and verified (checksum and SQLite integrity).
+- **Organization:** project `Jcode`, logical repository `jcode` (remote
+  reference `dev-mirzabicer` only), the existing checkout
+  `/Users/mirzabicer/src/jcode` and the directory reference `jcode_program`.
+  Registration changed no files, branches or remotes.
+- **Flag:** `features.managed_primary_launch` turned on; the config change was
+  that one line.
+- **Worker session:** adopted onto the checkout with its cwd moved from home.
+  It received one location notice and one tool-set change adding `workspace`;
+  its native write to `jcode_program` was refused, its access proposal was
+  approved in `/workspace` and the write then succeeded.
+- **New session:** a new TUI session in the checkout was placed through the
+  first-send review and answered once.
+- **Reload:** a real reload caused no tool-set churn.
+- **Unchanged:** Startup Context and instruction-store state files, compared
+  before and after each stage.
+- **Tool latency:** discovery tool calls on the real catalog took 0.24–0.36 s
+  end to end.
 
 ## Limits
 

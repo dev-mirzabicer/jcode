@@ -80,7 +80,9 @@ The approved framework-stage operating text is the managed tool-guidance
 resource `tools/workspace.md` (instruction seed 31), appended to the tool
 description. It is captured on the Session after the first successful request
 preflight and reused unchanged across reload, restart, resume and split, like
-the delegation guidance. Final prose belongs to SP-58-C05.
+the delegation guidance. When the provider receives the tool inside a tool-set
+notice (Claude), the captured text is the one that notice carried. Final prose
+belongs to SP-58-C05.
 
 The tool's arrival is one recorded tool-set change. Later placement or grant
 changes append location and write-access notices; they never rebuild the tool
@@ -88,8 +90,10 @@ definition.
 
 A placed session's initial Session Context block also carries compact location
 facts: placement, home chain, placement root, writable-root counts, the first
-members of a project or work area, and pending proposals. Unplaced sessions
-are unchanged.
+members of a project or work area, and pending proposals. A session placed
+before its first request (the [placement review](WORKSPACE_ROLLOUT.md)) receives
+the same facts in its one location notice message. Unplaced sessions are
+unchanged.
 
 ## Limits
 
