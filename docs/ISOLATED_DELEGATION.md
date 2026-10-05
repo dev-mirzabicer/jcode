@@ -76,7 +76,7 @@ staleness observations rather than overwrite it.
 ## Permissions and MCPs
 
 `read_only` permits known native file mutations only inside the child's dedicated
-artifact directory. `write`, `edit`, `multiedit`, unified/Codex patch operations
+artifact directory and the [agent scratch directory](dev/NATIVE_WRITE_SCOPE.md#agent-scratch-directory). `write`, `edit`, `multiedit`, unified/Codex patch operations
 and their aliases validate destinations before effects. Multi-target patches and
 moves check every destination. Symlink/traversal attempts cannot silently rebind
 artifact permission outside its stored directory.

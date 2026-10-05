@@ -79,13 +79,30 @@ Inspection does not recursively crawl a project to discover every possible root.
 
 Private harness control state cannot be edited through managed generic file tools.
 Scratch exceptions cannot be redirected into control state by a directory alias.
+
+## Agent scratch directory
+
+Every agent may write the agent scratch directory with native file tools, whatever
+its placement and permission: placed and unplaced primaries, and read-write and
+read-only isolated children. It is `JCODE_SCRATCH_DIR` when set, otherwise
+`<jcode home>/scratch`, the same directory commands receive as `TMPDIR` and
+`JCODE_SCRATCH_DIR`. A mutation confined to it needs no placement, grant or
+parent scope; one patch may also span scratch and the session's own roots.
+
+- Only a dedicated real directory qualifies: not a symlink, the filesystem root,
+  the home directory, or a directory that contains Jcode's home, durable state or
+  runtime directory. Otherwise no scratch exemption applies.
+- The directory itself is not a destination, symlinks and `..` cannot leave it,
+  and harness state beside it stays protected.
+- A registered location nested inside scratch keeps its own catalog rules.
 Specialized state, instruction, runtime and capture services retain their own
 existing authority instead of borrowing ambient file scope.
 
 ## Isolated and external boundaries
 
 An isolated child retains its originating turn's stricter native permission and
-path policy. Its own artifact directory remains available under that owner.
+path policy. Its own artifact directory and the agent scratch directory remain
+available under that owner.
 Ordinary read-write task destinations also require the original parent's current
 workspace scope. A missing parent cannot confer unrestricted task access.
 Changing the child's cwd does not create a grant. Original-parent control and MCP

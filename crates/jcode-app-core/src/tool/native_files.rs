@@ -54,7 +54,20 @@ impl NativeFilePolicy for BoundPolicy {
             }
             resolved.push((path.clone(), resolve_target(path)?));
         }
-        let mut artifacts_only = false;
+        // The agent scratch directory is writable for every agent, whatever its
+        // placement or child permission. A mutation confined to it (or to a
+        // child's artifacts) needs no workspace placement or parent scope.
+        let scratch = crate::storage::verified_agent_scratch_root();
+        let in_scratch = |p: &Path| {
+            scratch
+                .as_ref()
+                .is_some_and(|root| p.starts_with(root) && p != root)
+        };
+        let removal_entries = removals
+            .iter()
+            .map(|path| resolve_removal_entry(path))
+            .collect::<Result<Vec<_>>>()?;
+        let harness_only;
         let parent = if let Some(child) = &self.child {
             let identity = &session
                 .isolated_child
@@ -66,10 +79,14 @@ impl NativeFilePolicy for BoundPolicy {
                     && identity.artifact_dir == child.artifacts,
                 "Isolated child identity changed"
             );
-            artifacts_only = resolved
+            harness_only = resolved
                 .iter()
-                .all(|(_, p)| p.starts_with(&child.artifacts) && p != &child.artifacts);
-            if artifacts_only {
+                .map(|(_, p)| p)
+                .chain(&removal_entries)
+                .all(|p| {
+                    (p.starts_with(&child.artifacts) && p != &child.artifacts) || in_scratch(p)
+                });
+            if harness_only {
                 None
             } else {
                 Some(self.load(&child.original_parent)?)
@@ -79,14 +96,19 @@ impl NativeFilePolicy for BoundPolicy {
                 session.isolated_child.is_none(),
                 "Isolated mutations require the originating Registry permission snapshot"
             );
+            harness_only = resolved
+                .iter()
+                .map(|(_, p)| p)
+                .chain(&removal_entries)
+                .all(|p| in_scratch(p));
             None
         };
         let principal = parent.as_ref().unwrap_or(&session);
-        if !artifacts_only {
+        if !harness_only {
             principal.validate_primary_publication(&WorkspaceService::new(&self.durable))?;
         }
         let managed = principal.location.is_some();
-        if !artifacts_only && !managed {
+        if !harness_only && !managed {
             ensure!(
                 principal.primary_creation.is_none(),
                 "Managed primary binding is missing; restore its Session state"
@@ -94,7 +116,7 @@ impl NativeFilePolicy for BoundPolicy {
             WorkspaceService::new(&self.durable).require_legacy_scope_absent(&principal.id)?;
         }
         ensure!(
-            artifacts_only || managed || !crate::config::config().features.managed_primary_launch,
+            harness_only || managed || !crate::config::config().features.managed_primary_launch,
             "Legacy Session needs reviewed placement before native mutation; open workspace management"
         );
         let protection = if managed || self.child.is_some() {
@@ -102,9 +124,6 @@ impl NativeFilePolicy for BoundPolicy {
             if let Some(runtime) = &self.runtime {
                 roots.push(resolve_target(runtime)?);
             }
-            let expected_scratch = resolve_target(&self.state)?.join("scratch");
-            let scratch = (resolve_target(&expected_scratch)? == expected_scratch)
-                .then_some(expected_scratch);
             let artifacts = self.child.as_ref().map(|child| child.artifacts.clone());
             let protection = Protection {
                 roots,
@@ -127,7 +146,7 @@ impl NativeFilePolicy for BoundPolicy {
         for path in removals {
             protect_shared_control(&resolve_removal_entry(path)?)?;
         }
-        let files: Box<dyn NativeFilePermit> = if managed && !artifacts_only {
+        let files: Box<dyn NativeFilePermit> = if managed && !harness_only {
             let workspace = WorkspaceService::new(&self.durable);
             let permit = if self.child.is_some() {
                 workspace.acquire_child_native_mutation(principal, &session, plan)?

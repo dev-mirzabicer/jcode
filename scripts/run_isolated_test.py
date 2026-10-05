@@ -42,7 +42,7 @@ def main():
     # A nested fixture must opt into its own endpoints inside this invocation.
     for key in ("JCODE_SOCKET", "JCODE_DEBUG_SOCKET", "JCODE_API_SOCKET", "JCODE_REPO_DIR", "JCODE_RUNTIME_SUPERVISED",
                 "JCODE_SESSION_ID", "JCODE_RUNTIME_PROVIDER", "JCODE_ACTIVE_PROVIDER",
-                "JCODE_RUST_ACTION_LOG_PATH", "JCODE_CLIENT_SELFDEV"):
+                "JCODE_RUST_ACTION_LOG_PATH", "JCODE_CLIENT_SELFDEV", "JCODE_SCRATCH_DIR"):
         env.pop(key, None)
     print(f"test state: {root}", file=sys.stderr, flush=True)
     result = subprocess.run(command, env=env)

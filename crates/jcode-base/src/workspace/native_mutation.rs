@@ -99,6 +99,13 @@ impl RootGuard {
     }
 }
 
+/// The root a native mutation destination is admitted under.
+enum HarnessDestination {
+    Catalog(LocationId),
+    Artifacts,
+    Scratch,
+}
+
 impl WorkspaceService {
     pub fn acquire_native_mutation(
         &self,
@@ -174,17 +181,20 @@ impl WorkspaceService {
         }
         let mut destination_roots = Vec::new();
         self.reject_closeout_control_paths(&transaction, None, &scope_paths)?;
+        // Every agent may write the agent scratch directory, whatever its
+        // placement. A registered root nested inside it keeps its own rules.
+        let scratch = crate::storage::verified_agent_scratch_root();
         for target in scope_paths {
             if artifacts
                 .as_ref()
                 .is_some_and(|root| target.starts_with(root) && target != *root)
             {
-                destination_roots.push((target, None));
+                destination_roots.push((target, HarnessDestination::Artifacts));
                 continue;
             }
             // Catalog boundaries include inaccessible/closed roots. A parent prefix
             // must never bypass a deeper independent registered root.
-            let root = all_roots
+            let catalog = all_roots
                 .iter()
                 .filter(|root| target.starts_with(&root.observed_path))
                 .max_by_key(|root| {
@@ -192,13 +202,21 @@ impl WorkspaceService {
                         root.observed_path.components().count(),
                         !root.lifecycle.is_historical() && !root.retired,
                     )
-                })
-                .with_context(|| {
-                    format!(
-                        "PermissionRequired: no registered writable root for {}",
-                        target.display()
-                    )
-                })?;
+                });
+            if let Some(scratch) = &scratch
+                && target.starts_with(scratch)
+                && target != *scratch
+                && catalog.is_none_or(|root| !root.observed_path.starts_with(scratch))
+            {
+                destination_roots.push((target, HarnessDestination::Scratch));
+                continue;
+            }
+            let root = catalog.with_context(|| {
+                format!(
+                    "PermissionRequired: no registered writable root for {}",
+                    target.display()
+                )
+            })?;
             ensure!(
                 scope
                     .roots
@@ -212,7 +230,7 @@ impl WorkspaceService {
             if let std::collections::btree_map::Entry::Vacant(entry) = selected.entry(root.id) {
                 entry.insert((root.clone(), self.verify_writable_root(&transaction, root)?));
             }
-            destination_roots.push((target, Some(root.id)));
+            destination_roots.push((target, HarnessDestination::Catalog(root.id)));
         }
         transaction.commit()?;
         let mut roots = Vec::new();
@@ -234,23 +252,39 @@ impl WorkspaceService {
             guard.verify()?;
             roots.push(guard);
         }
-        let artifact_index = if let Some(path) = artifacts {
+        let mut harness_root = |path: PathBuf| -> anyhow::Result<usize> {
             let index = roots.len();
             roots.push(RootGuard {
                 directory: VerifiedDirectory::open(path.clone())?,
                 facts: resolve_project(&path)?,
                 path,
             });
-            Some(index)
-        } else {
-            None
+            Ok(index)
+        };
+        let artifact_index = artifacts.map(&mut harness_root).transpose()?;
+        let scratch_index = match scratch {
+            Some(path)
+                if destination_roots
+                    .iter()
+                    .any(|(_, root)| matches!(root, HarnessDestination::Scratch)) =>
+            {
+                Some(harness_root(path)?)
+            }
+            _ => None,
         };
         let destinations = destination_roots
             .into_iter()
-            .map(|(path, id)| {
-                let index = match id {
-                    Some(id) => *indexes.get(&id).context("Missing admitted root")?,
-                    None => artifact_index.context("Missing child artifact ownership")?,
+            .map(|(path, root)| {
+                let index = match root {
+                    HarnessDestination::Catalog(id) => {
+                        *indexes.get(&id).context("Missing admitted root")?
+                    }
+                    HarnessDestination::Artifacts => {
+                        artifact_index.context("Missing child artifact ownership")?
+                    }
+                    HarnessDestination::Scratch => {
+                        scratch_index.context("Missing agent scratch root")?
+                    }
                 };
                 Ok((path.clone(), index))
             })

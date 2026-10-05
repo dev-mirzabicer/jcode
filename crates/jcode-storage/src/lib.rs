@@ -156,6 +156,60 @@ pub fn jcode_dir() -> Result<PathBuf> {
     Ok(home.join(".jcode"))
 }
 
+/// The agent scratch directory: temporary files any agent may write, whatever
+/// its workspace placement or child permission. `JCODE_SCRATCH_DIR` overrides
+/// `<jcode home>/scratch`. Commands receive it as `TMPDIR` and
+/// `JCODE_SCRATCH_DIR`.
+pub fn agent_scratch_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("JCODE_SCRATCH_DIR").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    Ok(jcode_dir()?.join("scratch"))
+}
+
+/// The agent scratch directory as native write policy exempts it: created if
+/// needed and canonical. `None` unless it is a dedicated real directory. A
+/// symlink, the filesystem root, the home directory, or a directory containing
+/// Jcode's own state would turn the exemption into broad write access, so they
+/// are refused.
+pub fn verified_agent_scratch_root() -> Option<PathBuf> {
+    let dir = agent_scratch_dir().ok()?;
+    ensure_dir(&dir).ok()?;
+    if std::fs::symlink_metadata(&dir)
+        .ok()?
+        .file_type()
+        .is_symlink()
+    {
+        return None;
+    }
+    let root = dir.canonicalize().ok()?;
+    if !root.is_dir() {
+        return None;
+    }
+    let canonical = |path: PathBuf| path.canonicalize().unwrap_or(path);
+    let mut protected = vec![canonical(durable_state_dir())];
+    if let Ok(home) = jcode_dir() {
+        protected.push(canonical(home));
+    }
+    if let Some(runtime) = std::env::var_os("JCODE_RUNTIME_DIR") {
+        protected.push(canonical(PathBuf::from(runtime)));
+    }
+    scratch_root_is_dedicated(
+        &root,
+        dirs::home_dir().map(canonical).as_deref(),
+        &protected,
+    )
+    .then_some(root)
+}
+
+/// A scratch root may not be the filesystem root, the home directory, or an
+/// ancestor of (or equal to) any protected state directory.
+fn scratch_root_is_dedicated(root: &Path, home: Option<&Path>, protected: &[PathBuf]) -> bool {
+    root.parent().is_some()
+        && home != Some(root)
+        && !protected.iter().any(|state| state.starts_with(root))
+}
+
 pub fn logs_dir() -> Result<PathBuf> {
     Ok(jcode_dir()?.join("logs"))
 }
@@ -766,5 +820,39 @@ mod env_file_tests {
             std::fs::read_to_string(&path).expect("unchanged env"),
             "SAFE_KEY=safe-value\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_scratch_tests {
+    use super::scratch_root_is_dedicated;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn scratch_root_must_be_a_dedicated_directory() {
+        let state = [PathBuf::from("/u/.jcode"), PathBuf::from("/u/.jcode/state")];
+        let home = Some(Path::new("/u"));
+        assert!(scratch_root_is_dedicated(
+            Path::new("/u/.jcode/scratch"),
+            home,
+            &state
+        ));
+        assert!(scratch_root_is_dedicated(
+            Path::new("/elsewhere/scratch"),
+            home,
+            &state
+        ));
+        assert!(!scratch_root_is_dedicated(Path::new("/"), home, &state));
+        assert!(!scratch_root_is_dedicated(Path::new("/u"), home, &state));
+        assert!(!scratch_root_is_dedicated(
+            Path::new("/u/.jcode"),
+            home,
+            &state
+        ));
+        assert!(!scratch_root_is_dedicated(
+            Path::new("/u/.jcode/state"),
+            home,
+            &state
+        ));
     }
 }

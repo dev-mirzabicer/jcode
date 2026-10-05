@@ -38,6 +38,9 @@ impl ScopeFixture {
             std::fs::create_dir_all(temporary.path().join(subdir)).unwrap();
             crate::env::set_var(key, temporary.path().join(subdir));
         }
+        // The agent scratch directory follows the private Jcode home.
+        previous.push(("JCODE_SCRATCH_DIR", std::env::var_os("JCODE_SCRATCH_DIR")));
+        crate::env::remove_var("JCODE_SCRATCH_DIR");
         crate::config::invalidate_config_cache();
         let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
         workspace.initialize(RequestId::new()).unwrap();
@@ -373,6 +376,11 @@ async fn native_scope_broad_roots_do_not_authorize_control_state_or_unknown_sess
             .is_err()
     );
     let scratch = crate::storage::jcode_dir().unwrap().join("scratch");
+    // Native admission creates the empty scratch directory; replace it with an
+    // alias of harness state, which must never be treated as scratch.
+    if scratch.is_dir() {
+        std::fs::remove_dir(&scratch).unwrap();
+    }
     std::os::unix::fs::symlink(control.parent().unwrap(), &scratch).unwrap();
     let alias = scratch.join(control.file_name().unwrap());
     assert!(
@@ -598,6 +606,22 @@ async fn native_scope_child_permissions_remain_frozen_but_parent_scope_is_live()
             )
             .await
             .is_err()
+    );
+    // Read-only children still write the agent scratch directory.
+    let child_scratch = crate::storage::verified_agent_scratch_root()
+        .unwrap()
+        .join("child-notes.md");
+    registry
+        .execute(
+            "write",
+            json!({"file_path":child_scratch,"content":"child scratch"}),
+            context(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&child_scratch).unwrap(),
+        "child scratch"
     );
     child
         .stage_child_settings(Some(Permission::ReadWrite), None)
@@ -1216,4 +1240,106 @@ async fn workspace_tool_is_exposed_only_to_placed_primary_sessions() {
     assert!(!unplaced.iter().any(|tool| tool.name == "workspace"));
     assert_eq!(unplaced.len() + 1, all.len());
     assert!(crate::tool::child_policy::ADMIN_TOOLS.contains(&"workspace"));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_scope_agent_scratch_is_writable_whatever_the_placement() {
+    let _guard = crate::storage::lock_test_env();
+    let f = ScopeFixture::new();
+    let scratch = crate::storage::verified_agent_scratch_root().unwrap();
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    // A placed session writes scratch without a grant, but not another root.
+    let note = scratch.join("placed/note.md");
+    write::WriteTool
+        .execute(json!({"file_path":note,"content":"placed"}), f.ctx())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), "placed");
+    assert!(
+        write::WriteTool
+            .execute(
+                json!({"file_path":f.b.join("denied"),"content":"no grant"}),
+                f.ctx()
+            )
+            .await
+            .is_err()
+    );
+    // One patch may span its own root and scratch; a foreign root still
+    // fails the whole patch before any effect.
+    let own = f.a.join("own.txt");
+    let mixed = format!(
+        "*** Begin Patch\n*** Add File: {}\n+own\n*** Add File: {}\n+scratch\n*** End Patch\n",
+        own.display(),
+        scratch.join("mixed.txt").display()
+    );
+    assert!(
+        !registry
+            .execute("apply_patch", json!({"patch_text":mixed}), f.ctx())
+            .await
+            .unwrap()
+            .is_error
+    );
+    assert_eq!(std::fs::read_to_string(&own).unwrap(), "own\n");
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("mixed.txt")).unwrap(),
+        "scratch\n"
+    );
+    let foreign = format!(
+        "*** Begin Patch\n*** Add File: {}\n+scratch\n*** Add File: {}\n+foreign\n*** End Patch\n",
+        scratch.join("foreign-scratch.txt").display(),
+        f.b.join("foreign.txt").display()
+    );
+    assert!(
+        registry
+            .execute("apply_patch", json!({"patch_text":foreign}), f.ctx())
+            .await
+            .is_err()
+    );
+    assert!(!scratch.join("foreign-scratch.txt").exists() && !f.b.join("foreign.txt").exists());
+    // Harness state beside scratch stays closed.
+    assert!(
+        write::WriteTool
+            .execute(
+                json!({"file_path":scratch.join("../config.toml"),"content":"forged"}),
+                f.ctx()
+            )
+            .await
+            .is_err()
+    );
+    // An unplaced session under managed rollout writes scratch, nothing else.
+    std::fs::write(
+        crate::config::Config::path().unwrap(),
+        "[features]\nmanaged_primary_launch = true\n",
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+    let mut legacy = Session::create_with_id(
+        format!("session_unplaced_scratch_{}", RequestId::new()),
+        None,
+        None,
+    );
+    legacy.working_dir = Some(f.a.to_string_lossy().into());
+    legacy.save().unwrap();
+    let mut ctx = f.ctx();
+    ctx.session_id = legacy.id.clone();
+    let unplaced = scratch.join("unplaced.md");
+    write::WriteTool
+        .execute(
+            json!({"file_path":unplaced,"content":"unplaced"}),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&unplaced).unwrap(), "unplaced");
+    assert!(
+        write::WriteTool
+            .execute(
+                json!({"file_path":f.a.join("unplaced-root"),"content":"needs placement"}),
+                ctx
+            )
+            .await
+            .is_err()
+    );
+    assert!(!f.a.join("unplaced-root").exists());
 }

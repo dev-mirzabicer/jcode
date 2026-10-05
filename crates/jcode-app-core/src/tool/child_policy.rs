@@ -11,6 +11,8 @@ pub(crate) struct ChildToolPolicy {
     permission: Permission,
     pub(super) artifacts: PathBuf,
     state_root: PathBuf,
+    /// The verified agent scratch directory, writable whatever the permission.
+    pub(super) scratch: Option<PathBuf>,
 }
 
 pub(crate) const ADMIN_TOOLS: &[&str] = &[
@@ -56,6 +58,7 @@ pub(crate) fn bind(session: &crate::session::Session) -> Result<Option<ChildTool
         permission: child.permission,
         artifacts,
         state_root,
+        scratch: crate::storage::verified_agent_scratch_root(),
     };
     policy.child = Some(bound.clone());
     policy
@@ -171,6 +174,13 @@ pub(crate) fn authorize_task_control(
 }
 
 impl ChildToolPolicy {
+    /// Inside the agent scratch directory (not the directory itself).
+    pub(super) fn in_scratch(&self, resolved: &Path) -> bool {
+        self.scratch
+            .as_ref()
+            .is_some_and(|root| resolved.starts_with(root) && resolved != root)
+    }
+
     pub(super) fn check_path(&self, path: &Path) -> Result<()> {
         ensure!(
             path.is_absolute(),
@@ -212,15 +222,14 @@ impl ChildToolPolicy {
             resolved.push(component);
         }
         let artifact = resolved.starts_with(&self.artifacts) && resolved != self.artifacts;
+        let scratch = self.in_scratch(&resolved);
         ensure!(
-            self.permission == Permission::ReadWrite || artifact,
-            "Read-only child mutations are restricted to {}",
+            self.permission == Permission::ReadWrite || artifact || scratch,
+            "Read-only child mutations are restricted to {} and the agent scratch directory",
             self.artifacts.display()
         );
         ensure!(
-            !resolved.starts_with(&self.state_root)
-                || resolved.starts_with(self.state_root.join("scratch"))
-                || artifact,
+            !resolved.starts_with(&self.state_root) || scratch || artifact,
             "Child cannot modify harness state, configuration or model policy. Use its artifact directory or ask the parent."
         );
         Ok(())
@@ -243,6 +252,7 @@ mod tests {
             permission: Permission::ReadOnly,
             artifacts: artifacts.canonicalize().unwrap(),
             state_root: state.canonicalize().unwrap(),
+            scratch: None,
         };
         assert!(policy.check_path(&artifacts.join("nested/new.md")).is_ok());
         assert!(policy.check_path(&temp.path().join("project.md")).is_err());
@@ -259,5 +269,34 @@ mod tests {
         };
         assert!(writable.check_path(&temp.path().join("project.md")).is_ok());
         assert!(writable.check_path(&state.join("config.toml")).is_err());
+    }
+
+    #[test]
+    fn read_only_children_write_the_agent_scratch_directory_and_nothing_else_new() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let artifacts = state.join("artifacts/child");
+        let scratch = state.join("scratch");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        let policy = ChildToolPolicy {
+            original_parent: "parent_fixture".into(),
+            session_id: "fixture".into(),
+            permission: Permission::ReadOnly,
+            artifacts: artifacts.canonicalize().unwrap(),
+            state_root: state.canonicalize().unwrap(),
+            scratch: Some(scratch.canonicalize().unwrap()),
+        };
+        assert!(policy.check_path(&scratch.join("notes/probe.py")).is_ok());
+        // The directory itself, other harness state and the project stay closed.
+        assert!(policy.check_path(&scratch).is_err());
+        assert!(policy.check_path(&state.join("config.toml")).is_err());
+        assert!(policy.check_path(&temp.path().join("project.md")).is_err());
+        assert!(policy.check_path(&scratch.join("../config.toml")).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(temp.path(), scratch.join("escape")).unwrap();
+            assert!(policy.check_path(&scratch.join("escape/new.md")).is_err());
+        }
     }
 }

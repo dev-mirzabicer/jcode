@@ -504,14 +504,7 @@ async fn handle_background_output_line(
 
 #[cfg(not(windows))]
 pub(crate) fn tool_scratch_dir() -> Option<std::path::PathBuf> {
-    let dir = std::env::var_os("JCODE_SCRATCH_DIR")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            crate::storage::jcode_dir()
-                .ok()
-                .map(|dir| dir.join("scratch"))
-        })?;
+    let dir = crate::storage::agent_scratch_dir().ok()?;
     crate::storage::ensure_dir(&dir).ok()?;
     Some(dir)
 }
