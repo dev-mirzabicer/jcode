@@ -117,7 +117,7 @@ both repaired:
   - the `propose_placement`/`place` location commands with
     `session_placement_version = 1` (Harness API 1.14) in both SDKs.
 
-The real rollout (below) found two more, also repaired:
+The real rollout (below) found three more, also repaired:
 
 - A tool that a Claude session receives inside a tool-set notice never had its
   managed guidance captured, so the description would have been re-rendered
@@ -126,6 +126,13 @@ The real rollout (below) found two more, also repaired:
 - A session placed through the first-send review lacked the initial location
   facts a launched session receives. They now join its one location notice
   message, and the notice calls the old placement `Unplaced`.
+- Once placed, an agent could no longer write the agent scratch directory with
+  native file tools, and read-only children never could. Every agent may now
+  write it whatever its placement or permission
+  ([agent scratch directory](NATIVE_WRITE_SCOPE.md#agent-scratch-directory));
+  `native_scope_agent_scratch_is_writable_whatever_the_placement` and the child
+  permission test cover placed, unplaced, mixed-patch, foreign-root and
+  read-only-child cases.
 
 Truthfulness repairs: `WorkspaceProbe` and catalog status report
 `managed_rollout` from the flag, and `jcode runtime service status` reports
@@ -181,6 +188,11 @@ Mirza's runtime was moved to managed placement on 2026-10-05:
 - **Tool latency:** discovery tool calls on the real catalog took 0.24–0.36 s
   end to end.
 
+Unrelated performance and log findings from the rollout (first-session
+preparation time, fresh-session history retries, completion retries for missing
+sessions, a crashed empty session per self-dev build) predate WP-12 and are
+recorded as program issues for later sessions.
+
 ## Limits
 
 - Native acceptance is macOS arm64. Same-user trusted clients are not
@@ -188,6 +200,12 @@ Mirza's runtime was moved to managed placement on 2026-10-05:
 - Real-volume disappearance, power loss and hostile same-user writers are
   represented by fault injection and fixture volumes, not real events.
 - Catalog backups hold metadata only, not checkout files or transcripts.
+- Failures that reproduce on the accepted `7eb60ad47` test binaries and are
+  unchanged here: two disabled-Swarm routing tests in
+  `tool::instruction_guidance`, `tool::bash`'s
+  `bash_holds_a_risky_delete_until_justified_then_runs_it`, and two
+  `cli::tui_launch` tests that compare `/tmp` with its `/private/tmp` alias under
+  the isolated test runner.
 - C04 owns the final command-center visuals and old-picker retirement. C05
   owns the final closeout skill and agent guidance. C01's agent-facing text
   is the approved framework-stage `tools/workspace.md` and notice templates.
