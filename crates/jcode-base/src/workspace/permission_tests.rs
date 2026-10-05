@@ -758,6 +758,28 @@ fn legacy_adoption_checkpoints_one_notice_without_rewriting_history_or_frozen_st
         serde_json::to_value(&after.messages[..before.messages.len()]).unwrap(),
         serde_json::to_value(&before.messages).unwrap()
     );
+    // Never dispatched: the one appended message also carries the location
+    // facts a launched session starts with.
+    let texts: Vec<&str> = after
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            crate::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    // This fixture's catalog is not at the durable state root, so the block
+    // reports the facts unavailable; the native placement journey checks the
+    // facts themselves.
+    assert!(
+        texts[1].starts_with("<system-reminder>\nWorkspace "),
+        "{}",
+        texts[1]
+    );
     assert_eq!(after.system_prompt, before.system_prompt);
     assert_eq!(after.active_skill, before.active_skill);
     assert_eq!(after.startup_context, before.startup_context);

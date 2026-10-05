@@ -260,7 +260,7 @@ impl Agent {
             };
             let old_placement = current
                 .map(|location| format!("{:?}", location.placement))
-                .unwrap_or_else(|| "Legacy (unbound)".into());
+                .unwrap_or_else(|| "Unplaced".into());
             let new_placement = format!("{:?}", prepared.location.placement);
             let old_cwd = self
                 .session

@@ -1228,7 +1228,22 @@ impl Session {
                 "Legacy cwd must remain historical"
             );
         }
-        self.stage_bound_location(location, notice)
+        let mut candidate = self.stage_bound_location(location, notice)?;
+        // Placed before its first provider request (the first-send placement
+        // review): the session never received the workspace location facts a
+        // launched session starts with. They join the notice message, so
+        // history stays append-only and the change remains one message.
+        if candidate.first_provider_dispatch_at().is_none()
+            && let Some(facts) = candidate.workspace_location_facts()
+            && let Some(notice) = candidate.messages.last_mut()
+        {
+            notice.content.push(ContentBlock::Text {
+                text: format!("<system-reminder>\n{}\n</system-reminder>", facts.trim()),
+                cache_control: None,
+            });
+            candidate.mark_messages_full_dirty();
+        }
+        Ok(candidate)
     }
 
     fn stage_bound_location(
@@ -2492,18 +2507,26 @@ impl Session {
     fn initial_session_context_text(&self) -> String {
         let mut context =
             crate::prompt::build_session_context(self.working_dir.as_deref().map(Path::new));
-        if self.location.is_some() && self.isolated_child.is_none() {
-            let workspace =
-                crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+        if let Some(facts) = self.workspace_location_facts() {
             context.push('\n');
-            match workspace.location_context(self) {
-                Ok(facts) => context.push_str(&crate::workspace::location_context_text(&facts)),
-                Err(issue) => context.push_str(&format!(
-                    "Workspace facts are unavailable ({issue}). Use the workspace tool to inspect the current placement."
-                )),
-            }
+            context.push_str(&facts);
         }
         context
+    }
+
+    /// Compact workspace location facts for a placed primary.
+    fn workspace_location_facts(&self) -> Option<String> {
+        if self.location.is_none() || self.isolated_child.is_some() {
+            return None;
+        }
+        let workspace =
+            crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir());
+        Some(match workspace.location_context(self) {
+            Ok(facts) => crate::workspace::location_context_text(&facts),
+            Err(issue) => format!(
+                "Workspace facts are unavailable ({issue}). Use the workspace tool to inspect the current placement."
+            ),
+        })
     }
 
     /// Append the dynamic session facts after already-installed stable startup messages.

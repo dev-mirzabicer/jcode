@@ -237,6 +237,10 @@ try:
     ran = message('FIRST PROMPT')
     assert ran['type'] == 'done', ran
     assert len(posts) == 1 and 'FIRST PROMPT' in posts[0]
+    # Placed before its first request, the session starts with the same
+    # location facts as a launched one, plus the one location notice.
+    assert 'Workspace placement:' in posts[0] and 'Placement root:' in posts[0], posts[0][-3000:]
+    assert posts[0].count('Session location changed') == 1 and 'Placement: Unplaced ->' in posts[0]
     assert history(s1).count('FIRST PROMPT') >= 1
 
     step('4: a second session in the same directory reuses the location')
