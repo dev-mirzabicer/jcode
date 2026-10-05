@@ -30,13 +30,17 @@ removed.
 | `verify_native_write_scope.py` | R09, R15–R20 | Native destinations, grants, carry, SDK Clear |
 | `test_workspace_checkouts.py`, `test_workspace_clone_cancel.py`, `test_workspace_git_auth.py` | R21–R24 | Local/remote clones, cancel, credential helpers, submodule/LFS trust |
 | `test_workspace_closeout.py` | R25–R28 | Bridge and both SDKs; needs `JCODE_WP07_BRIDGE`, `JCODE_WP07_RUST_PROBE` |
-| `test_workspace_closeout_retention.py` | R29 | Needs `JCODE_WP07_SESSION_PROBE`; keep the artifact path short (Unix socket length) |
+| `test_workspace_closeout_retention.py` | R29 | Needs `JCODE_WP07_SESSION_PROBE` |
 | `test_runtime_cli.py` (`--sdk-bridge`, `--sdk-rust-probe`), `test_runtime_work.py` (`JCODE_WP08_PHYSICAL_TUI=1 JCODE_WP08_NAMESPACES=1`) | R30, R31 | Reviewed shutdown, survival, namespaces |
 | `test_runtime_supervision.py` | R32–R35 | Reload/restart continuation, crash recovery, isolated LaunchAgent, power |
 | `verify_workspace_manager_tui.py` | R36, R37 | Physical-input `/workspace` and `/runtime` journey |
 | `verify_workspace_contracts.py` | R38 | Harness/SDK contracts, agent `workspace` tool |
 | `verify_session_placement.py` | R07, R09, R13, R40 | Rollout: refusal before acceptance, propose/place, `run --place`, TUI placement review |
 | `verify_c01_combined.py` | J01 | Two repositories, directory, work area, shared clone, project cwd, standalone, archive |
+
+Every script places its daemon socket under the artifact directory, so keep
+that path short: macOS limits Unix socket paths to 104 bytes and the daemon
+exits with `path must be shorter than SUN_LEN` otherwise.
 
 Probe binaries: `cargo build --profile selfdev -p jcode-harness-api-server
 --bins` (bridge), and `cargo test --no-run -p jcode-sdk --test closeout_native
@@ -56,8 +60,8 @@ accepted `7eb60ad47` baseline:
   unexpected exit to resume inference (WP-09 requires a trusted Continue). It
   now asserts the recovery item, the waiting input, no inference, then one
   selected continuation and the queued input.
-- `test_workspace_closeout_retention.py` needs a short artifact path for its
-  Unix socket.
+- `test_workspace_closeout_retention.py` failed only because the artifact path
+  was too long for its Unix socket.
 - `test_runtime_supervision.py` counted the developer runtime's own command
   workers when checking the survivor's power assertion; it now counts only the
   fixture's workers.
