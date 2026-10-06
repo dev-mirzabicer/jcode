@@ -200,12 +200,14 @@ recorded as program issues for later sessions.
 - Real-volume disappearance, power loss and hostile same-user writers are
   represented by fault injection and fixture volumes, not real events.
 - Catalog backups hold metadata only, not checkout files or transcripts.
-- Failures that reproduce on the accepted `7eb60ad47` test binaries and are
-  unchanged here: two disabled-Swarm routing tests in
-  `tool::instruction_guidance`, `tool::bash`'s
-  `bash_holds_a_risky_delete_until_justified_then_runs_it`, and two
-  `cli::tui_launch` tests that compare `/tmp` with its `/private/tmp` alias under
-  the isolated test runner.
+- Failures that reproduce on the accepted `7eb60ad47` test binaries: two
+  disabled-Swarm routing tests in `tool::instruction_guidance` and `tool::bash`'s
+  `bash_holds_a_risky_delete_until_justified_then_runs_it`.
+- Two root `cli::tui_launch` tests fail under the isolated test runner: one
+  compares `/tmp` with its `/private/tmp` alias and the other then hits the
+  poisoned environment lock. WP-12 did not change that code. They were not rerun
+  on the baseline; the INT-01 closeout recorded the same root result (226
+  passed, 2 failed).
 - C04 owns the final command-center visuals and old-picker retirement. C05
   owns the final closeout skill and agent guidance. C01's agent-facing text
   is the approved framework-stage `tools/workspace.md` and notice templates.
