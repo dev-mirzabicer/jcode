@@ -48,8 +48,10 @@ and falsely claim that its filesystem worker has stopped.
 After preservation, inspect the new removal review and its issues, approve that
 exact review through the trusted path, then explicitly request Finish. Neither
 an action receipt nor preservation alone authorizes removal. Review and recovery
-results retain their revision/target identity. Existing human management and
-final agent-assisted guidance remain the later C01/C04/C05 consumers.
+results retain their revision/target identity. Human controls are in
+[`/workspace`](../WORKSPACE_MANAGEMENT.md); an agent's narrow closeout steps are in
+the [`workspace` tool](../WORKSPACE_AGENT_TOOL.md). SP-58-C04 owns the final visual
+client and SP-58-C05 the final closeout guidance.
 
 ## Domain authority
 

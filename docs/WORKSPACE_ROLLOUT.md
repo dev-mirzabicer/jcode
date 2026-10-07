@@ -85,6 +85,35 @@ jcode repl --place
 `--place` refuses a broad root such as the home directory. Run from a project
 directory, or place the session in `/workspace`.
 
+### ACP editors
+
+An ACP editor cannot show the dialog or send `/place`. Start the agent with
+`--place` in the editor's agent-server command:
+
+```bash
+jcode acp --place
+```
+
+New and loaded sessions then take the proposed default placement for their
+directory, as with `jcode run --place`, and a broad root is refused. Without
+`--place`, an unplaced session's prompt is refused with these two routes: the
+flag, or `/workspace` → Sessions in the TUI.
+
+### Other session creators
+
+- **Scheduled `spawn`.** A task scheduled with `target: spawn` creates a session
+  that continues its scheduling session's conversation. It takes that session's
+  current placement and working directory, like Split. It never carries the
+  scheduling session's direct grants. Grants to its project, work area or
+  checkout still apply. If the scheduling session is unplaced or missing, the
+  task fails before any session is created, and the runtime log records why.
+- **`jcode debug create_session`.** Debug-created sessions start unplaced and
+  refuse turns until they are placed in `/workspace` → Sessions. They are not
+  placed automatically. A debug caller would otherwise create sessions with
+  the write scope of any registered location without a human review.
+- **Ambient cycles.** Ambient-mode sessions are unplaced and their turns are
+  refused while the flag is on. Ambient mode is off by default.
+
 ### Harness API and SDKs
 
 `primary_control_capabilities` advertises `session_placement_version: 1`. Two

@@ -327,7 +327,7 @@ Session receipt owner. A retained drain covers the terminal-boundary race.
 UI fanout and transport Ack are not durable acceptance. The typed UUID-based
 input API supports retry across connections and explicit original-input reads.
 See [primary input and location controls](PRIMARY_INPUT_LOCATION.md) for receipt,
-recovery, capability negotiation and staged location-change contracts.
+recovery, capability negotiation and location-change contracts.
 
 Server Clear prepares on a retained runtime task rather than nesting its large
 launch future in the client stack. It creates and publishes an independently
@@ -338,8 +338,9 @@ admission. Failed preparation leaves the source and peers unchanged. Provider,
 Registry, controls and initial instruction/Startup Context capture are fresh.
 Managed Clear uses the existing complete launch transaction with the current
 placement and witnessed cwd, a new creation receipt, and a reconciled Session
-index. It does not copy the source's launch identity or extra grants. Grant-carry
-review remains gated with its later owner.
+index. It does not copy the source's launch identity. When the source has direct
+grants, Clear needs the reviewed grant-carry choice described in
+[scoped new contexts](PRIMARY_CONTEXT_SCOPE.md).
 
 Primary Stop settlement waits for retained foreground execution supervisors to
 publish terminal metadata and captured output after the Agent waiter ends.

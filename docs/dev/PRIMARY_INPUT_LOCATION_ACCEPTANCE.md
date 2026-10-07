@@ -61,6 +61,8 @@ Native evidence is macOS arm64 with local scripted provider traffic. It does not
 establish hosted model quality, vendor billing, vendor compute cancellation,
 Linux/Windows service parity, shell sandboxing or arbitrary external-effect
 rollback. No prompt wording grade or automated behavioral benchmark is used.
-Memory/Swarm remain disabled. Managed location changes remain staged, while
-inspection/cancellation of existing controls remains available. C04 visuals,
-C05 final guidance and later C01 grants/checkout/service work keep their owners.
+Memory/Swarm remain disabled. Managed location changes stayed staged at WP-04
+acceptance, while inspection/cancellation of existing controls remained
+available; later C01 packages delivered grants, checkouts, the service and the
+rollout (see the [C01 integration ledger](C01_INTEGRATION_ACCEPTANCE.md)). C04
+visuals and C05 final guidance keep their owners.

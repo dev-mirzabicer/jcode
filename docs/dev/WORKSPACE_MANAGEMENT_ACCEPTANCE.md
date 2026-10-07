@@ -102,11 +102,13 @@ Each has a focused test and a later passing native stage.
 
 ## Limits
 
-- Managed launch, location change, legacy adoption and scoped new contexts stay
-  behind `features.managed_primary_launch`, which the user's configuration keeps
-  off; journeys enable it in their fixture only. WP-12 owns the rollout.
+- At WP-10 acceptance, managed launch, location change, legacy adoption and
+  scoped new contexts stayed behind `features.managed_primary_launch`, which the
+  user's configuration then kept off; journeys enabled it in their fixture only.
+  WP-12 later rolled it out ([managed placement rollout](../WORKSPACE_ROLLOUT.md)).
 - The agent-side discovery and access-proposal tools and the conditional
-  closeout declaration are not exposed (WP-11).
+  closeout declaration were not exposed at WP-10; WP-11 added them
+  ([`workspace` tool](../WORKSPACE_AGENT_TOOL.md)).
 - Same-user trusted clients are not proof of a physical human; native write
   scope is not a shell sandbox.
 - The final command-center visual design is SP-58-C04's.

@@ -96,8 +96,8 @@ It validates the target's current files through the existing Startup Context
 selector and requires fresh resolved-target approval for every external file.
 This does not copy file bodies, rewrite older Session captures or automatically
 reseed the instruction store. A catalog rebind alone does not copy a plan.
-The copy is currently a trusted backend operation; its final management form
-belongs to the staged workspace client. See
+The copy is a trusted operation, available as Startup Context copy on a
+checkout in [`/workspace`](WORKSPACE_MANAGEMENT.md). See
 [`dev/WORKSPACE_CHECKOUTS.md`](dev/WORKSPACE_CHECKOUTS.md).
 
 ### Non-Git projects
@@ -255,8 +255,8 @@ its durable selection and receipt rather than becoming canceled or capturing
 stale bytes. It can drain at its normal idle boundary after admission returns.
 An already-admitted turn may finish its queued startup work during finish-current
 shutdown. Explicit queued-apply cancellation remains available until final Stop
-publication and is serialized with that publication. Public runtime controls
-remain staged with the daemon/client integration.
+publication and is serialized with that publication. Reviewed runtime Stop and
+restart are described in [runtime control](RUNTIME_CONTROL.md).
 
 ## Later file changes
 

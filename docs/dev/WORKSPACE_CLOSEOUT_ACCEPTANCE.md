@@ -71,7 +71,9 @@ and package-copy snapshots, original-parent delegation, source-free recovery,
 owned execution capture/control, clone trust/materialization and physical identity.
 No context-projection/curator algorithm, central prompt wording, dormant memory
 or Swarm behavior is redesigned. Ordinary managed rollout and agent workspace
-exposure stay gated. C04 final visuals and C05 final guidance remain separate.
+exposure stayed gated at WP-07 acceptance; WP-11 and WP-12 later delivered them
+(see the [C01 integration ledger](C01_INTEGRATION_ACCEPTANCE.md)). C04 final
+visuals and C05 final guidance remain separate.
 
 ## Evidence honesty and platform bounds
 

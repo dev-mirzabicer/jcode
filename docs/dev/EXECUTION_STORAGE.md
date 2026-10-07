@@ -477,7 +477,7 @@ control attempts, not terminal receipts. Unbound historical owners are not
 silently acquired from a matching Session ID or PID.
 
 This is the C01 shutdown backend boundary. The reviewed daemon operation and its
-ordinary runtime command surface are not yet activated by this internal slice.
+ordinary command surface are described in [runtime control](../RUNTIME_CONTROL.md).
 
 Status and control RPCs transfer metadata only. Stop acknowledges a request,
 not actual quiescence. Wait returns a persisted terminal state. Dropping a wait
