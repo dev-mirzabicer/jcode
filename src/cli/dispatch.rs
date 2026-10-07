@@ -179,6 +179,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 args.model.clone(),
                 args.provider_profile.clone(),
                 args.tool_profile.is_some(),
+                args.place,
             )
             .await?;
         }

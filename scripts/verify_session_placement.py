@@ -3,7 +3,8 @@
 (SP-58-C01/WP-12).
 
 With features.managed_primary_launch=true, an ordinary new session starts
-unplaced. This journey drives the real daemon, the `jcode run` CLI and a real
+unplaced. This journey drives the real daemon, the `jcode run` and `jcode acp`
+CLIs and a real
 TUI tester (PTY, physical keys, captured frames) through:
 
   0. no catalog yet: input refused before acceptance with the placement
@@ -15,6 +16,9 @@ TUI tester (PTY, physical keys, captured frames) through:
   4. a second session in the same directory reuses the registered location
   5. a home-directory session gets a broad candidate with no default
   6. `jcode run` refuses without --place, runs once with --place
+  6b. ACP: a plain `jcode acp` session's prompt is refused with editor
+     guidance; `jcode acp --place` places the new session and its prompt
+     runs once; at home it refuses (SP-58-C01 closeout)
   7. TUI: Enter on a fresh session opens the review over the conversation;
      Enter places and sends the held message exactly once; in another session
      Esc keeps the message in the composer and sends nothing; frames at
@@ -27,7 +31,7 @@ model is called. Run through scripts/run_isolated_test.py with
 import os
 if not os.environ.get('JCODE_TEST_STATE_ROOT'):
     raise SystemExit('Run through scripts/run_isolated_test.py')
-import json, signal, subprocess, sys, time, traceback, uuid
+import json, select, signal, subprocess, sys, time, traceback, uuid
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_instruction_manager as f
@@ -121,6 +125,38 @@ def cli(*args, cwd, timeout=120):
     with (evidence / 'cli.jsonl').open('a') as out:
         out.write(json.dumps({'args': args, 'cwd': str(cwd), 'code': run.returncode, 'stdout': run.stdout[-3000:], 'stderr': run.stderr[-3000:]}) + '\n')
     return run
+
+# --- ACP: an editor cannot send /place, so `jcode acp --place` places.
+acps = []
+
+def acp_client(*flags):
+    proc = subprocess.Popen([f.BIN, '--no-update', '--no-selfdev', '--provider-profile', 'wp09-fixture', '--model', 'fixture', *flags, 'acp'],
+                            env=f.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=open(ROOT / f'acp-{len(acps)}.stderr', 'wb'), bufsize=0)
+    acps.append(proc)
+    return proc
+
+def acp_call(proc, identity, method, params):
+    proc.stdin.write((json.dumps({'jsonrpc': '2.0', 'id': identity, 'method': method, 'params': params}) + '\n').encode())
+    proc.stdin.flush()
+    deadline = time.monotonic() + 120
+    while True:
+        if not select.select([proc.stdout], [], [], max(0, deadline - time.monotonic()))[0]:
+            raise TimeoutError('ACP reply to ' + method)
+        line = proc.stdout.readline()
+        assert line, 'ACP closed before replying to ' + method
+        event = json.loads(line)
+        with (evidence / 'acp.jsonl').open('a') as out:
+            out.write(json.dumps({'method': method, 'event': event}) + '\n')
+        if event.get('id') == identity:
+            return event
+
+def acp_session(proc, cwd):
+    acp_call(proc, 1, 'initialize', {'protocolVersion': 1, 'clientCapabilities': {}, 'clientInfo': {'name': 'placement-fixture', 'version': '1'}})
+    return acp_call(proc, 2, 'session/new', {'cwd': str(cwd), 'mcpServers': []})
+
+def acp_prompt(proc, session, text):
+    return acp_call(proc, 3, 'session/prompt', {'sessionId': session, 'prompt': [{'type': 'text', 'text': text}]})
 
 # --- TUI testers, spawned by a separate harness daemon that owns their PTYs.
 HARNESS_SOCK = ROOT / 'h.sock'
@@ -271,6 +307,30 @@ try:
     assert broad_run.returncode != 0 and 'No placement is proposed' in broad_run.stderr, broad_run.stderr
     assert len(posts) == count + 1
 
+    step('6b: ACP refuses with editor guidance without --place and places with it')
+    gamma = repo('gamma')
+    count = len(posts)
+    plain_acp = acp_client()
+    created = acp_session(plain_acp, gamma)
+    assert 'result' in created, created
+    refused_acp = acp_prompt(plain_acp, created['result']['sessionId'], 'ACP PROMPT')
+    assert MARK in refused_acp['error']['message'] and 'jcode acp --place' in refused_acp['error']['message'], refused_acp
+    assert '/place ' not in refused_acp['error']['message'], refused_acp
+    assert len(posts) == count
+    placed_acp = acp_client('--place')
+    created = acp_session(placed_acp, gamma)
+    assert 'result' in created, created
+    acp_s = created['result']['sessionId']
+    view = location({'action': 'inspect_session', 'session': acp_s})
+    assert view['status'] == 'session' and view['view']['location'] is not None, view
+    answered = acp_prompt(placed_acp, acp_s, 'ACP PROMPT')
+    assert 'result' in answered, answered
+    assert len(posts) == count + 1
+    broad_acp = acp_client('--place')
+    at_home = acp_session(broad_acp, home)
+    assert 'No placement is proposed' in at_home.get('error', {}).get('message', ''), at_home
+    assert len(posts) == count + 1
+
     step('7a: TUI Enter opens the review; Enter places and sends once')
     start_harness()
     gamma = repo('gamma')
@@ -321,6 +381,12 @@ finally:
     for tid in list(testers):
         try: cleanup[tid] = harness_debug('tester:' + tid + ':stop')
         except Exception as error: cleanup[tid] = repr(error)
+    for proc in acps:
+        try: proc.stdin.close()
+        except Exception: pass
+        try: proc.wait(timeout=20)
+        except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=10)
+    cleanup['acp_exits'] = [proc.poll() for proc in acps]
     if f.reader: f.reader.close()
     if f.client: f.client.close()
     if f.proc and f.proc.poll() is None:

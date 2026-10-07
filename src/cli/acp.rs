@@ -185,6 +185,9 @@ struct AcpRuntime {
     provider_choice: ProviderChoice,
     model: Option<String>,
     provider_profile: Option<String>,
+    /// `jcode acp --place`: give unplaced sessions the proposed placement for
+    /// their directory, because an ACP editor cannot answer the TUI's review.
+    place: bool,
 }
 
 impl AcpRuntime {
@@ -193,6 +196,7 @@ impl AcpRuntime {
         provider_choice: ProviderChoice,
         model: Option<String>,
         provider_profile: Option<String>,
+        place: bool,
     ) -> Self {
         Self {
             stdout: Arc::new(Mutex::new(tokio::io::stdout())),
@@ -201,6 +205,7 @@ impl AcpRuntime {
             provider_choice,
             model,
             provider_profile,
+            place,
         }
     }
 
@@ -341,7 +346,11 @@ impl AcpRuntime {
             },
             None => None,
         };
-        match self.create_new_session(cwd, launch).await {
+        let created = match self.create_new_session(cwd, launch).await {
+            Ok(session) if self.place => place_unplaced_session(&session).await.map(|()| session),
+            other => other,
+        };
+        match created {
             Ok(session) => {
                 let session_id = session.session_id.clone();
                 let state = session.ui_state.lock().await.clone();
@@ -396,10 +405,14 @@ impl AcpRuntime {
             return Ok(());
         }
 
-        match self
+        let attached = match self
             .attach_existing_session(session_id.clone(), cwd, replay_history)
             .await
         {
+            Ok(session) if self.place => place_unplaced_session(&session).await.map(|()| session),
+            other => other,
+        };
+        match attached {
             Ok(session) => {
                 let state = session.ui_state.lock().await.clone();
                 self.sessions
@@ -993,6 +1006,12 @@ impl AcpRuntime {
                 }
                 ServerEvent::Error { id, message, .. } if id == prompt_id => {
                     cleanup_prompt_state(&session).await;
+                    // The daemon's refusal names TUI routes an editor lacks.
+                    let message = if crate::workspace::is_placement_required(&message) {
+                        crate::workspace::placement_required_for_acp()
+                    } else {
+                        message
+                    };
                     self.write_error_value(rpc_id, JSONRPC_SERVER_ERROR, message)
                         .await?;
                     return Ok(());
@@ -1862,11 +1881,127 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
     }
 }
 
+/// Place an unplaced attached session at the proposal's default, through the
+/// same hosted `propose_placement`/`place` owner the TUI review uses. Nothing
+/// happens while managed placement is not rolled out or the session is
+/// already placed. A broad root (such as the home directory) is never chosen.
+async fn place_unplaced_session(session: &DaemonSession) -> Result<()> {
+    use crate::workspace::{
+        IssueCode, PrimaryLocationCommand, PrimaryLocationResponse, RequestId,
+        SessionPlacementRequest,
+    };
+    async fn location(
+        session: &DaemonSession,
+        command: PrimaryLocationCommand,
+    ) -> Result<PrimaryLocationResponse> {
+        let id = session.next_id();
+        session
+            .send(&Request::PrimaryLocation {
+                id,
+                command: Box::new(command),
+            })
+            .await?;
+        loop {
+            match session.read_event().await? {
+                ServerEvent::PrimaryLocationResponse {
+                    id: reply,
+                    response,
+                } if reply == id => {
+                    return Ok(*response);
+                }
+                ServerEvent::Error {
+                    id: reply, message, ..
+                } if reply == id => {
+                    anyhow::bail!(message)
+                }
+                _ => {}
+            }
+        }
+    }
+    let probe = session.next_id();
+    session
+        .send(&Request::PrimaryControlProbe { id: probe })
+        .await?;
+    let (enabled, placement_version) = loop {
+        match session.read_event().await? {
+            ServerEvent::PrimaryControlCapabilities {
+                id,
+                location_enabled,
+                session_placement_version,
+                ..
+            } if id == probe => break (location_enabled, session_placement_version),
+            ServerEvent::Error { id, message, .. } if id == probe => anyhow::bail!(message),
+            _ => {}
+        }
+    };
+    if !enabled {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        placement_version == Some(1),
+        "The Jcode daemon does not support session placement; update it or place the session in /workspace"
+    );
+    let proposal = match location(
+        session,
+        PrimaryLocationCommand::ProposePlacement {
+            session: session.session_id.clone(),
+        },
+    )
+    .await?
+    {
+        PrimaryLocationResponse::Proposal { proposal } => proposal,
+        // A proposal conflicts only with an existing placement.
+        PrimaryLocationResponse::Rejected { issue } if issue.code == IssueCode::Conflict => {
+            return Ok(());
+        }
+        PrimaryLocationResponse::Rejected { issue } => {
+            anyhow::bail!("Placement review failed: {}", issue.detail)
+        }
+        other => anyhow::bail!("Unexpected placement review reply: {other:?}"),
+    };
+    let Some(candidate) = proposal
+        .default
+        .and_then(|index| proposal.candidates.get(index))
+    else {
+        anyhow::bail!(
+            "No placement is proposed for {} (only broad roots contain it). Open a project directory, or place the session in /workspace → Sessions.",
+            proposal.working_dir.display()
+        );
+    };
+    let request = SessionPlacementRequest {
+        request: RequestId::new(),
+        session: session.session_id.clone(),
+        working_dir: proposal.working_dir.clone(),
+        expected_catalog_revision: proposal.catalog_revision,
+        placement: candidate.placement.clone(),
+    };
+    match location(session, PrimaryLocationCommand::Place { request }).await? {
+        PrimaryLocationResponse::State { record }
+            if record.state == crate::workspace::LocationChangeState::Complete =>
+        {
+            Ok(())
+        }
+        PrimaryLocationResponse::State { record } => anyhow::bail!(
+            "Placement did not complete ({:?}){}",
+            record.state,
+            record
+                .issue
+                .map(|issue| format!(": {}", issue.detail))
+                .unwrap_or_default()
+        ),
+        PrimaryLocationResponse::Rejected { issue } => {
+            anyhow::bail!("Placement failed: {}", issue.detail)
+        }
+        other => anyhow::bail!("Unexpected placement reply: {other:?}"),
+    }
+}
+
 pub(crate) async fn run_acp_command(
     provider_choice: ProviderChoice,
     model: Option<String>,
     provider_profile: Option<String>,
     explicit_tool_profile: bool,
+    place: bool,
 ) -> Result<()> {
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
     let acp_config = crate::config::config().acp.clone();
@@ -1875,7 +2010,7 @@ pub(crate) async fn run_acp_command(
         crate::config::invalidate_config_cache();
     }
     let profile = AcpProfile::parse(&acp_config.profile);
-    AcpRuntime::new(profile, provider_choice, model, provider_profile)
+    AcpRuntime::new(profile, provider_choice, model, provider_profile, place)
         .run()
         .await
 }

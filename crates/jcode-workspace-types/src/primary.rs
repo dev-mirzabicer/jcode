@@ -274,6 +274,13 @@ pub fn placement_required_for_turn() -> String {
     format!("{PLACEMENT_REQUIRED}. Place it with /place or in /workspace → Sessions.")
 }
 
+/// Refusal shown to an ACP editor, which cannot send `/place`.
+pub fn placement_required_for_acp() -> String {
+    format!(
+        "{PLACEMENT_REQUIRED}. Nothing was sent: start the agent as `jcode acp --place` to use the proposed placement for this directory, or place the session in Jcode's /workspace → Sessions, then send again."
+    )
+}
+
 pub fn is_placement_required(message: &str) -> bool {
     message.contains(PLACEMENT_REQUIRED)
 }

@@ -102,7 +102,7 @@ pub(crate) struct Args {
     #[arg(long, global=true, conflicts_with_all=["agent","resume"])]
     pub(crate) primary_launch: Option<std::path::PathBuf>,
 
-    /// For `run` and `repl` once managed launch is rolled out: give an
+    /// For `run`, `repl` and `acp` once managed launch is rolled out: give an
     /// unplaced session the proposed workspace placement for its directory
     /// (the registered location containing it, or a new standalone location
     /// at its Git root or the directory itself). Broad roots such as the home
