@@ -5,8 +5,8 @@ P01–P06 through twelve work packages. This ledger is the combined
 verification route for its forty requirements (R01–R40) and eight journeys
 (J01–J08) on one source tree. It records where each requirement's evidence
 lives and the combined native run that exercises them together. It is not
-Mirza's acceptance, the C01 closeout or a claim about the final C04 client or
-C05 guidance.
+Mirza's acceptance or a claim about the final C04 client or C05 guidance. The
+C01 closeout's own findings are under "Phase closeout" below.
 
 ## Combined native matrix
 
@@ -35,7 +35,7 @@ removed.
 | `test_runtime_supervision.py` | R32–R35 | Reload/restart continuation, crash recovery, isolated LaunchAgent, power |
 | `verify_workspace_manager_tui.py` | R36, R37 | Physical-input `/workspace` and `/runtime` journey |
 | `verify_workspace_contracts.py` | R38 | Harness/SDK contracts, agent `workspace` tool |
-| `verify_session_placement.py` | R07, R09, R13, R40 | Rollout: refusal before acceptance, propose/place, `run --place`, TUI placement review |
+| `verify_session_placement.py` | R07, R09, R13, R40 | Rollout: refusal before acceptance, propose/place, `run --place`, `acp --place`, TUI placement review |
 | `verify_c01_combined.py` | J01 | Two repositories, directory, work area, shared clone, project cwd, standalone, archive |
 
 Every script places its daemon socket under the artifact directory, so keep
@@ -192,6 +192,38 @@ Unrelated performance and log findings from the rollout (first-session
 preparation time, fresh-session history retries, completion retries for missing
 sessions, a crashed empty session per self-dev build) predate WP-12 and are
 recorded as program issues for later sessions.
+
+## Phase closeout (SP-58-C01)
+
+The closeout reran the combined matrix on the accepted source, traced the
+rollout's interaction with every other session creator, and repaired what it
+found.
+
+**Matrix on the accepted source.** WP-12 ran the full 22 scripts on frozen
+`94700139f` and only six of them on the later commits. The closeout ran all 22,
+sequentially and on their first attempt, on a frozen copy of the activated
+`9fd5881ee` binary (SHA-256 `47cff651…`). All 22 passed.
+
+**Session creators under managed placement.** With the flag on, only a placed
+session can run a turn. Three creators produced unplaced sessions:
+
+| Creator | Before | Disposition |
+|---|---|---|
+| Scheduled `spawn` | The child copied the conversation but no placement; its turn was refused and the task failed with one log line | Repaired: the child takes its parent's placement and cwd through the Split scope owner, never carries direct grants, and an unplaced or missing parent fails before any child exists (`spawned_schedule_takes_parent_placement_without_direct_grants`, red without the repair) |
+| ACP `session/new` | Unplaced; the refusal pointed to `/place`, which an editor cannot send | Repaired: `jcode acp --place` places new and loaded sessions at the proposed default (broad roots refused); without it the refusal names the ACP routes (`verify_session_placement.py` stage 6b) |
+| `jcode debug create_session` | Unplaced; turns refused | Documented limit ([rollout](../WORKSPACE_ROLLOUT.md#other-session-creators)). Automatic placement would let a debug caller acquire any registered location's scope without review; recorded as program issue I-05 |
+
+Ambient-mode cycles are also unplaced and refused; ambient mode is off by
+default.
+
+**Documentation.** Current-behavior guides that still called rollout, grant
+carry, the Startup Context copy client or runtime controls staged were
+corrected. Package acceptance records keep their statement as of their
+acceptance and point here.
+
+After the repairs, the full matrix and the focused families for the changed
+owners passed again on the final candidate; the program's C01 completion report
+records the exact runs.
 
 ## Limits
 
