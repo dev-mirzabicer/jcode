@@ -364,3 +364,157 @@ fn scheduled_live_delivery_uses_notify_without_a_provisional_subscription() -> R
         Ok(())
     })
 }
+
+/// After the managed rollout a spawned scheduled session must be able to
+/// work: it takes its parent's placement and cwd like a Split, never carries
+/// the parent's direct grants, and an unplaced or missing parent fails before
+/// any child Session is created.
+#[tokio::test]
+async fn spawned_schedule_takes_parent_placement_without_direct_grants() -> Result<()> {
+    use crate::workspace::{
+        Audience, EntityId, GrantChange, OperationId, OrganizationChange, Placement, Registration,
+        RequestId, WorkspaceClientAuthority, WorkspaceService, WriteTarget,
+    };
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new()?;
+    crate::instruction::SystemPromptComposer::new().ensure_global_store()?;
+    std::fs::write(
+        crate::config::Config::path().unwrap(),
+        "[features]\nmanaged_primary_launch = true\n",
+    )?;
+    crate::config::Config::invalidate_cache();
+    let result = async {
+        let work = tempfile::tempdir()?;
+        let service = WorkspaceService::new(&crate::storage::durable_state_dir());
+        service.initialize(RequestId::new())?;
+        let mut roots = Vec::new();
+        for name in ["a", "b"] {
+            let path = work.path().join(name);
+            std::fs::create_dir(&path)?;
+            let path = path.canonicalize()?;
+            let review = service.review_organization_change(
+                service.status()?.revision,
+                OrganizationChange::RegisterLocation {
+                    name: name.into(),
+                    path: path.clone(),
+                    registration: Registration::Standalone,
+                },
+            )?;
+            let EntityId::Location(id) = service
+                .apply_organization_change(RequestId::new(), review.id)?
+                .targets[0]
+            else {
+                panic!()
+            };
+            roots.push((id, path));
+        }
+        let mut parent = Session::create(None, None);
+        let prepared = service.prepare_primary_location(
+            Placement::Standalone(roots[0].0),
+            Some(&roots[0].1),
+            OperationId::new(),
+        )?;
+        parent.location = Some(prepared.location.clone());
+        parent.working_dir = Some(roots[0].1.to_string_lossy().into());
+        drop(prepared);
+        parent.save()?;
+        let review = service.review_grant_change(
+            service.status()?.revision,
+            GrantChange::Issue {
+                audience: Audience::Session(parent.id.clone()),
+                target: WriteTarget::Root(roots[1].0),
+                proposal: None,
+            },
+        )?;
+        service.apply_grant_change(
+            &WorkspaceClientAuthority::authenticated("test-human")?,
+            RequestId::new(),
+            review.id,
+        )?;
+
+        let item = |parent_id: &str| ScheduledItem {
+            id: format!("sched_placed_{parent_id}"),
+            scheduled_for: chrono::Utc::now(),
+            context: "SYNTHETIC SPAWN".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: parent_id.to_string(),
+            },
+            created_by_session: parent_id.to_string(),
+            created_at: chrono::Utc::now(),
+            // A cwd recorded at scheduling time never overrides the staged
+            // location of a placed child.
+            working_dir: Some(roots[1].1.to_string_lossy().into()),
+            task_description: Some("SYNTHETIC SPAWN".to_string()),
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            context_emergency_policy: StoredContextEmergencyPolicy::Block,
+        };
+        let provider = StreamingTestProvider::default();
+        provider.queue_response(vec![
+            StreamEvent::TextDelta("Spawned placed child ran.".to_string()),
+            StreamEvent::MessageEnd { stop_reason: None },
+        ]);
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+        let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+        let child_id = runner
+            .spawn_session_for_scheduled_item(&provider, &item(&parent.id), &parent.id)
+            .await?;
+        let child = Session::load(&child_id)?;
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+        let location = child.location.as_ref().expect("spawned child is placed");
+        assert_eq!(location.placement, Placement::Standalone(roots[0].0));
+        assert_eq!(location.cwd.observed_path(), roots[0].1.as_path());
+        assert_eq!(child.working_dir, parent.working_dir);
+        assert!(child.scope_copy.is_some_and(|copy| copy.ready));
+        assert!(child.messages.iter().any(|message| {
+            message.role == Role::Assistant
+                && message
+                    .content_preview()
+                    .contains("Spawned placed child ran.")
+        }));
+        let scope = service.session_write_scope(&child)?;
+        assert!(
+            scope.grants.is_empty(),
+            "an unattended spawn must not carry direct grants: {:?}",
+            scope.grants
+        );
+
+        let children_of = |id: &str| -> Result<usize> {
+            let mut count = 0;
+            for entry in std::fs::read_dir(crate::storage::jcode_dir()?.join("sessions"))? {
+                let path = entry?.path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+                    count += usize::from(stored["parent_id"].as_str() == Some(id));
+                }
+            }
+            Ok(count)
+        };
+        let mut unplaced = Session::create(None, None);
+        unplaced.working_dir = Some(roots[0].1.to_string_lossy().into());
+        unplaced.save()?;
+        let refused = runner
+            .spawn_session_for_scheduled_item(&provider, &item(&unplaced.id), &unplaced.id)
+            .await
+            .expect_err("an unplaced parent cannot spawn after rollout");
+        assert!(format!("{refused:#}").contains("needs a placed parent session"));
+        assert_eq!(children_of(&unplaced.id)?, 0);
+        let missing = "session_missing_spawn_parent";
+        assert!(
+            runner
+                .spawn_session_for_scheduled_item(&provider, &item(missing), missing)
+                .await
+                .is_err()
+        );
+        assert_eq!(children_of(missing)?, 0);
+        Ok(())
+    }
+    .await;
+    std::fs::remove_file(crate::config::Config::path().unwrap()).ok();
+    crate::config::Config::invalidate_cache();
+    result
+}

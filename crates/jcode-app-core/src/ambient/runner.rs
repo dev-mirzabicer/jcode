@@ -512,7 +512,17 @@ impl AmbientRunnerHandle {
         // Instruction failures happen before publishing an execution. The
         // scheduler keeps its existing owning error and dequeue policy.
         let reminder = ambient::format_scheduled_session_message(item)?;
-        let mut child = match Session::load(parent_session_id) {
+        let parent = Session::load(parent_session_id);
+        if let Err(err) = &parent
+            && crate::config::config().features.managed_primary_launch
+        {
+            anyhow::bail!(
+                "Scheduled spawn {} cannot take a placement from parent session {}: {err:#}",
+                item.id,
+                parent_session_id
+            );
+        }
+        let mut child = match &parent {
             Ok(parent) => {
                 let mut child = Session::create(
                     Some(parent_session_id.to_string()),
@@ -544,7 +554,7 @@ impl AmbientRunnerHandle {
             }
             Err(err) => {
                 logging::warn(&format!(
-                    "Ambient runner: failed to load parent session {} for spawned scheduled task {}; creating a fresh child instead: {}",
+                    "Ambient runner: failed to load parent session {} for spawned scheduled task {}; creating a fresh child instead: {:#}",
                     parent_session_id, item.id, err
                 ));
                 let mut child = Session::create(
@@ -560,7 +570,24 @@ impl AmbientRunnerHandle {
             }
         };
         child.status = crate::session::SessionStatus::Closed;
-        child.save()?;
+        if let Ok(parent) = &parent {
+            stage_spawned_scope(parent, &mut child, &item.id)?;
+        }
+        let placed = child.location.is_some();
+        if let Err(error) = child.save().and_then(|()| {
+            if placed {
+                crate::workspace::WorkspaceService::new(&crate::storage::durable_state_dir())
+                    .reconcile_context_scope(&child.id)?;
+            }
+            Ok(())
+        }) {
+            if placed && let Err(cleanup) = crate::session::remove_unpublished_session(&child.id) {
+                anyhow::bail!(
+                    "scheduled spawn preparation failed ({error:#}); unpublished child cleanup also failed: {cleanup:#}"
+                );
+            }
+            return Err(error);
+        }
 
         let child_session_id = child.id.clone();
         let child_is_canary = child.is_canary;
@@ -578,7 +605,9 @@ impl AmbientRunnerHandle {
             None,
         );
         agent.set_debug(child_is_debug);
-        if item.working_dir.is_some() {
+        // A placed child's cwd is its staged location; only legacy children
+        // take the cwd recorded when the task was scheduled.
+        if !placed && item.working_dir.is_some() {
             agent.set_working_dir_for_pending_context(item.working_dir.clone());
         }
 
@@ -694,13 +723,9 @@ impl AmbientRunnerHandle {
         items: Vec<ScheduledItem>,
     ) {
         for item in items {
-            if self
-                .deliver_scheduled_direct_item(provider, &item)
-                .await
-                .is_err()
-            {
+            if let Err(error) = self.deliver_scheduled_direct_item(provider, &item).await {
                 logging::error(&format!(
-                    "Ambient runner: scheduled direct item {} failed safely",
+                    "Ambient runner: scheduled direct item {} failed safely: {error:#}",
                     item.id
                 ));
             }
@@ -1293,6 +1318,39 @@ impl AmbientRunnerHandle {
 }
 
 // ---------------------------------------------------------------------------
+
+/// A spawned scheduled session continues its parent's conversation, so it
+/// takes the parent's current placement and cwd through the reviewed Split
+/// scope owner. Direct grants are never carried: unattended creation has no
+/// human carry decision, so the choice is recorded as do-not-carry. Grants to
+/// the parent's project, work area or checkout audience still apply. An
+/// unplaced parent can spawn only while managed placement is not rolled out.
+fn stage_spawned_scope(parent: &Session, child: &mut Session, item: &str) -> anyhow::Result<()> {
+    use crate::workspace::{
+        GrantCarryChoice, NewContextKind, WorkspaceClientAuthority, WorkspaceService,
+    };
+    if parent.location.is_none() {
+        anyhow::ensure!(
+            !crate::config::config().features.managed_primary_launch,
+            "Scheduled spawn {item} needs a placed parent session; {} has no workspace placement",
+            parent.id
+        );
+        return Ok(());
+    }
+    let workspace = WorkspaceService::new(&crate::storage::durable_state_dir());
+    let review = workspace.review_grant_carry(&parent.id)?;
+    let choice = (!review.direct_grants.is_empty()).then_some(GrantCarryChoice {
+        review: review.id,
+        carry: false,
+    });
+    let client = WorkspaceClientAuthority::authenticated("scheduled-spawn")?;
+    let plan = workspace
+        .prepare_context_scope(parent, choice, &client)?
+        .ok_or_else(|| anyhow::anyhow!("Scheduled spawn {item} lost its parent placement"))?;
+    workspace.stage_context_scope(&plan, child, NewContextKind::Split)?;
+    child.seal_context_scope();
+    Ok(())
+}
 
 #[cfg(test)]
 #[path = "runner_tests.rs"]
