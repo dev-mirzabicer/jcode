@@ -308,17 +308,17 @@ try:
     assert len(posts) == count + 1
 
     step('6b: ACP refuses with editor guidance without --place and places with it')
-    gamma = repo('gamma')
+    editor = repo('editor')
     count = len(posts)
     plain_acp = acp_client()
-    created = acp_session(plain_acp, gamma)
+    created = acp_session(plain_acp, editor)
     assert 'result' in created, created
     refused_acp = acp_prompt(plain_acp, created['result']['sessionId'], 'ACP PROMPT')
     assert MARK in refused_acp['error']['message'] and 'jcode acp --place' in refused_acp['error']['message'], refused_acp
     assert '/place ' not in refused_acp['error']['message'], refused_acp
     assert len(posts) == count
     placed_acp = acp_client('--place')
-    created = acp_session(placed_acp, gamma)
+    created = acp_session(placed_acp, editor)
     assert 'result' in created, created
     acp_s = created['result']['sessionId']
     view = location({'action': 'inspect_session', 'session': acp_s})
