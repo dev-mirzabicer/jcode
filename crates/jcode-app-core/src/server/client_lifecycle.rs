@@ -16,7 +16,7 @@ use super::client_lifecycle_logging::{
 };
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
-    unavailable_swarm_response,
+    unavailable_feature_response,
 };
 use super::client_session::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
@@ -913,7 +913,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     }
                     return Ok(());
                 }
-                if let Some(error) = unavailable_swarm_response(&request) {
+                if let Some(error) = unavailable_feature_response(&request) {
                     write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
                     write_direct_event(&writer, &error).await?;
                     return Ok(());
@@ -1684,7 +1684,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
         }
 
         }
-        if let Some(error) = unavailable_swarm_response(&request) {
+        if let Some(error) = unavailable_feature_response(&request) {
             let _ = client_event_tx.send(error);
             continue;
         }

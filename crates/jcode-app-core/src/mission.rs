@@ -1,3 +1,5 @@
+//! Dormant mission store. Storage paths fail closed and the turn reminder is
+//! absent while `features.legacy_work_tracking` is off.
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -56,6 +58,7 @@ pub struct Mission {
 }
 
 pub fn load(session_id: &str) -> Result<Option<Mission>> {
+    crate::config::require_legacy_work_tracking()?;
     let path = mission_path(session_id)?;
     if !path.exists() {
         return Ok(None);
@@ -64,6 +67,7 @@ pub fn load(session_id: &str) -> Result<Option<Mission>> {
 }
 
 pub fn set(session_id: &str, objective: &str, working_dir: Option<&Path>) -> Result<Mission> {
+    crate::config::require_legacy_work_tracking()?;
     let objective = objective.trim();
     if objective.is_empty() {
         anyhow::bail!("mission objective cannot be empty");
@@ -91,6 +95,7 @@ pub fn set(session_id: &str, objective: &str, working_dir: Option<&Path>) -> Res
 }
 
 pub fn update_status(session_id: &str, status: MissionStatus) -> Result<Option<Mission>> {
+    crate::config::require_legacy_work_tracking()?;
     let Some(mut mission) = load(session_id)? else {
         return Ok(None);
     };
@@ -101,6 +106,7 @@ pub fn update_status(session_id: &str, status: MissionStatus) -> Result<Option<M
 }
 
 pub fn checkpoint(session_id: &str, summary: &str) -> Result<Option<Mission>> {
+    crate::config::require_legacy_work_tracking()?;
     let summary = summary.trim();
     if summary.is_empty() {
         anyhow::bail!("checkpoint summary cannot be empty");
@@ -118,6 +124,7 @@ pub fn checkpoint(session_id: &str, summary: &str) -> Result<Option<Mission>> {
 }
 
 pub fn clear(session_id: &str) -> Result<bool> {
+    crate::config::require_legacy_work_tracking()?;
     let path = mission_path(session_id)?;
     if path.exists() {
         std::fs::remove_file(path)?;
@@ -145,6 +152,10 @@ pub fn active_system_reminder(
     session_id: &str,
     working_dir: Option<&Path>,
 ) -> Result<Option<String>> {
+    // A dormant mission contributes no reminder and its store is not read.
+    if !crate::config::legacy_work_tracking_enabled() {
+        return Ok(None);
+    }
     let Some(mission) = load(session_id)? else {
         return Ok(None);
     };
@@ -223,6 +234,9 @@ mod tests {
     #[test]
     fn mission_rendering_preserves_literal_xml_data_and_failed_set_preserves_state() {
         let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Dormant enabled path, explicitly enabled for this mechanism test.
+        let _legacy =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
         crate::instruction::SystemPromptComposer::new()
             .ensure_global_store()
             .unwrap();
@@ -265,5 +279,50 @@ mod tests {
                 .is_none()
         );
         assert!(active_system_reminder("absent", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_work_tracking_mission_store_fails_closed_and_keeps_its_file() {
+        let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let path = home.root().join("missions/mission-retained.json");
+        {
+            let _on =
+                crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
+            save(&Mission {
+                session_id: "mission-retained".into(),
+                objective: "Synthetic retained objective".into(),
+                long_horizon_intent: "Synthetic intent".into(),
+                status: MissionStatus::Active,
+                semantic_expansion: Vec::new(),
+                success_criteria: Vec::new(),
+                validation_plan: Vec::new(),
+                checkpoints: Vec::new(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let _off =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(false);
+        let unavailable = |error: anyhow::Error| {
+            assert_eq!(
+                error.to_string(),
+                crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE
+            )
+        };
+        unavailable(load("mission-retained").unwrap_err());
+        unavailable(set("mission-retained", "replace", None).unwrap_err());
+        unavailable(update_status("mission-retained", MissionStatus::Paused).unwrap_err());
+        unavailable(checkpoint("mission-retained", "x").unwrap_err());
+        unavailable(clear("mission-retained").unwrap_err());
+        // An active mission contributes no reminder and needs no prose source.
+        assert!(
+            active_system_reminder("mission-retained", None)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!home.root().join("instructions").exists());
     }
 }

@@ -27,6 +27,9 @@ use tokio::time::timeout;
 #[path = "swarm_retirement_tests.rs"]
 mod swarm_retirement;
 
+#[path = "legacy_work_tracking_tests.rs"]
+mod legacy_work_tracking;
+
 struct EnvGuard {
     prev_home: Option<OsString>,
     prev_runtime_dir: Option<OsString>,

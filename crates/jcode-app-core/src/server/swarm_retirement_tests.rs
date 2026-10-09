@@ -307,7 +307,7 @@ fn retirement_requests() -> Vec<crate::protocol::Request> {
     .collect()
 }
 
-async fn retirement_connection(
+pub(super) async fn retirement_connection(
     server: &Server,
 ) -> (
     crate::transport::Stream,
@@ -354,7 +354,7 @@ async fn retirement_connection(
     (client, task)
 }
 
-async fn retirement_terminal(
+pub(super) async fn retirement_terminal(
     reader: &mut tokio::io::BufReader<crate::transport::ReadHalf>,
     id: u64,
 ) -> ServerEvent {

@@ -21,6 +21,27 @@ pub fn is_swarm_dependent_command(command: &str) -> bool {
     )
 }
 
+/// Human slash commands retired by the legacy work-tracking gate, matched on
+/// the command token. `/mission` and `/goal` keep their separate rejection.
+pub fn is_legacy_work_tracking_command(command: &str) -> bool {
+    matches!(
+        command,
+        "/commit"
+            | "/commit-push"
+            | "/commit-and-push"
+            | "/fast-release"
+            | "/cut-release"
+            | "/commit-push-release"
+            | "/fast-macos-release"
+            | "/remote-release"
+            | "/test"
+            | "/plan"
+            | "/improve"
+            | "/initiatives"
+            | "/goals"
+    )
+}
+
 pub fn render_prompt(
     repositories: &InstructionRepositoryService,
     working_dir: Option<&Path>,
@@ -29,6 +50,11 @@ pub fn render_prompt(
     if request.requires_swarm() && !crate::config::config().features.swarm {
         return Err(SystemPromptActivationError::Compatibility(
             crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+        ));
+    }
+    if request.requires_legacy_work_tracking() && !crate::config::legacy_work_tracking_enabled() {
+        return Err(SystemPromptActivationError::Compatibility(
+            crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE.into(),
         ));
     }
     match request {
@@ -149,5 +175,86 @@ mod tests {
             render_prompt(&repositories, None, &request).unwrap(),
             "R P<&{{literal}}> [GLOBAL]"
         );
+    }
+
+    #[test]
+    fn legacy_work_tracking_render_rejects_commands_but_keeps_structured_output() {
+        let _guard = crate::storage::lock_test_env();
+        let _off =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(false);
+        let temp = tempfile::tempdir().unwrap();
+        let missing = InstructionRepositoryService::from_paths(
+            temp.path().join("missing-home"),
+            temp.path().join("missing-state"),
+        );
+        for command in [
+            CommandWorkflow::Commit,
+            CommandWorkflow::CommitPush,
+            CommandWorkflow::ReleaseRemote,
+            CommandWorkflow::Test { claim: "x".into() },
+            CommandWorkflow::Plan { goal: None },
+            CommandWorkflow::Improve {
+                plan_only: false,
+                focus: None,
+            },
+            CommandWorkflow::ImproveStop,
+        ] {
+            let request = WorkflowPromptRequest::Command { command };
+            assert!(request.requires_legacy_work_tracking());
+            assert_eq!(
+                render_prompt(&missing, None, &request)
+                    .unwrap_err()
+                    .to_string(),
+                crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE
+            );
+        }
+        assert!(!temp.path().join("missing-home").exists());
+
+        let repositories = InstructionRepositoryService::from_paths(
+            temp.path().join("home"),
+            temp.path().join("state"),
+        );
+        crate::instruction::SystemPromptComposer::from_repository_service(repositories.clone())
+            .ensure_global_store()
+            .unwrap();
+        let global = repositories.global_repository().unwrap().root;
+        write(&global, "structured-output", "SYNTHETIC", false);
+        let structured = WorkflowPromptRequest::StructuredInitial {
+            content: "C".into(),
+            schema: "{}".into(),
+        };
+        assert!(!structured.requires_legacy_work_tracking());
+        assert!(
+            render_prompt(&repositories, None, &structured)
+                .unwrap()
+                .contains("SYNTHETIC")
+        );
+        for name in [
+            "/commit",
+            "/commit-push",
+            "/commit-and-push",
+            "/fast-release",
+            "/cut-release",
+            "/commit-push-release",
+            "/fast-macos-release",
+            "/remote-release",
+            "/test",
+            "/plan",
+            "/improve",
+            "/initiatives",
+            "/goals",
+        ] {
+            assert!(is_legacy_work_tracking_command(name), "{name}");
+        }
+        for name in [
+            "/transfer",
+            "/planner",
+            "/testing",
+            "/goal",
+            "/mission",
+            "/refactor",
+        ] {
+            assert!(!is_legacy_work_tracking_command(name), "{name}");
+        }
     }
 }

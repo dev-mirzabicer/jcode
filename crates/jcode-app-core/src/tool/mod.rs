@@ -176,7 +176,20 @@ fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
 
 /// Global availability overrides both session policy and previously cached registries.
 pub fn tool_is_globally_available(name: &str) -> bool {
-    jcode_tool_types::resolve_tool_name(name) != "swarm" || crate::config::config().features.swarm
+    global_unavailability(name).is_none()
+}
+
+/// Why a globally gated tool cannot be advertised or run, if it cannot.
+fn global_unavailability(name: &str) -> Option<&'static str> {
+    match jcode_tool_types::resolve_tool_name(name) {
+        "swarm" if !crate::config::config().features.swarm => {
+            Some(crate::config::SWARM_UNAVAILABLE)
+        }
+        "initiative" if !crate::config::legacy_work_tracking_enabled() => {
+            Some(crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE)
+        }
+        _ => None,
+    }
 }
 
 /// Registry of available tools (Arc-wrapped for sharing)
@@ -565,6 +578,9 @@ impl Registry {
         }
         if !crate::config::config().features.swarm {
             tools.remove("swarm");
+        }
+        if !crate::config::legacy_work_tracking_enabled() {
+            tools.remove("initiative");
         }
         // SkillTool needs the skills registry reference (shared across sessions)
         Self::insert_tool(
@@ -995,8 +1011,8 @@ impl Registry {
             ) {
                 native_files::bind(&mut ctx, self.child_policy.clone())?;
             }
-            if !tool_is_globally_available(name) {
-                anyhow::bail!(crate::config::SWARM_UNAVAILABLE);
+            if let Some(reason) = global_unavailability(name) {
+                anyhow::bail!(reason);
             }
             let tools = self.tools.read().await;
             if let Some(policy) = session_tool_policy(&ctx.session_id) {

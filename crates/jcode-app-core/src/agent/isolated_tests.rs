@@ -330,6 +330,10 @@ async fn child_directives_are_locked_before_curator_work_and_survive_rewind_undo
 
 #[tokio::test]
 async fn children_cannot_update_shared_initiatives_or_be_restored_as_primary_chat() {
+    // The child restriction is exercised on the dormant enabled path, enabled
+    // before the fixture builds its registry.
+    let _legacy =
+        crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let (home, mut agent, calls, _) = fixture(false).await;
     agent
         .prepare_isolated_turn("run-rw", "input", Some(Permission::ReadWrite), None)

@@ -9,6 +9,9 @@ use serde_json::Value;
 #[path = "swarm_retirement_tests.rs"]
 mod swarm_retirement;
 
+#[path = "legacy_work_tracking_tests.rs"]
+mod legacy_work_tracking;
+
 #[path = "execution_tests.rs"]
 mod reliable_execution;
 

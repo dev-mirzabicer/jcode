@@ -3110,7 +3110,7 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         .await
         .expect("read terminal response");
     let response = decode_request_or_event(&line);
-    if let Some(expected) = unavailable_swarm_response(&request) {
+    if let Some(expected) = unavailable_feature_response(&request) {
         assert_eq!(
             serde_json::to_value(&response).unwrap(),
             serde_json::to_value(expected).unwrap()
@@ -3893,6 +3893,9 @@ fn decode_request_or_event(line: &str) -> ServerEvent {
 fn managed_workflow_rendering_uses_server_project_sources_without_a_turn() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();
+    // Command workflows are a dormant enabled path here.
+    let _legacy =
+        crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     // Bootstrap is fixture setup, not part of the timed streaming/recovery operation.
     crate::instruction::SystemPromptComposer::new()
         .ensure_global_store()

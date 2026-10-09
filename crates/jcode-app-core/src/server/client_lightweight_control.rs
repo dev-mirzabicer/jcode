@@ -31,7 +31,38 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
-pub(super) fn unavailable_swarm_response(request: &Request) -> Option<ServerEvent> {
+/// The global availability gates, checked before any session, source or model
+/// access: Swarm first, then legacy work tracking.
+pub(super) fn unavailable_feature_response(request: &Request) -> Option<ServerEvent> {
+    unavailable_swarm_response(request)
+        .or_else(|| unavailable_legacy_work_tracking_response(request))
+}
+
+fn unavailable_legacy_work_tracking_response(request: &Request) -> Option<ServerEvent> {
+    if crate::config::legacy_work_tracking_enabled() {
+        return None;
+    }
+    match request {
+        Request::SplitWithWorkflow { id, workflow } if workflow.requires_legacy_work_tracking() => {
+            Some(ServerEvent::WorkflowSplitFailed {
+                id: *id,
+                message: crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE.into(),
+            })
+        }
+        Request::RenderWorkflowPrompt { id, workflow }
+            if workflow.requires_legacy_work_tracking() =>
+        {
+            Some(ServerEvent::Error {
+                id: *id,
+                message: crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE.into(),
+                retry_after_secs: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn unavailable_swarm_response(request: &Request) -> Option<ServerEvent> {
     if crate::config::config().features.swarm {
         return None;
     }
@@ -155,7 +186,7 @@ pub(super) async fn handle_lightweight_control_request(
 
     write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
 
-    if let Some(error) = unavailable_swarm_response(&request) {
+    if let Some(error) = unavailable_feature_response(&request) {
         write_direct_event(&writer, &error).await?;
         return Ok(());
     }

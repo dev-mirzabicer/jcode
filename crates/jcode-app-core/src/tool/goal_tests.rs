@@ -4,6 +4,9 @@ use tokio::time::{Duration, timeout};
 #[tokio::test]
 async fn initiative_tool_create_and_resume_round_trip() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy =
+        crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
@@ -76,6 +79,9 @@ async fn initiative_tool_create_and_resume_round_trip() {
 #[tokio::test]
 async fn initiative_tool_list_does_not_open_side_panel_by_default() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy =
+        crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
@@ -128,6 +134,9 @@ async fn initiative_tool_list_does_not_open_side_panel_by_default() {
 #[tokio::test]
 async fn initiative_tool_update_refreshes_open_overview_without_stealing_focus() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy =
+        crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
