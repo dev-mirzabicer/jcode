@@ -18,6 +18,7 @@ Reference documentation for the jcode codebase.
 - Instruction framework verification: [independent phase closeout](dev/INSTRUCTION_CLOSEOUT_ACCEPTANCE.md)
 - Agent profiles and prompt freezing: `AGENT_PROFILES.md`, `SYSTEM_PROMPT_CONFIG.md`; managed Git stores: `INSTRUCTION_STORES.md`; skills: `SKILLS.md`; launch-time model policy: `MODEL_ROSTER.md`; maintainer ownership and future adoption: `dev/INSTRUCTION_RUNTIME.md`; combined acceptance: `dev/INSTRUCTION_INTEGRATION_ACCEPTANCE.md`
 - Agent memory policy: `MEMORY_POLICY.md`; dormant implementation: `MEMORY_ARCHITECTURE.md`
+- Missions, initiatives and the upstream command workflows: [legacy work-tracking policy](LEGACY_WORK_TRACKING_POLICY.md)
 - Process RAM and allocator diagnostics: `MEMORY_BUDGET.md`, `MEMORY_INCIDENT_RUNBOOK.md`
 - Tool execution: [retained output, exact reads and cancellation](TOOL_EXECUTION.md), [storage/control architecture](dev/EXECUTION_STORAGE.md), [producer inventory](dev/EXECUTION_PRODUCERS.md), [acceptance reconciliation](dev/EXECUTION_ACCEPTANCE.md)
 - Primary runtime: [creation, detached ownership and native verification](dev/PRIMARY_HOST_ACCEPTANCE.md), [durable input and atomic location controls](PRIMARY_INPUT_LOCATION.md), and [reviewed new-context scope](PRIMARY_CONTEXT_SCOPE.md). Managed creation and location controls follow `features.managed_primary_launch` ([managed placement rollout](WORKSPACE_ROLLOUT.md)); ordinary client detach does not stop hosted work.

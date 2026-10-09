@@ -91,7 +91,9 @@ rolled back on Stop or failure.
 Children cannot recursively delegate or perform harness-wide administration,
 reload Jcode, schedule other agents, or mutate project/global initiatives. Their
 own ordinary todos remain available. The parent updates shared initiatives after
-reviewing the child's result.
+reviewing the child's result. Initiatives themselves are dormant while
+`features.legacy_work_tracking` is off ([policy](LEGACY_WORK_TRACKING_POLICY.md)),
+so neither parents nor children are offered the tool.
 
 MCP discovery and global/project precedence are the same for parents and children.
 The effective server definition may declare:

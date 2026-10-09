@@ -2,7 +2,7 @@
 
 Workflow prose uses the same [instruction runtime](dev/INSTRUCTION_RUNTIME.md) and [Git-backed stores](INSTRUCTION_STORES.md) as agent profiles and notifications. Existing workflow owners retain their triggers, provider/model selection, permissions, task data, framing, persistence, and execution policy. Editing prose does not create or enable a workflow.
 
-**Downstream availability:** The legacy review/judge, automatic review/judge, refactor, triage and overnight execution workflows are now retired while Swarm is globally unavailable. Their source and history remain intact. The descriptions below preserve their dormant mechanisms, not current launch availability. [Swarm policy](SWARM_POLICY.md#legacy-dependent-workflows) describes the gates and recovery of old pending startup input. Transfer, structured output, ordinary plan/improve and generic scheduling remain independent.
+**Downstream availability:** The legacy review/judge, automatic review/judge, refactor, triage and overnight execution workflows are retired while Swarm is globally unavailable. [Swarm policy](SWARM_POLICY.md#legacy-dependent-workflows) describes their gates and the recovery of old pending startup input. Mission continuation and the commit/push/release, `/test`, `/plan` and improve command workflows are retired while `features.legacy_work_tracking` is off, under the [legacy work-tracking policy](LEGACY_WORK_TRACKING_POLICY.md). Their source, resources and history remain intact. The descriptions below preserve the dormant mechanisms, not current launch availability. Transfer, structured output and generic scheduling remain independent.
 
 ## Implemented consumers
 
@@ -56,11 +56,15 @@ Startup banners derive from typed review mode and parent metadata, not prompt pr
 
 ### Mission continuation
 
+Dormant while `features.legacy_work_tracking` is off: the mission store fails closed, no reminder renders and these resources are not read ([policy](LEGACY_WORK_TRACKING_POLICY.md)).
+
 Mission introduction, continuation and generated default intent use managed `modules/mission-*` resources. The mission owner retains XML tags and escaping. User objective and intent data remain literal, including template-looking text. This corrects the former chained-replacement behavior that could replace a placeholder inside the user's objective.
 
 Mission creation and rendering accept an explicit working directory for scope. No mission or an inactive mission performs no instruction-source read. Failed creation preserves the previous stored mission. A local turn with invalid mission instructions preserves its raw composer input, cursor, paste backing and images without appending a user turn. Queued preparation uses the existing instruction-error recovery boundary. The migration adds no new mission UI, remote activation policy, profile selection or automatic context operation.
 
 ### Interactive command workflows
+
+Dormant while `features.legacy_work_tracking` is off: the TUI claims these commands before rendering or dispatch, the server's `RenderWorkflowPrompt` and `SplitWithWorkflow` reject them before reading sources, restored pending preparation cannot dispatch, and a saved improve mode is ignored ([policy](LEGACY_WORK_TRACKING_POLICY.md)). Structured output uses the same operation and stays available.
 
 Commit/push/release, triage, `/test`, `/plan`, improve/refactor run/plan/stop/resume use `workflow-*` modules and notifications. Shared release and commit sections remain reusable modules. Dynamic focus, goal and todo rows are captured as typed data. One catalog snapshot renders each complete command.
 
