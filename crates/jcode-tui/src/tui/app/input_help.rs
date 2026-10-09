@@ -13,6 +13,11 @@ impl App {
         {
             return Some(crate::config::SWARM_WORKFLOW_UNAVAILABLE.into());
         }
+        if !crate::config::legacy_work_tracking_enabled()
+            && crate::workflow::is_legacy_work_tracking_command(&format!("/{topic}"))
+        {
+            return Some(crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE.into());
+        }
         let help = match topic.as_str() {
             "help" | "commands" => {
                 "/help\nShow general command list and keyboard shortcuts.\n\n/help <command>\nShow detailed help for one command."

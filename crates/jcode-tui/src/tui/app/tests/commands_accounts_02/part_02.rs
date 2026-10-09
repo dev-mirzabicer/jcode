@@ -50,6 +50,8 @@ fn test_refactor_command_starts_refactor_loop() {
 #[test]
 fn test_plan_command_is_plan_only_and_presents_plan_card() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/plan add a compact message mode".to_string();
@@ -80,6 +82,8 @@ fn test_plan_command_is_plan_only_and_presents_plan_card() {
 #[test]
 fn test_plan_command_without_goal_plans_current_focus() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/plan".to_string();

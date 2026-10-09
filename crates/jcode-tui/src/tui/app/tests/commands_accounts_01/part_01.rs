@@ -546,6 +546,9 @@ fn test_help_topic_shows_git_command_details() {
 
 #[test]
 fn test_help_topic_shows_commit_command_details() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
     app.input = "/help commit".to_string();
     app.submit_input();
@@ -563,6 +566,8 @@ fn test_help_topic_shows_commit_command_details() {
 #[test]
 fn test_commit_command_starts_synthetic_user_turn() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/commit".to_string();
@@ -581,6 +586,8 @@ fn test_commit_command_starts_synthetic_user_turn() {
 #[test]
 fn test_commit_push_command_starts_synthetic_user_turn() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/commit-push".to_string();
@@ -598,6 +605,9 @@ fn test_commit_push_command_starts_synthetic_user_turn() {
 
 #[test]
 fn test_help_topic_shows_commit_push_command_details() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
     app.input = "/help commit-push".to_string();
     app.submit_input();
@@ -614,6 +624,8 @@ fn test_help_topic_shows_commit_push_command_details() {
 #[test]
 fn test_fast_release_command_starts_synthetic_user_turn() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/fast-release".to_string();
@@ -660,6 +672,8 @@ fn test_triage_command_includes_typed_focus() {
 #[test]
 fn test_cut_release_alias_starts_fast_release_turn() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/cut-release".to_string();
@@ -678,6 +692,8 @@ fn test_cut_release_alias_starts_fast_release_turn() {
 #[test]
 fn test_fast_macos_release_command_uses_prepared_cross_build() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/fast-macos-release".to_string();
@@ -696,6 +712,9 @@ fn test_fast_macos_release_command_uses_prepared_cross_build() {
 
 #[test]
 fn test_help_topic_shows_fast_macos_release_details() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
     app.input = "/help fast-macos-release".to_string();
     app.submit_input();
@@ -714,6 +733,8 @@ fn test_help_topic_shows_fast_macos_release_details() {
 #[test]
 fn test_remote_release_command_uses_tag_only_ci_path() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/remote-release".to_string();
@@ -736,6 +757,8 @@ fn test_remote_release_command_uses_tag_only_ci_path() {
 #[test]
 fn test_commit_push_release_alias_starts_synthetic_user_turn() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/commit-push-release".to_string();
@@ -755,6 +778,9 @@ fn test_commit_push_release_alias_starts_synthetic_user_turn() {
 
 #[test]
 fn test_help_topic_shows_cut_release_command_details() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
     app.input = "/help cut-release".to_string();
     app.submit_input();
@@ -773,6 +799,9 @@ fn test_help_topic_shows_cut_release_command_details() {
 
 #[test]
 fn test_help_topic_shows_remote_release_command_details() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
     app.input = "/help remote-release".to_string();
     app.submit_input();
@@ -1025,6 +1054,8 @@ fn test_save_command_bookmarks_session_with_memory_enabled() {
 #[test]
 fn test_goals_command_opens_overview_in_side_panel() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
@@ -1063,6 +1094,8 @@ fn test_goals_command_opens_overview_in_side_panel() {
 #[test]
 fn test_mission_and_goal_commands_are_disabled() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -1114,6 +1147,8 @@ fn test_mission_and_goal_commands_are_disabled() {
 #[test]
 fn test_goals_legacy_alias_is_not_captured_by_goal_mission_alias() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
@@ -1601,6 +1636,8 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
 #[test]
 fn test_goals_show_command_focuses_goal_page() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");

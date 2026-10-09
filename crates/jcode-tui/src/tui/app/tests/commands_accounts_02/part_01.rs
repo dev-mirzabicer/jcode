@@ -620,6 +620,8 @@ fn test_commands_alias_shows_help() {
 #[test]
 fn test_improve_command_starts_improvement_loop() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/improve".to_string();
@@ -649,6 +651,8 @@ fn test_improve_command_starts_improvement_loop() {
 #[test]
 fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/improve plan startup performance".to_string();
@@ -676,6 +680,9 @@ fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
 #[test]
 fn test_improve_status_summarizes_current_todos() {
     with_temp_jcode_home(|| {
+        // Dormant enabled path, explicitly enabled for this mechanism test.
+        let _legacy =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
         let mut app = create_test_app();
         seed_synthetic_command_sources();
         crate::todo::save_todos(
@@ -730,6 +737,8 @@ fn test_improve_status_summarizes_current_todos() {
 #[test]
 fn test_improve_stop_without_active_run_reports_idle() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.session.improve_mode = None;
@@ -746,6 +755,8 @@ fn test_improve_stop_without_active_run_reports_idle() {
 #[test]
 fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.improve_mode = Some(ImproveMode::ImproveRun);
@@ -772,6 +783,8 @@ fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
 #[test]
 fn test_improve_resume_requires_saved_mode() {
     let _home=SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
         seed_synthetic_command_sources();
     app.input = "/improve resume".to_string();
@@ -787,6 +800,9 @@ fn test_improve_resume_requires_saved_mode() {
 #[test]
 fn test_improve_resume_uses_saved_mode_and_current_todos() {
     with_temp_jcode_home(|| {
+        // Dormant enabled path, explicitly enabled for this mechanism test.
+        let _legacy =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
         let mut app = create_test_app();
         seed_synthetic_command_sources();
         app.session.improve_mode = Some(crate::session::SessionImproveMode::ImproveRun);

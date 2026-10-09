@@ -285,18 +285,20 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/poke",
         "Poke model to resume with incomplete todos (on/off/status)",
     ));
-    lines.push(help_entry(
-        "/plan [goal]",
-        "Draft a plan-only proposal as a plan card (no edits)",
-    ));
-    lines.push(help_entry(
-        "/improve",
-        "Autonomously improve the repo until returns diminish",
-    ));
-    lines.push(help_entry(
-        "/improve resume",
-        "Resume the last saved improve loop/plan",
-    ));
+    if crate::config::legacy_work_tracking_enabled() {
+        lines.push(help_entry(
+            "/plan [goal]",
+            "Draft a plan-only proposal as a plan card (no edits)",
+        ));
+        lines.push(help_entry(
+            "/improve",
+            "Autonomously improve the repo until returns diminish",
+        ));
+        lines.push(help_entry(
+            "/improve resume",
+            "Resume the last saved improve loop/plan",
+        ));
+    }
     if crate::config::config().features.swarm {
         lines.push(help_entry(
             "/refactor",
@@ -371,14 +373,16 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     if crate::config::config().features.memory {
         lines.push(help_entry("/memory [on|off]", "Toggle memory features"));
     }
-    lines.push(help_entry(
-        "/test [claim]",
-        "Run layered verification and produce proof",
-    ));
-    lines.push(help_entry(
-        "/initiatives",
-        "Open initiatives overview / resume an initiative",
-    ));
+    if crate::config::legacy_work_tracking_enabled() {
+        lines.push(help_entry(
+            "/test [claim]",
+            "Run layered verification and produce proof",
+        ));
+        lines.push(help_entry(
+            "/initiatives",
+            "Open initiatives overview / resume an initiative",
+        ));
+    }
     if crate::config::config().features.swarm {
         lines.push(help_entry("/swarm [on|off]", "Toggle swarm features"));
     }

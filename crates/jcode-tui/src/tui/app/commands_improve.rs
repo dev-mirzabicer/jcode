@@ -137,6 +137,16 @@ pub(super) fn session_improve_mode_for(mode: ImproveMode) -> crate::session::Ses
     }
 }
 
+/// The loop mode a restored session resumes in. A saved improve loop stays in
+/// the session file but is ignored while legacy work tracking is off; refactor
+/// loops keep their separate Swarm gate.
+pub(super) fn restored_loop_mode(
+    saved: Option<crate::session::SessionImproveMode>,
+) -> Option<ImproveMode> {
+    let mode = restore_improve_mode(saved?);
+    (mode.is_refactor() || crate::config::legacy_work_tracking_enabled()).then_some(mode)
+}
+
 pub(super) fn restore_improve_mode(mode: crate::session::SessionImproveMode) -> ImproveMode {
     match mode {
         crate::session::SessionImproveMode::ImproveRun => ImproveMode::ImproveRun,

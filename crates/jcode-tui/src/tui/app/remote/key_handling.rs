@@ -957,7 +957,9 @@ async fn handle_remote_key_internal(
             if !app.input.is_empty() {
                 let prepared = input::take_prepared_input(app);
                 let trimmed = prepared.expanded.trim();
-                if app_mod::commands::handle_unavailable_swarm_command(app, trimmed) {
+                if app_mod::commands::handle_unavailable_swarm_command(app, trimmed)
+                    || app_mod::commands::handle_retired_work_tracking_command(app, trimmed)
+                {
                     return Ok(());
                 }
 

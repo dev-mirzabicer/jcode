@@ -411,12 +411,7 @@ impl App {
                     .force_attribution(),
             );
         }
-        let improve_mode = session.improve_mode.map(|mode| match mode {
-            crate::session::SessionImproveMode::ImproveRun => ImproveMode::ImproveRun,
-            crate::session::SessionImproveMode::ImprovePlan => ImproveMode::ImprovePlan,
-            crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
-            crate::session::SessionImproveMode::RefactorPlan => ImproveMode::RefactorPlan,
-        });
+        let improve_mode = super::commands::restored_loop_mode(session.improve_mode);
         let active_skill = session.active_skill_id().map(str::to_string);
 
         crate::logging::info("App::new_minimal_with_session: skipping skill/prompt bootstrap");
@@ -859,12 +854,7 @@ impl App {
                     .force_attribution(),
             );
         }
-        let improve_mode = session.improve_mode.map(|mode| match mode {
-            crate::session::SessionImproveMode::ImproveRun => ImproveMode::ImproveRun,
-            crate::session::SessionImproveMode::ImprovePlan => ImproveMode::ImprovePlan,
-            crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
-            crate::session::SessionImproveMode::RefactorPlan => ImproveMode::RefactorPlan,
-        });
+        let improve_mode = super::commands::restored_loop_mode(session.improve_mode);
         let t_session = t0.elapsed();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

@@ -1,7 +1,8 @@
 pub(super) use super::commands_improve::{
     format_improve_status, format_refactor_status, improve_launch_notice, improve_mode_for,
     improve_stop_notice, parse_improve_command, parse_refactor_command, refactor_launch_notice,
-    refactor_mode_for, refactor_stop_notice, restore_improve_mode, session_improve_mode_for,
+    refactor_mode_for, refactor_stop_notice, restore_improve_mode, restored_loop_mode,
+    session_improve_mode_for,
 };
 pub(super) use super::commands_plan::{parse_plan_command, plan_launch_notice};
 #[cfg(test)]
@@ -83,6 +84,23 @@ pub(super) fn handle_unavailable_swarm_command(app: &mut App, input: &str) -> bo
             crate::config::SWARM_UNAVAILABLE.to_string(),
         ));
     }
+    true
+}
+
+/// Shared local/remote rejection of initiatives and the retired command
+/// workflows. Claims the input so it is never sent as a message, and runs
+/// before rendering, mode changes or store access.
+pub(super) fn handle_retired_work_tracking_command(app: &mut App, input: &str) -> bool {
+    if crate::config::legacy_work_tracking_enabled() {
+        return false;
+    }
+    let name = input.split_whitespace().next().unwrap_or_default();
+    if !crate::workflow::is_legacy_work_tracking_command(name) {
+        return false;
+    }
+    app.push_display_message(DisplayMessage::system(
+        crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE.to_string(),
+    ));
     true
 }
 
@@ -1761,7 +1779,9 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 }
 
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
-    if handle_unavailable_swarm_command(app, trimmed) {
+    if handle_unavailable_swarm_command(app, trimmed)
+        || handle_retired_work_tracking_command(app, trimmed)
+    {
         return true;
     }
     if super::commands_workflow::handle(app, trimmed) {
@@ -2456,6 +2476,9 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
     else {
         return false;
     };
+    if handle_retired_work_tracking_command(app, &format!("/initiatives{trimmed}")) {
+        return true;
+    }
     let trimmed = format!("/initiatives{}", trimmed);
 
     if trimmed == "/initiatives" {

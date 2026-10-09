@@ -1,4 +1,6 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+#[path = "tests/legacy_work_tracking.rs"]
+mod legacy_work_tracking;
 #[path = "tests/swarm_retirement.rs"]
 mod swarm_retirement;
 include!("tests/support_failover/part_01.rs");
@@ -2024,6 +2026,9 @@ fn reviewer_startup_hints_are_typed_and_independent_of_instruction_prose() {
 #[test]
 fn invalid_mission_prose_preserves_composer_pastes_images_and_prior_turn_state() {
     let home = SkillTestHome::new();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy =
+        crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let mut app = create_test_app();
     crate::mission::set(&app.session.id, "MISSION", None).unwrap();
     std::fs::write(

@@ -66,6 +66,9 @@ pub(super) fn strip_reasoning_lines(content: &str) -> String {
 }
 
 fn mission_turn_reminder(app: &App) -> Result<Option<String>> {
+    if !crate::config::legacy_work_tracking_enabled() {
+        return Ok(None);
+    }
     crate::mission::active_system_reminder(
         &app.session.id,
         app.session.working_dir.as_deref().map(std::path::Path::new),

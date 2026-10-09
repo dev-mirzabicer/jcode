@@ -836,6 +836,9 @@ fn test_remote_command_suggestion_arrow_and_ctrl_navigation_accepts_highlighted_
 
 #[test]
 fn test_registered_command_suggestions_include_aliases_and_hide_secret_commands() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/");
     let commands: Vec<&str> = suggestions.iter().map(|(cmd, _)| cmd.as_str()).collect();
@@ -911,6 +914,9 @@ fn test_top_level_command_suggestions_include_project_local_skills() {
 
 #[test]
 fn test_top_level_command_suggestions_include_catchup_and_back() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let app = create_test_app();
 
     let suggestions = app.get_suggestions_for("/cat");
@@ -1212,6 +1218,8 @@ fn test_autocomplete_adds_space_for_nested_argument_commands() {
 #[test]
 fn test_goals_show_suggestions_include_goal_ids() {
     let _guard = crate::storage::lock_test_env();
+    // Dormant enabled path, explicitly enabled for this mechanism test.
+    let _legacy = crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");

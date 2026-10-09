@@ -120,6 +120,9 @@ fn loop_request(
 }
 
 pub(super) fn handle(app: &mut App, text: &str) -> bool {
+    if commands::handle_retired_work_tracking_command(app, text) {
+        return true;
+    }
     let command = match text {
         "/commit" => Some(C::Commit),
         "/commit-push" | "/commit-and-push" => Some(C::CommitPush),
@@ -351,6 +354,9 @@ fn dispatch_local(app: &mut App, command: &C, body: String) -> anyhow::Result<()
     if command.requires_swarm() {
         crate::config::require_swarm_workflow()?;
     }
+    if command.requires_legacy_work_tracking() {
+        crate::config::require_legacy_work_tracking()?;
+    }
     persist_mode(app, command, false)?;
     if matches!(command, C::Test { .. }) {
         queue_test(app, body);
@@ -379,6 +385,9 @@ async fn dispatch_remote(
 ) -> anyhow::Result<()> {
     if command.requires_swarm() {
         crate::config::require_swarm_workflow()?;
+    }
+    if command.requires_legacy_work_tracking() {
+        crate::config::require_legacy_work_tracking()?;
     }
     persist_mode(app, command, true)?;
     if matches!(command, C::Test { .. }) {
@@ -489,6 +498,17 @@ pub(super) async fn poll(
         app.save_input_for_reload(&commands::active_session_id(app));
         return true;
     }
+    if app.pending_workflow_commands[index]
+        .command
+        .requires_legacy_work_tracking()
+        && let Err(error) = crate::config::require_legacy_work_tracking()
+    {
+        let pending = app.pending_workflow_commands.remove(index);
+        restore_failed(app, &pending.original, &error.to_string());
+        app.pending_queued_dispatch |= has_ready(app);
+        app.save_input_for_reload(&commands::active_session_id(app));
+        return true;
+    }
     if app.pending_workflow_commands[index].request_id.is_none() {
         let id = connection.reserve_workflow_request_id();
         let pending = &mut app.pending_workflow_commands[index];
@@ -560,6 +580,9 @@ mod tests {
     #[test]
     fn remote_commands_render_on_server_before_mode_changes_and_preserve_dispatch_policy() {
         let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Dormant enabled path, explicitly enabled for this mechanism test.
+        let _legacy =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
         let mut app = crate::tui::app::tests::create_test_app();
         app.is_remote = true;
         app.session.save().unwrap();
@@ -665,6 +688,9 @@ mod tests {
     #[test]
     fn pending_command_failure_cancellation_and_reload_preserve_intent_and_current_turn() {
         let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Dormant enabled path, explicitly enabled for this mechanism test.
+        let _legacy =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
         let mut app = crate::tui::app::tests::create_test_app();
         app.is_remote = true;
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -738,6 +764,9 @@ mod dispatcher_tests {
     #[test]
     fn actual_enter_and_render_reply_wake_the_shared_event_loop_dispatcher() {
         let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Dormant enabled path, explicitly enabled for this mechanism test.
+        let _legacy =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
         let mut app = crate::tui::app::tests::create_test_app();
         app.is_remote = true;
         let runtime = tokio::runtime::Runtime::new().unwrap();

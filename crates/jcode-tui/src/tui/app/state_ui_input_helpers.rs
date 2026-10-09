@@ -284,6 +284,12 @@ pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str
         })
         .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
         .filter(|command| {
+            crate::config::legacy_work_tracking_enabled()
+                || !crate::workflow::is_legacy_work_tracking_command(
+                    command.name.split_whitespace().next().unwrap_or_default(),
+                )
+        })
+        .filter(|command| {
             !matches!(
                 command.name,
                 "/swarm" | "/swarm-prompt" | "/swarm-prompt inspect"
@@ -429,6 +435,12 @@ impl App {
                     )
             })
             .filter(|command| command.name != "/memory" || crate::config::config().features.memory)
+            .filter(|command| {
+                crate::config::legacy_work_tracking_enabled()
+                    || !crate::workflow::is_legacy_work_tracking_command(
+                        command.name.split_whitespace().next().unwrap_or_default(),
+                    )
+            })
             .filter(|command| {
                 !matches!(
                     command.name,
@@ -606,6 +618,13 @@ impl App {
 
         if !crate::config::config().features.swarm
             && crate::workflow::is_swarm_dependent_command(
+                input.split_whitespace().next().unwrap_or_default(),
+            )
+        {
+            return Vec::new();
+        }
+        if !crate::config::legacy_work_tracking_enabled()
+            && crate::workflow::is_legacy_work_tracking_command(
                 input.split_whitespace().next().unwrap_or_default(),
             )
         {
