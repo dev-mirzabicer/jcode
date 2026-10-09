@@ -1012,6 +1012,9 @@ pub struct FeatureConfig {
     /// Globally enable Swarm coordination, tools, and restoration (default: false).
     /// Session controls cannot exceed this availability boundary.
     pub swarm: bool,
+    /// Globally enable the retired missions, initiatives and upstream command
+    /// workflows (default: false). Their code and data stay dormant while off.
+    pub legacy_work_tracking: bool,
     /// Enable Mermaid rendering and Mermaid-specific model guidance (default: true)
     pub mermaid: bool,
     /// Default state of auto-poke (automatic follow-up when the model stops with
@@ -1040,6 +1043,7 @@ impl Default for FeatureConfig {
             managed_primary_launch: false,
             memory: false,
             swarm: false,
+            legacy_work_tracking: false,
             mermaid: true,
             auto_poke: true,
             message_timestamps: true,

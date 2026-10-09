@@ -56,6 +56,65 @@ fn swarm_retirement_defaults_and_explicit_global_compatibility() {
 }
 
 #[test]
+fn legacy_work_tracking_defaults_off_with_file_and_environment_overrides() {
+    assert!(!Config::default().features.legacy_work_tracking);
+    assert!(
+        !toml::from_str::<Config>("")
+            .unwrap()
+            .features
+            .legacy_work_tracking
+    );
+    assert!(
+        toml::from_str::<Config>("[features]\nlegacy_work_tracking = true\n")
+            .unwrap()
+            .features
+            .legacy_work_tracking
+    );
+    assert!(
+        !toml::from_str::<Config>(&Config::default_config_file_contents())
+            .unwrap()
+            .features
+            .legacy_work_tracking
+    );
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[features]\nlegacy_work_tracking = true\n",
+    )
+    .unwrap();
+    {
+        let _off = super::feature_override::ScopedFeatureOverride::legacy_work_tracking(false);
+        assert!(!super::legacy_work_tracking_enabled());
+        assert_eq!(
+            super::require_legacy_work_tracking()
+                .unwrap_err()
+                .to_string(),
+            super::LEGACY_WORK_TRACKING_UNAVAILABLE
+        );
+    }
+    if std::env::var_os("JCODE_LEGACY_WORK_TRACKING_ENABLED").is_none() {
+        // The saved file alone enables it when no override is present.
+        super::invalidate_config_cache();
+        assert!(super::legacy_work_tracking_enabled());
+    }
+    {
+        let _on = super::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
+        std::fs::write(temp.path().join("config.toml"), "").unwrap();
+        super::invalidate_config_cache();
+        assert!(super::legacy_work_tracking_enabled());
+        assert!(super::require_legacy_work_tracking().is_ok());
+    }
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    super::invalidate_config_cache();
+}
+
+#[test]
 fn obsolete_compaction_config_keys_are_ignored_and_never_serialized() {
     let config: Config = toml::from_str(
         r#"

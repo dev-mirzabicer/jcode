@@ -43,6 +43,23 @@ pub fn require_swarm() -> anyhow::Result<()> {
     Ok(())
 }
 
+pub const LEGACY_WORK_TRACKING_UNAVAILABLE: &str = "Missions, initiatives and the legacy command workflows are retired while `features.legacy_work_tracking` is off. Their code, instructions and data are retained.";
+
+/// Whether the retired missions, initiatives and upstream command workflows
+/// are available. Every entry, restore and storage path checks this one owner.
+pub fn legacy_work_tracking_enabled() -> bool {
+    config().features.legacy_work_tracking
+}
+
+/// Fail closed before any legacy work-tracking source, store or effect.
+pub fn require_legacy_work_tracking() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        legacy_work_tracking_enabled(),
+        LEGACY_WORK_TRACKING_UNAVAILABLE
+    );
+    Ok(())
+}
+
 const CONFIG_ENV_KEYS: &[&str] = &[
     "HOME",
     "JCODE_ACP_PROFILE",
@@ -122,6 +139,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_JADE_RELAY_USER_ID",
     "JCODE_KV_CACHE_MISS_NOTICES",
     "JCODE_LATEX_RENDERING",
+    "JCODE_LEGACY_WORK_TRACKING_ENABLED",
     "JCODE_MARKDOWN_SPACING",
     "JCODE_MEMORY_EMBEDDING_BACKEND",
     "JCODE_MEMORY_EMBEDDING_BASE_URL",
@@ -925,6 +943,8 @@ mod config_file;
 mod default_file;
 mod display_summary;
 mod env_overrides;
+#[cfg(any(test, feature = "test-support"))]
+pub mod feature_override;
 
 #[cfg(test)]
 #[path = "config_tests.rs"]

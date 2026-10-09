@@ -1,3 +1,5 @@
+//! Dormant initiative (goal) store. Every storage path fails closed while
+//! `features.legacy_work_tracking` is off; rendering helpers stay pure.
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -73,6 +75,7 @@ pub struct GoalDisplayResult {
 }
 
 pub fn create_goal(input: GoalCreateInput, working_dir: Option<&Path>) -> Result<Goal> {
+    crate::config::require_legacy_work_tracking()?;
     if input.title.trim().is_empty() {
         anyhow::bail!("goal title cannot be empty");
     }
@@ -91,7 +94,11 @@ pub fn create_goal(input: GoalCreateInput, working_dir: Option<&Path>) -> Result
     goal.progress_percent = input.progress_percent.map(|p| p.min(100));
     goal.updated_at = Utc::now();
     save_goal(&goal, working_dir)?;
-    sync_goal_memory(&goal, working_dir)?;
+    // Goals are the authority. The memory copy exists only while memory is
+    // itself available, so a disabled memory store is never reached.
+    if crate::config::config().features.memory {
+        sync_goal_memory(&goal, working_dir)?;
+    }
     Ok(goal)
 }
 
@@ -101,6 +108,7 @@ pub fn update_goal(
     working_dir: Option<&Path>,
     update: GoalUpdateInput,
 ) -> Result<Option<Goal>> {
+    crate::config::require_legacy_work_tracking()?;
     let Some(mut goal) = load_goal(id, scope_hint, working_dir)? else {
         return Ok(None);
     };
@@ -153,7 +161,11 @@ pub fn update_goal(
     }
     goal.updated_at = Utc::now();
     save_goal(&goal, working_dir)?;
-    sync_goal_memory(&goal, working_dir)?;
+    // Goals are the authority. The memory copy exists only while memory is
+    // itself available, so a disabled memory store is never reached.
+    if crate::config::config().features.memory {
+        sync_goal_memory(&goal, working_dir)?;
+    }
     Ok(Some(goal))
 }
 
@@ -162,6 +174,7 @@ pub fn load_goal(
     scope_hint: Option<GoalScope>,
     working_dir: Option<&Path>,
 ) -> Result<Option<Goal>> {
+    crate::config::require_legacy_work_tracking()?;
     let id = jcode_task_types::sanitize_goal_id(id);
     let mut candidates = Vec::new();
     match scope_hint {
@@ -190,6 +203,7 @@ pub fn load_goal(
 }
 
 pub fn list_relevant_goals(working_dir: Option<&Path>) -> Result<Vec<Goal>> {
+    crate::config::require_legacy_work_tracking()?;
     let mut goals = load_goals_in_dir(&global_goals_dir()?)?;
     if let Some(project_dir) = project_goals_dir(working_dir)? {
         goals.extend(load_goals_in_dir(&project_dir)?);
@@ -199,6 +213,7 @@ pub fn list_relevant_goals(working_dir: Option<&Path>) -> Result<Vec<Goal>> {
 }
 
 pub fn resume_goal(session_id: &str, working_dir: Option<&Path>) -> Result<Option<Goal>> {
+    crate::config::require_legacy_work_tracking()?;
     if let Some(goal) = load_attached_goal(session_id, working_dir)?
         && goal.status.is_resumable()
     {
@@ -215,6 +230,7 @@ pub fn attach_goal_to_session(
     goal: &Goal,
     working_dir: Option<&Path>,
 ) -> Result<()> {
+    crate::config::require_legacy_work_tracking()?;
     let attachment = GoalAttachment {
         goal_id: goal.id.clone(),
         scope: goal.scope,
@@ -233,6 +249,7 @@ pub fn attach_goal_to_session(
 }
 
 pub fn load_attached_goal(session_id: &str, working_dir: Option<&Path>) -> Result<Option<Goal>> {
+    crate::config::require_legacy_work_tracking()?;
     let path = session_attachment_path(session_id)?;
     if !path.exists() {
         return Ok(None);
@@ -255,6 +272,7 @@ pub fn open_goals_overview_for_session(
     working_dir: Option<&Path>,
     focus: bool,
 ) -> Result<crate::side_panel::SidePanelSnapshot> {
+    crate::config::require_legacy_work_tracking()?;
     let goals = list_relevant_goals(working_dir)?;
     crate::side_panel::write_markdown_page(
         session_id,
@@ -269,6 +287,7 @@ pub fn refresh_goals_overview_for_session(
     session_id: &str,
     working_dir: Option<&Path>,
 ) -> Result<Option<crate::side_panel::SidePanelSnapshot>> {
+    crate::config::require_legacy_work_tracking()?;
     let snapshot = crate::side_panel::snapshot_for_session(session_id)?;
     if !snapshot.pages.iter().any(|page| page.id == "goals") {
         return Ok(None);
@@ -288,6 +307,7 @@ pub fn open_goal_for_session(
     id: &str,
     explicit_focus: bool,
 ) -> Result<Option<GoalDisplayResult>> {
+    crate::config::require_legacy_work_tracking()?;
     let Some(goal) = load_goal(id, None, working_dir)? else {
         return Ok(None);
     };
@@ -309,6 +329,7 @@ pub fn resume_goal_for_session(
     working_dir: Option<&Path>,
     explicit_focus: bool,
 ) -> Result<Option<GoalDisplayResult>> {
+    crate::config::require_legacy_work_tracking()?;
     let Some(goal) = resume_goal(session_id, working_dir)? else {
         return Ok(None);
     };
@@ -331,6 +352,7 @@ pub fn write_goal_page(
     goal: &Goal,
     display: GoalDisplayMode,
 ) -> Result<crate::side_panel::SidePanelSnapshot> {
+    crate::config::require_legacy_work_tracking()?;
     let page_id = goal_page_id(&goal.id);
     let page_title = format!("Goal: {}", goal.title);
     let focus = match display {
@@ -358,6 +380,9 @@ pub fn header_badge(
     working_dir: Option<&Path>,
     snapshot: &crate::side_panel::SidePanelSnapshot,
 ) -> Option<String> {
+    if !crate::config::legacy_work_tracking_enabled() {
+        return None;
+    }
     if let Some(page) = snapshot.focused_page()
         && page.id.starts_with("goal.")
     {

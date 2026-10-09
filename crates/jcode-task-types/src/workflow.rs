@@ -40,6 +40,16 @@ impl WorkflowPromptRequest {
             Self::StructuredInitial { .. } | Self::StructuredCorrection { .. } => false,
         }
     }
+    /// Retired upstream command workflows governed by the legacy work-tracking
+    /// gate. Structured output and the Swarm-dependent workflows are separate.
+    pub fn requires_legacy_work_tracking(&self) -> bool {
+        match self {
+            Self::Command { command } => command.requires_legacy_work_tracking(),
+            Self::ReviewStartup { .. }
+            | Self::StructuredInitial { .. }
+            | Self::StructuredCorrection { .. } => false,
+        }
+    }
     /// Heap-owned input bytes for diagnostics, not a rendering limit.
     pub fn allocated_bytes(&self) -> usize {
         match self {
@@ -136,6 +146,23 @@ impl CommandWorkflow {
                     mode: WorkflowLoopMode::RefactorRun | WorkflowLoopMode::RefactorPlan,
                     ..
                 }
+        )
+    }
+    /// Commit, push, release, test, plan and the improve loop. Their dispatch
+    /// and rendering are dormant while the legacy work-tracking gate is off.
+    pub fn requires_legacy_work_tracking(&self) -> bool {
+        matches!(
+            self,
+            Self::Commit
+                | Self::CommitPush
+                | Self::ReleaseFast
+                | Self::ReleaseMacos
+                | Self::ReleaseRemote
+                | Self::Test { .. }
+                | Self::Plan { .. }
+                | Self::Improve { .. }
+                | Self::ImproveStop
+                | Self::ImproveResume { .. }
         )
     }
     pub fn allocated_bytes(&self) -> usize {

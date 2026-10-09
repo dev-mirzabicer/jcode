@@ -166,6 +166,16 @@ fn registration(
 }
 
 impl Workflow<'_> {
+    /// Mission prose is dormant with the rest of legacy work tracking.
+    fn is_mission_workflow(&self) -> bool {
+        matches!(
+            self,
+            Self::MissionIntroduction { .. }
+                | Self::MissionContinuation { .. }
+                | Self::MissionDefaultIntent { .. }
+        )
+    }
+
     fn is_legacy_swarm_workflow(&self) -> bool {
         matches!(
             self,
@@ -206,6 +216,11 @@ impl Workflow<'_> {
         if self.is_legacy_swarm_workflow() && !crate::config::config().features.swarm {
             return Err(SystemPromptActivationError::Compatibility(
                 crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
+            ));
+        }
+        if self.is_mission_workflow() && !crate::config::legacy_work_tracking_enabled() {
+            return Err(SystemPromptActivationError::Compatibility(
+                crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE.into(),
             ));
         }
         let runtime = super::notification::occurrence_runtime(repositories, working_dir)?;

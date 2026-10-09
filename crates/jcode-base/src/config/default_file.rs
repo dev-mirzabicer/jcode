@@ -268,6 +268,11 @@ memory = false
 # Tools, coordination, worker restoration and session reactivation are unavailable.
 # Global environment override: JCODE_SWARM_ENABLED
 swarm = false
+# Retired missions, initiatives and the upstream command workflows (/commit,
+# /commit-push, release, /test, /plan, /improve). Their code and data stay
+# dormant while false. Reactivation requires a restart.
+# Global environment override: JCODE_LEGACY_WORK_TRACKING_ENABLED
+legacy_work_tracking = false
 # Mermaid: render Mermaid code blocks and tell the model that diagrams are supported
 mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with

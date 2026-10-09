@@ -12,6 +12,11 @@ pub fn render_command(
             crate::config::SWARM_WORKFLOW_UNAVAILABLE.into(),
         ));
     }
+    if command.requires_legacy_work_tracking() && !crate::config::legacy_work_tracking_enabled() {
+        return Err(SystemPromptActivationError::Compatibility(
+            crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE.into(),
+        ));
+    }
     let runtime = super::super::notification::occurrence_runtime(repositories, working_dir)?;
     Ok(render_in(&runtime, command)?)
 }
@@ -202,6 +207,10 @@ mod tests {
     }
     #[test]
     fn command_composition_is_current_scoped_and_skips_unused_optional_sources() {
+        let _guard = crate::storage::lock_test_env();
+        // Dormant enabled path, explicitly enabled for this mechanism test.
+        let _legacy =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(true);
         let temp = tempfile::tempdir().unwrap();
         let repositories = InstructionRepositoryService::from_paths(
             temp.path().join("home"),
@@ -262,5 +271,77 @@ mod tests {
             "{{missing}}",
         );
         assert!(render_command(&repositories, Some(&project), &CommandWorkflow::Commit).is_err());
+    }
+
+    #[test]
+    fn legacy_work_tracking_commands_and_mission_prose_reject_before_source_access() {
+        let _guard = crate::storage::lock_test_env();
+        let _off =
+            crate::config::feature_override::ScopedFeatureOverride::legacy_work_tracking(false);
+        let temp = tempfile::tempdir().unwrap();
+        let repositories = InstructionRepositoryService::from_paths(
+            temp.path().join("missing-home"),
+            temp.path().join("missing-state"),
+        );
+        let commands = [
+            CommandWorkflow::Commit,
+            CommandWorkflow::CommitPush,
+            CommandWorkflow::ReleaseFast,
+            CommandWorkflow::ReleaseMacos,
+            CommandWorkflow::ReleaseRemote,
+            CommandWorkflow::Test {
+                claim: "synthetic".into(),
+            },
+            CommandWorkflow::Plan { goal: None },
+            CommandWorkflow::Improve {
+                plan_only: false,
+                focus: None,
+            },
+            CommandWorkflow::Improve {
+                plan_only: true,
+                focus: Some("synthetic".into()),
+            },
+            CommandWorkflow::ImproveStop,
+            CommandWorkflow::ImproveResume {
+                mode: WorkflowLoopMode::ImproveRun,
+                todos: vec![],
+            },
+        ];
+        for command in &commands {
+            assert!(command.requires_legacy_work_tracking(), "{command:?}");
+            let error = render_command(&repositories, None, command).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE,
+                "{command:?}"
+            );
+        }
+        for workflow in [
+            Workflow::MissionDefaultIntent { objective: "x" },
+            Workflow::MissionIntroduction {
+                objective: "x",
+                long_horizon_intent: "y",
+            },
+            Workflow::MissionContinuation {
+                objective: "x",
+                long_horizon_intent: "y",
+            },
+        ] {
+            let error = workflow.render_with(&repositories, None).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                crate::config::LEGACY_WORK_TRACKING_UNAVAILABLE
+            );
+        }
+        // Swarm-dependent and unrelated commands keep their own classification.
+        assert!(!CommandWorkflow::RefactorStop.requires_legacy_work_tracking());
+        assert!(
+            !CommandWorkflow::Triage {
+                focus: String::new()
+            }
+            .requires_legacy_work_tracking()
+        );
+        assert!(!temp.path().join("missing-home").exists());
+        assert!(!temp.path().join("missing-state").exists());
     }
 }
