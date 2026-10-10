@@ -90,6 +90,9 @@ def script(request):
     latest = users[-1] if users else ''
     done = tool_results_since_user(messages)
     path = workflow_path(messages)
+    if not tools:
+        # A tool-less request is the transfer handoff summary.
+        return {'content': 'Synthetic handoff summary of the fixture session.'}
     if 'subagent' not in tools and 'CHILD-TASK' in latest:
         # The isolated child completes its template's first module.
         if done == 0:
@@ -363,6 +366,9 @@ try:
     split_binding = session_file(split_id)['session_work']
     assert split_binding['role'] == 'primary' and split_id in split_binding['context_line']
     assert head(split_id) is None
+    # The copied transcript names the source's file; the fork notice names its own, last.
+    split_messages = [{'content': json.dumps(m)} for m in session_file(split_id)['messages']]
+    assert workflow_path(split_messages) == str(f.home / 'session-work' / split_id / 'workflow.md')
     result['split'] = True
 
     # Transfer: the workflow is copied with provenance.
@@ -392,7 +398,7 @@ try:
     off = turn(OFF_SESSION, 'W-OFFWRITE', 2)
     assert 'Workflow file:' not in json.dumps(off[0]['messages'])
     assert not (f.home / 'session-work' / OFF_SESSION).exists()
-    assert 'error' in tool_texts(off[-1])[-1].lower() or 'cannot' in tool_texts(off[-1])[-1].lower(), tool_texts(off[-1])
+    assert tool_texts(off[-1])[-1].startswith('[Error]'), tool_texts(off[-1])
     Path(expected_path).write_text('another shell edit\n')
     kept = turn(session, 'FLAG-OFF', 1)
     assert RESTORED in json.dumps(kept[0]['messages'][-3:])
