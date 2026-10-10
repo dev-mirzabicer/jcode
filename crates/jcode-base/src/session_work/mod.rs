@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 pub mod activation;
 pub mod module_types;
+pub mod stop;
 pub mod store;
 pub mod surface;
 pub mod workflow;

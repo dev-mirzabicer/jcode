@@ -11,8 +11,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The schema this build reads and writes. Any other version fails closed.
-pub const SCHEMA_VERSION: u32 = 1;
+/// The schema this build reads and writes. Version 1 stores are upgraded in
+/// place; any other version fails closed.
+pub const SCHEMA_VERSION: u32 = 2;
 const FILE_NAME: &str = "store.sqlite3";
 const TABLES: &[&str] = &[
     "activation",
@@ -22,6 +23,9 @@ const TABLES: &[&str] = &[
     "module_times",
     "events",
     "journal",
+    "stops",
+    "turn_counters",
+    "turn_outcomes",
 ];
 
 const SCHEMA: &str = "
@@ -77,6 +81,36 @@ CREATE TABLE journal(
     at TEXT NOT NULL,
     kind TEXT NOT NULL,
     body TEXT NOT NULL
+) STRICT;
+";
+
+/// Version 2: stop declarations, per-turn counters and turn outcomes.
+const SCHEMA_V2: &str = "
+CREATE TABLE stops(
+    session TEXT NOT NULL REFERENCES activation(session),
+    number INTEGER NOT NULL CHECK(number > 0),
+    request TEXT NOT NULL,
+    settled_request TEXT,
+    body TEXT NOT NULL,
+    PRIMARY KEY(session, number),
+    UNIQUE(session, request)
+) STRICT;
+CREATE UNIQUE INDEX stops_settled_request ON stops(session, settled_request)
+    WHERE settled_request IS NOT NULL;
+CREATE TABLE turn_counters(
+    session TEXT NOT NULL REFERENCES activation(session),
+    turn INTEGER NOT NULL CHECK(turn > 0),
+    body TEXT NOT NULL,
+    PRIMARY KEY(session, turn)
+) STRICT;
+CREATE TABLE turn_outcomes(
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    session TEXT NOT NULL REFERENCES activation(session),
+    turn INTEGER NOT NULL CHECK(turn > 0),
+    request TEXT NOT NULL,
+    at TEXT NOT NULL,
+    body TEXT NOT NULL,
+    UNIQUE(session, request)
 ) STRICT;
 ";
 
@@ -138,6 +172,7 @@ impl SessionWorkStore {
             return Err(SessionWorkError::StoreMissing(self.path()));
         }
         let connection = raw_connection(&self.path(), false)?;
+        let connection = upgrade(connection)?;
         check_schema(&connection)?;
         Ok(connection)
     }
@@ -177,6 +212,9 @@ impl SessionWorkStore {
                     .execute_batch(SCHEMA)
                     .map_err(SessionWorkError::io)?;
                 transaction
+                    .execute_batch(SCHEMA_V2)
+                    .map_err(SessionWorkError::io)?;
+                transaction
                     .pragma_update(None, "user_version", SCHEMA_VERSION)
                     .map_err(SessionWorkError::io)?;
             }
@@ -184,6 +222,7 @@ impl SessionWorkStore {
             check_schema(&connection)?;
             return Ok(connection);
         }
+        let connection = upgrade(connection)?;
         check_schema(&connection)?;
         Ok(connection)
     }
@@ -578,6 +617,9 @@ impl SessionWorkStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(SessionWorkError::io)?;
         for table in [
+            "stops",
+            "turn_counters",
+            "turn_outcomes",
             "items",
             "workflow_revisions",
             "workflow_state",
@@ -752,6 +794,33 @@ fn record_module_times(
     Ok(())
 }
 
+/// Upgrade a version 1 store to the current schema in one exclusive
+/// transaction. Every other version is left for `check_schema` to refuse.
+fn upgrade(mut connection: Connection) -> Result<Connection, SessionWorkError> {
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(SessionWorkError::corrupt)?;
+    if version != 1 {
+        return Ok(connection);
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Exclusive)
+        .map_err(SessionWorkError::io)?;
+    let version: u32 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(SessionWorkError::corrupt)?;
+    if version == 1 {
+        transaction
+            .execute_batch(SCHEMA_V2)
+            .map_err(SessionWorkError::io)?;
+        transaction
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(SessionWorkError::io)?;
+    }
+    transaction.commit().map_err(SessionWorkError::io)?;
+    Ok(connection)
+}
+
 fn check_schema(connection: &Connection) -> Result<(), SessionWorkError> {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -874,6 +943,9 @@ fn parse_status(text: &str) -> Result<ModuleStatus, SessionWorkError> {
     serde_json::from_value(serde_json::Value::String(text.to_string()))
         .map_err(SessionWorkError::corrupt)
 }
+
+mod stops;
+pub use stops::{GateRecord, TurnCounters};
 
 #[cfg(test)]
 #[path = "store_tests.rs"]

@@ -482,3 +482,40 @@ fn concurrent_writers_never_lose_or_duplicate_revisions() {
         80
     );
 }
+
+#[test]
+fn a_version_one_store_is_upgraded_in_place_and_keeps_its_rows() {
+    let (_temp, store) = fresh();
+    std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+    {
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO activation(session, body) VALUES(?1, ?2)",
+                params!["s1", serde_json::to_string(&activation("s1")).unwrap()],
+            )
+            .unwrap();
+    }
+    assert_eq!(store.activation("s1").unwrap(), Some(activation("s1")));
+    let version: u32 = Connection::open(store.path())
+        .unwrap()
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    let (turn, _) = store.begin_turn("s1", at(0)).unwrap();
+    assert_eq!(turn, 1);
+    // A store from a newer build still fails closed.
+    Connection::open(store.path())
+        .unwrap()
+        .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+        .unwrap();
+    assert!(matches!(
+        store.begin_turn("s1", at(1)),
+        Err(SessionWorkError::UnknownSchema(_))
+    ));
+}

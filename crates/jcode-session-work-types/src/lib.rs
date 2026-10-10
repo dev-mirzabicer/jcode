@@ -9,11 +9,13 @@ use serde::{Deserialize, Serialize};
 mod activation;
 mod correlation;
 mod items;
+mod stop;
 mod workflow;
 
 pub use activation::*;
 pub use correlation::*;
 pub use items::*;
+pub use stop::*;
 pub use workflow::*;
 
 /// The `session_work_v1` contract version this crate describes.

@@ -495,6 +495,9 @@ pub fn on_config_reloaded(listener: fn()) {
 #[serde(default)]
 pub struct Config {
     pub delegation: DelegationConfig,
+    /// Session work: stop-declaration correction limits and default wait
+    /// time limits. Activation itself is `features.session_work`.
+    pub session_work: SessionWorkConfig,
     /// Keybinding configuration
     pub keybindings: KeybindingsConfig,
 
@@ -575,6 +578,19 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+}
+
+/// `[session_work]`: built-in defaults, then this file. There are no
+/// per-session overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionWorkConfig {
+    /// `[session_work.corrections]`: per-turn limits for missing and invalid
+    /// stop declarations and for tool calls refused under a declaration.
+    pub corrections: jcode_session_work_types::CorrectionLimits,
+    /// `[session_work.timeouts]`: default wait time limits by awaited kind,
+    /// as durations such as `30m` or `none`.
+    pub timeouts: jcode_session_work_types::WaitTimeoutDefaults,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -295,6 +295,26 @@ kv_cache_miss_notices = true
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
 
+# Session work (active only for sessions created with features.session_work).
+[session_work.corrections]
+# Per turn: corrections for a stop without a declaration while the workflow is
+# unfinished, corrections for a declaration that no longer holds when the turn
+# ends, and tool calls refused after a declaration. The next one ends the turn.
+missing = 2
+invalid = 3
+refused = 2
+
+[session_work.timeouts]
+# Default wait time limits by what is awaited ("30m", "2h", "none"). A wait on
+# any(...) takes the shortest, all(...) the longest. Limits never stop work.
+background_task = "30m"
+subagent = "45m"
+question = "2h"
+artifact = "24h"
+proposal = "24h"
+launched_session = "none"
+fallback = "30m"
+
 [websearch]
 # Preferred websearch engine: "duckduckgo", "bing", or "searxng".
 engine = "duckduckgo"
