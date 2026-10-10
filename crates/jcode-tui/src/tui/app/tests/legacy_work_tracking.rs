@@ -310,3 +310,46 @@ fn legacy_work_tracking_active_mission_adds_no_turn_reminder_or_store_read() {
     assert!(text.contains("ORDINARY INPUT"));
     assert!(!text.contains("SYNTHETIC MISSION"));
 }
+
+/// A historical side-panel goal page, written while initiatives were
+/// available, still loads and renders while the gate is off. Side-panel
+/// storage is not the goal store, and nothing here reads goal files.
+#[test]
+fn legacy_work_tracking_historical_goal_page_still_renders() {
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let mut app = create_test_app();
+    {
+        let _on = ScopedFeatureOverride::legacy_work_tracking(true);
+        crate::side_panel::write_markdown_page(
+            &app.session.id,
+            "goal.synthetic-goal",
+            Some("Goal: Synthetic goal"),
+            "# Goal: Synthetic goal\n\nRETAINED-GOAL-PAGE-BODY\n",
+            true,
+        )
+        .unwrap();
+    }
+    let _off = ScopedFeatureOverride::legacy_work_tracking(false);
+    let snapshot = crate::side_panel::snapshot_for_session(&app.session.id).unwrap();
+    assert_eq!(
+        snapshot.focused_page_id.as_deref(),
+        Some("goal.synthetic-goal")
+    );
+    app.apply_side_panel_snapshot(snapshot);
+    let (width, height) = (160, 40);
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    assert!(text.contains("RETAINED-GOAL-PAGE-BODY"), "{text}");
+    assert!(!home.root().join("goals").exists());
+}

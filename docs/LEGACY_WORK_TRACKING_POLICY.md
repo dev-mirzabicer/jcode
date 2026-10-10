@@ -71,4 +71,10 @@ python3 scripts/run_isolated_test.py cargo test --profile selfdev -p jcode-app-c
 python3 scripts/run_isolated_test.py cargo test --profile selfdev -p jcode-tui --lib legacy_work_tracking -- --test-threads=1
 ```
 
+The native acceptance drives a placed fixture session on a candidate binary with a private home and a localhost scripted provider: the one announced tool-set change and none afterwards, refused initiative calls (direct and in `batch`), the retired workflow protocol, SDK structured output, transfer, a rollback and a second retirement, and byte-identical goal files:
+
+```bash
+python3 scripts/run_isolated_test.py python3 scripts/verify_legacy_work_tracking.py --binary <candidate>
+```
+
 Tests of the dormant enabled paths set `JCODE_LEGACY_WORK_TRACKING_ENABLED=true` in their own isolated environment. Never enable the gate on a real installation as a test fixture.
