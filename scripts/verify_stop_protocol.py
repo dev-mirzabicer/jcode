@@ -293,7 +293,8 @@ def turn(session, text, expected_requests=None, outcomes_after=None):
     recorded = len(outcomes(session))
     input_id = submit(session, text)
     wait(lambda: settled(session, input_id), f'{text}: input settled')
-    wait(lambda: len(outcomes(session)) >= (outcomes_after or recorded + 1), f'{text}: outcome recorded')
+    expected = recorded + 1 if outcomes_after is None else outcomes_after
+    wait(lambda: len(outcomes(session)) >= expected, f'{text}: outcome recorded')
     time.sleep(1.0)
     if expected_requests is not None:
         assert len(captured) == before + expected_requests, (text, len(captured) - before)
@@ -457,6 +458,30 @@ try:
     assert outcomes(child)[-1][1] == {'outcome': 'completed', 'declared': True}, outcomes(child)
     result['child'] = True
 
+    # Launch opt-in: the capability, a plain launch and an opted-in launch.
+    capability = rpc(admin, 'primary_launch_probe')
+    assert capability.get('session_work_opt_in') is True, capability
+    placement = session_file(session)['location']['placement']
+    def launch(opt_in):
+        input_ = {'placement': {'kind': 'existing', 'placement': placement},
+                  'cwd': {'kind': 'existing', 'path': str(root)}, 'agent': None, 'model': None, 'selfdev': False}
+        if opt_in:
+            input_['session_work'] = True
+        launched = rpc(admin, 'primary_launch', request={'request': str(uuid.uuid4()),
+                                                         'expected_revision': ws('status')['revision'], 'input': input_})
+        assert launched['response']['status'] == 'launched', launched
+        return launched['response']['record']['session']
+    plain = launch(False)
+    assert not session_file(plain).get('session_work')
+    plain_request = turn(plain, 'PLAIN', 1, outcomes_after=0)
+    assert tool_def(plain_request[0], 'declare_stop') is None
+    assert tool_def(plain_request[0], 'bash')['parameters']['properties']['wake']['description'] != wake
+    opted = launch(True)
+    assert session_file(opted)['session_work']['role'] == 'primary'
+    assert tool_def(turn(opted, 'PLAIN', 1)[0], 'declare_stop') is not None
+    result['launch_opt_in'] = True
+
+
     # 7. A reload in the middle of a correction.
     reloading, _ = new_placed_session()
     before = len(captured)
@@ -482,29 +507,6 @@ try:
     final = captured[-1]['messages']
     assert corrections(final) == 2, corrections(final)
     result['reload_mid_correction'] = {'requests': len(captured) - before}
-
-    # Launch opt-in: the capability, a plain launch and an opted-in launch.
-    capability = rpc(admin, 'primary_launch_probe')
-    assert capability.get('session_work_opt_in') is True, capability
-    placement = session_file(session)['location']['placement']
-    def launch(opt_in):
-        input_ = {'placement': {'kind': 'existing', 'placement': placement},
-                  'cwd': {'kind': 'existing', 'path': str(root)}, 'agent': None, 'model': None, 'selfdev': False}
-        if opt_in:
-            input_['session_work'] = True
-        launched = rpc(admin, 'primary_launch', request={'request': str(uuid.uuid4()),
-                                                         'expected_revision': ws('status')['revision'], 'input': input_})
-        assert launched['response']['status'] == 'launched', launched
-        return launched['response']['record']['session']
-    plain = launch(False)
-    assert not session_file(plain).get('session_work')
-    plain_request = turn(plain, 'PLAIN', 1, outcomes_after=0)
-    assert tool_def(plain_request[0], 'declare_stop') is None
-    assert tool_def(plain_request[0], 'bash')['parameters']['properties']['wake']['description'] != wake
-    opted = launch(True)
-    assert session_file(opted)['session_work']['role'] == 'primary'
-    assert tool_def(turn(opted, 'PLAIN', 1)[0], 'declare_stop') is not None
-    result['launch_opt_in'] = True
 
     assert not failures, failures
     result['status'] = 'passed'
