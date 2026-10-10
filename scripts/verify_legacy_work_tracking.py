@@ -259,6 +259,7 @@ try:
     assert 'initiative' not in tool_names(round_two[0]), sorted(tool_names(round_two[0]))
     changes = session_file()['tool_set']['changes']
     assert [c['change'] for c in changes] == [{'kind': 'removed', 'name': 'initiative'}], changes
+    assert changes[0].get('withdrawn') is True, changes
     previous = round_one[-1]['messages']
     added = round_two[0]['messages'][len(previous):]
     assert round_two[0]['messages'][:len(previous)] == previous, 'history prefix was rewritten'
@@ -312,6 +313,27 @@ try:
     assert transferred['type'] != 'error', transferred
     wait(lambda: set(p.name for p in (f.home / 'sessions').glob('*.json')) - sessions_before, 'transfer session')
     result['transfer'] = transferred['type']
+
+    # Rollback and a second retirement on the same session: each change of
+    # availability is one announced change, the tool returns and leaves again,
+    # and the history prefix stays append-only.
+    for leg, enabled in (('ROUND-FIVE', True), ('ROUND-SIX', False)):
+        stop_daemon()
+        set_gate(enabled)
+        f.start(); admin = connect()
+        previous = captured[-1]['messages']
+        sent = turn(leg, 1)[0]
+        assert sent['messages'][:len(previous)] == previous, f'{leg}: history prefix was rewritten'
+        assert ('initiative' in tool_names(sent)) == enabled, (leg, sorted(tool_names(sent)))
+        record = session_file()['tool_set']['changes']
+        kinds = [(c['change']['kind'], c.get('withdrawn', False)) for c in record
+                 if (c['change'].get('name') or c['change'].get('definition', {}).get('name')) == 'initiative']
+        expected = [('removed', True), ('added', False)] + ([] if enabled else [('removed', True)])
+        assert kinds == expected, (leg, kinds)
+        assert len(record) == len(expected), (leg, record)
+        notices = [m for m in sent['messages'][len(previous):] if 'initiative' in text_of(m)]
+        assert len(notices) == 1, (leg, notices)
+    result['rollback_and_second_retirement'] = True
 
     # Retained data byte-identical; the refused calls created nothing.
     assert tree(goals) == retained, 'goal files changed'
