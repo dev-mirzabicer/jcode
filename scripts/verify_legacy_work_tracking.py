@@ -186,6 +186,14 @@ def turn(text, expected_requests):
     return captured[before:]
 
 
+def session_requests():
+    """The fixture session's own requests: those continuing its first request's
+    history. A transfer's compaction request quotes the history as text, so it
+    is not one of them."""
+    first = captured[0]['messages']
+    return [r for r in captured if r.get('messages', [])[:len(first)] == first]
+
+
 def tool_names(request):
     return {tool['function']['name'] for tool in request.get('tools', [])}
 
@@ -204,8 +212,9 @@ def start_bridge():
     global bridge, api
     api = ipc / 'api.sock'
     log = (f.ROOT / 'bridge.log').open('ab')
+    # Outside the Jcode checkout, so attaching does not enable self-development tools.
     bridge = subprocess.Popen([f.BIN, '--no-update', '--no-selfdev', '--socket', str(f.sockpath), 'api-bridge',
-                               '--api-socket', str(api)], env=f.env, stdout=log, stderr=log)
+                               '--api-socket', str(api)], env=f.env, cwd=root, stdout=log, stderr=log)
     wait(api.exists, 'bridge ready')
 
 
@@ -321,7 +330,7 @@ try:
         stop_daemon()
         set_gate(enabled)
         f.start(); admin = connect()
-        previous = captured[-1]['messages']
+        previous = session_requests()[-1]['messages']
         sent = turn(leg, 1)[0]
         assert sent['messages'][:len(previous)] == previous, f'{leg}: history prefix was rewritten'
         assert ('initiative' in tool_names(sent)) == enabled, (leg, sorted(tool_names(sent)))
