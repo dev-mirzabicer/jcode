@@ -25,7 +25,7 @@ Run: python3 scripts/run_isolated_test.py python3 scripts/verify_session_work.py
 import os
 if not os.environ.get('JCODE_TEST_STATE_ROOT'):
     raise SystemExit('Run through scripts/run_isolated_test.py')
-import json, re, socket, sqlite3, stat, tempfile, threading, time, traceback, uuid
+import json, re, socket, sqlite3, stat, subprocess, tempfile, threading, time, traceback, uuid
 from pathlib import Path
 import test_instruction_manager as f
 
@@ -306,6 +306,23 @@ try:
     workdir = Path(expected_path).parent
     assert workdir.is_dir() and mode(workdir) == 0o700
     result['activation'] = True
+
+    # Other creators stay without session work while the flag is on: a Harness
+    # primary_launch and a process-owned `jcode run`.
+    launched = rpc(admin, 'primary_launch', request={'request': str(uuid.uuid4()), 'expected_revision': ws('status')['revision'],
+        'input': {'placement': {'kind': 'existing', 'placement': session_file(session)['location']['placement']},
+                  'cwd': {'kind': 'existing', 'path': str(root)}, 'agent': None, 'model': None, 'selfdev': False}})
+    assert launched['response']['status'] == 'launched', launched
+    assert not session_file(launched['response']['record']['session']).get('session_work')
+    before_run = {p.name for p in (f.home / 'sessions').glob('*.json')}
+    ran = subprocess.run([f.BIN, '--no-update', '--no-selfdev', '--provider-profile', 'wp09-fixture', '--model', 'fixture',
+                          'run', '--place', 'RUN-PROMPT'], env=f.env, cwd=root, capture_output=True, text=True,
+                         timeout=120, stdin=subprocess.DEVNULL)
+    (f.ROOT / 'run.txt').write_text(ran.stdout + ran.stderr)
+    assert ran.returncode == 0, ran.stderr
+    created = [json.loads(p.read_text()) for p in (f.home / 'sessions').glob('*.json') if p.name not in before_run]
+    assert created and not any(body.get('session_work') for body in created), created
+    result['other_creators_unaffected'] = True
 
     # 1. A valid write: one request names the path in Session Context.
     first = turn(session, 'W-VALID', 2)
