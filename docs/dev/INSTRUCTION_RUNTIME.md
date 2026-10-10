@@ -45,8 +45,9 @@ Supported kinds are:
 - `notification`
 - `tool-guidance`
 - `skill`
+- `module-type`
 
-Default directories are `system/`, `agents/`, `addenda/`, `modules/`, `notifications/`, `tools/`, and `skills/<name>/SKILL.md`.
+Default directories are `system/`, `agents/`, `addenda/`, `modules/`, `notifications/`, `tools/`, `skills/<name>/SKILL.md` and `module-types/`.
 
 Stable IDs use lowercase ASCII letters, digits, `-`, `_`, and `.`, beginning with a letter or digit. Jcode adds no ID-length product limit.
 
@@ -71,7 +72,7 @@ Hello {{user.name}}.
 
 Plain text is the default. Agent resources require a non-empty name, description, and `primary`, `isolated`, or `both` availability. Addenda require an explicit agent target. Skills may use their existing `name` as the stable ID and retain `allowed-tools` compatibility.
 
-Name and description have one domain source of truth in `InstructionMetadata`. `AgentMetadata` carries only agent-specific availability. The parser rejects unknown frontmatter fields rather than silently dropping them during `to_markdown`; new extension metadata must first become an explicit typed field with defined runtime and manager semantics. It also rejects known fields on kinds that do not define them: `availability` is agent-only, `target` is agent-addendum-only, and `allowed-tools` is skill-only.
+Name and description have one domain source of truth in `InstructionMetadata`. `AgentMetadata` carries only agent-specific availability. The parser rejects unknown frontmatter fields rather than silently dropping them during `to_markdown`; new extension metadata must first become an explicit typed field with defined runtime and manager semantics. It also rejects known fields on kinds that do not define them: `availability` is agent-only, `target` is agent-addendum-only, `allowed-tools` is skill-only, `subtypes` and `skill` are module-type-only, and `workflow` is accepted only on `task-preset.*` notifications. Module types require a name and description; their subtypes are slugs and `skill` is a skill selector. A task preset's `workflow` template is parsed with the [session-work workflow grammar](../SESSION_WORK.md#grammar) at load, so an invalid template makes the preset invalid.
 
 `InstructionDocument::to_markdown` provides deterministic semantic serialization for manager and protocol work. It preserves the body text rather than interpreting it while serializing.
 

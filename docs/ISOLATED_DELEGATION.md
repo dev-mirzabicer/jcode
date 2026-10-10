@@ -41,6 +41,9 @@ fields on a follow-up are rejected rather than silently ignored.
   provider/model default. It does not mean literal `none`.
 - **Preset:** defaults to `general`. Presets are notification resources named
   `task-preset.<id>`, with the normal global/project qualification and modules.
+  A preset may carry a `workflow` template; when `features.session_work` is on,
+  a new child starts with it as its workflow's first revision
+  ([session work](SESSION_WORK.md#workflow-templates)).
 
 The true system prompt contains the normal selected profile composition followed
 by the managed `system/subagent.md` addition. Presets are complete persisted
