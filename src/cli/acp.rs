@@ -749,6 +749,7 @@ impl AcpRuntime {
                         id,
                         version: 1,
                         enabled: true,
+                        ..
                     } if id == probe => break,
                     _ => anyhow::bail!("Managed launch is unsupported or staged on the daemon"),
                 }
