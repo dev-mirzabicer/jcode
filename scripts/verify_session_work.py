@@ -48,6 +48,9 @@ VALID = '- [>] ground: Understand the fixture {research}\n- [ ] build: Build it\
 EDITED = '- [x] ground: Understand the fixture {research}\n- [ ] build: Build it\n'
 INVALID = '- [>] ground: One\n- [>] build: Two\n'
 TEMPLATE = '- [>] gather: Gather sources\n- [ ] report: Report findings\n'
+# The stop protocol corrects a turn that ends without a declaration while its
+# workflow is unfinished: two corrections (the default), each one more request.
+CORRECTED = 2
 
 
 def set_flag(enabled):
@@ -325,25 +328,25 @@ try:
     result['other_creators_unaffected'] = True
 
     # 1. A valid write: one request names the path in Session Context.
-    first = turn(session, 'W-VALID', 2)
+    first = turn(session, 'W-VALID', 2 + CORRECTED)
     assert workflow_path(first[0]['messages']) == expected_path, 'Session Context names the workflow file'
     assert head(session) == (1, VALID)
     assert Path(expected_path).read_text() == VALID
     history = workdir / 'history' / 'r01.md'
     assert history.read_text() == VALID and mode(history) == 0o400
     # 2. An invalid write changes nothing.
-    second = turn(session, 'W-INVALID', 2)
+    second = turn(session, 'W-INVALID', 2 + CORRECTED)
     refusal = tool_texts(second[-1])[-1]
     assert 'line 2' in refusal, refusal
     assert head(session) == (1, VALID) and Path(expected_path).read_text() == VALID
     # 3. A shell edit is restored before the next request, with one notice.
-    third = turn(session, 'W-SHELL', 2)
+    third = turn(session, 'W-SHELL', 2 + CORRECTED)
     after_shell = json.dumps(third[1]['messages'])
     assert RESTORED in after_shell and 'revision 1' in after_shell, 'notice before the next request'
     assert Path(expected_path).read_text() == VALID
     assert head(session) == (1, VALID)
     # 4. The edit tool reads the store's text and commits revision 2.
-    turn(session, 'W-EDIT', 2)
+    turn(session, 'W-EDIT', 2 + CORRECTED)
     assert head(session) == (2, EDITED), head(session)
     assert (workdir / 'history' / 'r02.md').read_text() == EDITED
     notices = sum(1 for m in captured[-1]['messages'] if RESTORED in text_of(m))
@@ -352,7 +355,7 @@ try:
 
     # 5. A child from a preset with a workflow template.
     children_before = {p.name for p in (f.home / 'sessions').glob('*.json')}
-    turn(session, 'W-CHILD', 5)
+    turn(session, 'W-CHILD', 5 + 2 * CORRECTED)
     child = wait(lambda: next((json.loads(p.read_text())['id'] for p in (f.home / 'sessions').glob('*.json')
                                if p.name not in children_before and json.loads(p.read_text()).get('isolated_child')), None),
                  'child session')
@@ -368,7 +371,7 @@ try:
     stop_daemon()
     Path(expected_path).write_text('edited while the daemon was down\n')
     f.start(); admin = connect()
-    after = turn(session, 'AFTER-RESTART', 1)
+    after = turn(session, 'AFTER-RESTART', 1 + CORRECTED)
     assert RESTORED in json.dumps(after[0]['messages'][-3:]), 'restore notice after restart'
     assert Path(expected_path).read_text() == EDITED and head(session) == (2, EDITED)
     assert session_file(session)['session_work'] == binding
@@ -417,7 +420,7 @@ try:
     assert not (f.home / 'session-work' / OFF_SESSION).exists()
     assert tool_texts(off[-1])[-1].startswith('[Error]'), tool_texts(off[-1])
     Path(expected_path).write_text('another shell edit\n')
-    kept = turn(session, 'FLAG-OFF', 1)
+    kept = turn(session, 'FLAG-OFF', 1 + CORRECTED)
     assert RESTORED in json.dumps(kept[0]['messages'][-3:])
     assert Path(expected_path).read_text() == EDITED
     result['flag_off'] = True
