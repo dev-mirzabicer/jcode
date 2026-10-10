@@ -14,6 +14,12 @@
 //!   change keeps the first-sent bytes (the notice carries the new text), and
 //!   a removed tool's definition stays (calling it reports that it is not
 //!   available).
+//!
+//! A withdrawn removal (a globally unavailable tool) differs only for the
+//! second kind: there its definition leaves the array, because nothing else
+//! could tell the model it is gone. A provider that takes tool changes inside
+//! a message keeps the frozen array and receives the removal there, like any
+//! other removal.
 
 use jcode_message_types::{ToolDefinition, ToolSetChange};
 use serde::{Deserialize, Serialize};
@@ -37,6 +43,14 @@ pub struct StoredToolSetChange {
     /// description.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub schema_changed: bool,
+    /// For a removal: the tool is globally unavailable (Swarm, or a retired
+    /// feature while its gate is off), so its definition also leaves
+    /// [`StoredToolSet::array`]. An ordinary removal keeps it there. Recording
+    /// the mark with the removal keeps that array a function of this record
+    /// alone, so a later change of global availability is itself a recorded
+    /// change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub withdrawn: bool,
 }
 
 /// Where a tool name stands in a session's set.
@@ -110,12 +124,13 @@ impl StoredToolSet {
     /// The `tools` array for a provider that cannot take tool changes inside
     /// a message: the frozen array, with additions and schema changes
     /// applied in place. Descriptions keep their first-sent bytes and removed
-    /// tools keep their definitions.
+    /// tools keep their definitions, except withdrawn ones.
     pub fn array(&self) -> Vec<ToolDefinition> {
         let mut array = self.advertised.clone();
         for StoredToolSetChange {
             change,
             schema_changed,
+            ..
         } in &self.changes
         {
             match change {
@@ -135,7 +150,48 @@ impl StoredToolSet {
                 ToolSetChange::Redefined { .. } | ToolSetChange::Removed { .. } => {}
             }
         }
+        array.retain(|tool| !self.is_withdrawn(&tool.name));
         array
+    }
+
+    /// Whether `name` stands removed by a withdrawn removal.
+    pub fn is_withdrawn(&self, name: &str) -> bool {
+        self.changes
+            .iter()
+            .rev()
+            .find(|stored| stored.change.name() == name)
+            .is_some_and(|stored| {
+                matches!(stored.change, ToolSetChange::Removed { .. }) && stored.withdrawn
+            })
+    }
+
+    /// Withdraw `name` if it stands removed by an ordinary removal: its
+    /// definition leaves [`StoredToolSet::array`] from now on. Returns
+    /// whether the record changed.
+    pub fn withdraw(&mut self, name: &str) -> bool {
+        match self
+            .changes
+            .iter_mut()
+            .rev()
+            .find(|stored| stored.change.name() == name)
+        {
+            Some(stored)
+                if matches!(stored.change, ToolSetChange::Removed { .. }) && !stored.withdrawn =>
+            {
+                stored.withdrawn = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Names that stand removed by an ordinary removal.
+    pub fn removed_names(&self) -> Vec<String> {
+        self.current()
+            .into_iter()
+            .filter(|(name, definition)| definition.is_none() && !self.is_withdrawn(name))
+            .map(|(name, _)| name)
+            .collect()
     }
 
     /// How `live` differs from the tools offered now, as changes to announce.
@@ -156,12 +212,14 @@ impl StoredToolSet {
                         name: tool.name.clone(),
                     },
                     schema_changed: false,
+                    withdrawn: false,
                 }),
                 Some(candidate) if candidate != tool => changes.push(StoredToolSetChange {
                     change: ToolSetChange::Redefined {
                         definition: candidate.clone(),
                     },
                     schema_changed: candidate.input_schema != tool.input_schema,
+                    withdrawn: false,
                 }),
                 Some(_) => {}
             }
@@ -173,6 +231,7 @@ impl StoredToolSet {
                         definition: candidate.clone(),
                     },
                     schema_changed: false,
+                    withdrawn: false,
                 });
             }
         }
@@ -245,6 +304,58 @@ mod tests {
         assert_eq!(set.availability("other"), ToolAvailability::Unknown);
         // Recorded once: the same registry again changes nothing.
         assert!(set.diff(&live, |_| false).is_empty());
+    }
+
+    #[test]
+    fn a_withdrawn_removal_leaves_every_array_until_the_tool_returns() {
+        let mut set = StoredToolSet::new(vec![tool("bash", "Run", "c"), tool("gated", "G", "x")]);
+        let removal = set.diff(&[tool("bash", "Run", "c")], |_| false);
+        set.changes.extend(removal);
+        // An ordinary removal keeps the definition in the array.
+        assert_eq!(names(&set.array()), vec!["bash", "gated"]);
+        assert_eq!(set.removed_names(), vec!["gated"]);
+        assert!(!set.is_withdrawn("gated"));
+        // Withdrawn: it leaves the array, once; nothing else stands removed.
+        // The frozen first-sent set is untouched.
+        assert!(set.withdraw("gated"));
+        assert!(!set.withdraw("gated"));
+        assert!(!set.withdraw("bash"));
+        assert!(set.is_withdrawn("gated"));
+        assert_eq!(names(&set.array()), vec!["bash"]);
+        assert_eq!(names(&set.advertised), vec!["bash", "gated"]);
+        assert!(set.removed_names().is_empty());
+        assert_eq!(set.availability("gated"), ToolAvailability::Removed);
+        // Back again: an addition, offered and in the array.
+        let back = set.diff(&[tool("bash", "Run", "c"), tool("gated", "G", "x")], |_| {
+            false
+        });
+        assert!(matches!(
+            &back[..],
+            [StoredToolSetChange {
+                change: ToolSetChange::Added { .. },
+                ..
+            }]
+        ));
+        set.changes.extend(back);
+        assert!(!set.is_withdrawn("gated"));
+        assert_eq!(names(&set.array()), vec!["bash", "gated"]);
+        // The flag survives the persisted form; records without it decode.
+        set.changes.push(StoredToolSetChange {
+            change: ToolSetChange::Removed {
+                name: "gated".into(),
+            },
+            schema_changed: false,
+            withdrawn: true,
+        });
+        let json = serde_json::to_value(&set).unwrap();
+        let decoded: StoredToolSet = serde_json::from_value(json.clone()).unwrap();
+        assert!(decoded.is_withdrawn("gated"));
+        let legacy: StoredToolSet = serde_json::from_value(serde_json::json!({
+            "advertised": json["advertised"],
+            "changes": [{"change": {"kind": "removed", "name": "gated"}}]
+        }))
+        .unwrap();
+        assert!(!legacy.is_withdrawn("gated"));
     }
 
     #[test]

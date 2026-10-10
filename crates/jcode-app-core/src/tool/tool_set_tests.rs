@@ -166,6 +166,7 @@ fn the_changes_in_view_are_those_of_notices_still_projected() {
                 &[StoredToolSetChange {
                     change: change(name),
                     schema_changed: false,
+                    withdrawn: false,
                 }],
             ),
             vec![change(name)],

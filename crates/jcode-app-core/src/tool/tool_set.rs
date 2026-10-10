@@ -90,6 +90,7 @@ pub fn plan_tool_set(
                         .map(|change| StoredToolSetChange {
                             change: change.clone(),
                             schema_changed: false,
+                            withdrawn: false,
                         })
                         .collect(),
                 }
@@ -100,6 +101,7 @@ pub fn plan_tool_set(
             };
             let mut next = record.clone();
             next.changes.extend(changed);
+            withdraw_globally_unavailable(&mut next);
             let array_changed = sent(record) != sent(&next);
             (next, announced, array_changed)
         }
@@ -124,22 +126,38 @@ pub fn plan_tool_set(
     }
 }
 
+/// Mark every tool that stands removed and is globally unavailable (Swarm,
+/// or a retired feature while its gate is off) as withdrawn (Phase 4: never
+/// advertised). A provider that takes tool changes inside a message keeps its
+/// frozen array and is told by the removal itself; every other provider's
+/// array drops the definition. The mark is part of the record, so the array
+/// stays a function of the record and its change is a recorded transition.
+/// A removal recorded before the mark existed is marked here the first time
+/// it is planned.
+fn withdraw_globally_unavailable(record: &mut StoredToolSet) {
+    for name in record.removed_names() {
+        if !super::tool_is_globally_available(&name) {
+            record.withdraw(&name);
+        }
+    }
+}
+
 /// The tools a request carries under a session's record, without comparing
 /// it with the registry.
 ///
-/// A removed tool keeps its definition, except a globally unavailable one
-/// (Swarm while it is disabled), which is never advertised (Phase 4).
+/// With in-message changes the frozen first-sent array: every later change,
+/// a withdrawn removal included, is told inside a message, and every tool a
+/// change names stays declared. Otherwise [`StoredToolSet::array`], where a
+/// withdrawn tool (globally unavailable when it was removed) is absent. Both
+/// are functions of the record alone: the last request's array is the array
+/// of the last record, so comparing two records compares what was sent with
+/// what will be.
 pub fn recorded_tools(record: &StoredToolSet, inline: bool) -> Vec<ToolDefinition> {
-    let mut tools = if inline {
+    if inline {
         record.advertised.clone()
     } else {
         record.array()
-    };
-    tools.retain(|tool| {
-        super::tool_is_globally_available(&tool.name)
-            || record.availability(&tool.name) != ToolAvailability::Removed
-    });
-    tools
+    }
 }
 
 /// Remove the tools `provider`'s wire API would reject by name
@@ -224,6 +242,7 @@ pub fn tool_set_notice(sequence: usize, changes: &[StoredToolSetChange]) -> Stri
     for StoredToolSetChange {
         change,
         schema_changed,
+        ..
     } in changes
     {
         lines.push(match change {

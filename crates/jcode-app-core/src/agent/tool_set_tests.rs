@@ -385,6 +385,7 @@ async fn restarts_keep_the_tool_set_and_announce_each_change_once(inline: bool) 
         let wire = serde_json::to_value(jcode_provider_anthropic::format_messages_for(
             &request(8).messages,
             jcode_provider_core::anthropic_conversation_caps("claude-opus-5-5"),
+            &request(8).tools,
         ))?;
         let kinds: Vec<&str> = wire
             .as_array()
@@ -665,4 +666,178 @@ async fn a_client_identity_sync_is_a_recorded_transition() -> Result<()> {
         Some("cc_version=2")
     );
     Ok(())
+}
+
+/// Every tool a rendered Anthropic tool change names by reference is known to
+/// that request: in its `tools`, or added by value earlier in its messages.
+/// The API rejects the whole request otherwise ("tool_addition/tool_removal
+/// references unknown tool").
+fn assert_tool_references_resolve(request: &Recorded) {
+    let wire = serde_json::to_value(jcode_provider_anthropic::format_messages_for(
+        &request.messages,
+        jcode_provider_core::anthropic_conversation_caps("claude-opus-5-5"),
+        &request.tools,
+    ))
+    .unwrap();
+    let mut known: std::collections::HashSet<String> =
+        request.tools.iter().map(|tool| tool.name.clone()).collect();
+    for block in wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+    {
+        match (block["type"].as_str(), block["tool"]["type"].as_str()) {
+            (Some("tool_addition"), Some("tool_definition")) => {
+                known.insert(block["tool"]["definition"]["name"].as_str().unwrap().into());
+            }
+            (Some("tool_addition" | "tool_removal"), Some("tool_reference")) => {
+                let name = block["tool"]["name"].as_str().unwrap();
+                assert!(
+                    known.contains(name),
+                    "unknown tool reference {name}: {block}"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A globally unavailable tool (the retired `initiative`) is withdrawn once
+/// per change of availability. A provider whose array carries changes drops
+/// its definition at one recorded transition, and gets it back at another.
+/// A provider that takes changes inside a message keeps its first-sent array
+/// throughout (no transition, no cache or thinking loss) and is told by the
+/// in-message removal and addition, each naming a declared tool. A rollback
+/// and a second retirement on the same history stay valid.
+async fn a_globally_unavailable_tool_is_withdrawn_at_each_change_of_availability(
+    inline: bool,
+) -> Result<()> {
+    use crate::config::feature_override::ScopedFeatureOverride;
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = super::tests::AgentTestEnvRestore::set_path("JCODE_HOME", home.path());
+    let _runtime = super::tests::AgentTestEnvRestore::set_path(
+        "JCODE_RUNTIME_DIR",
+        &home.path().join("runtime"),
+    );
+    crate::config::invalidate_config_cache();
+    let provider = RecordingProvider {
+        inline,
+        ..Default::default()
+    };
+    let request = |index: usize| {
+        let state = provider.state.lock().unwrap();
+        let recorded = &state.requests[index];
+        Recorded {
+            messages: recorded.messages.clone(),
+            tools: recorded.tools.clone(),
+        }
+    };
+    let journaled = |since: std::time::Instant| {
+        crate::cache_invalidation::recorded_since(since)
+            .iter()
+            .filter(|entry| entry.source == crate::tool::TOOL_SET_TRANSITION)
+            .count()
+    };
+    const INITIATIVE: &str = "initiative";
+    let mut session = crate::session::Session::create(None, None);
+    let session_id = session.id.clone();
+    session.save()?;
+
+    // The set froze while the tool was available.
+    {
+        let _on = ScopedFeatureOverride::legacy_work_tracking(true);
+        let mut agent = restart(&provider, &session_id, Vec::new(), false).await?;
+        turn(&mut agent, "first").await?;
+    }
+    assert!(tool(&request(0), INITIATIVE).is_some());
+
+    let mut expected_notices = 0;
+    for (index, enabled) in [(1, false), (2, true), (3, false)] {
+        let since = std::time::Instant::now();
+        let _gate = ScopedFeatureOverride::legacy_work_tracking(enabled);
+        let mut agent = restart(&provider, &session_id, Vec::new(), false).await?;
+        turn(&mut agent, &format!("turn {index}")).await?;
+        expected_notices += 1;
+        let notices = announced(&agent);
+        assert_eq!(
+            notices.len(),
+            expected_notices,
+            "inline={inline} turn {index}"
+        );
+        assert_eq!(
+            notices
+                .last()
+                .unwrap()
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>(),
+            vec![INITIATIVE]
+        );
+        assert_eq!(
+            tool(&request(index), INITIATIVE).is_some(),
+            inline || enabled,
+            "inline={inline} turn {index}"
+        );
+        if inline {
+            assert_eq!(request(index).tools, request(0).tools);
+        }
+        assert_eq!(
+            journaled(since),
+            usize::from(!inline),
+            "inline={inline} turn {index}"
+        );
+        assert_tool_references_resolve(&request(index));
+        let withdrawn = agent
+            .session
+            .tool_set
+            .as_ref()
+            .unwrap()
+            .is_withdrawn(INITIATIVE);
+        assert_eq!(withdrawn, !enabled, "inline={inline} turn {index}");
+    }
+
+    // Settled while unavailable: nothing more is announced or rebuilt.
+    let since = std::time::Instant::now();
+    let _off = ScopedFeatureOverride::legacy_work_tracking(false);
+    let mut agent = restart(&provider, &session_id, Vec::new(), false).await?;
+    turn(&mut agent, "settled").await?;
+    assert_eq!(announced(&agent).len(), expected_notices);
+    assert_eq!(journaled(since), 0);
+    assert_eq!(request(4).tools, request(3).tools);
+    assert_tool_references_resolve(&request(4));
+    if inline {
+        // The model was told each change inside a message: removed, back,
+        // removed again.
+        let wire = serde_json::to_value(jcode_provider_anthropic::format_messages_for(
+            &request(4).messages,
+            jcode_provider_core::anthropic_conversation_caps("claude-opus-5-5"),
+            &request(4).tools,
+        ))?;
+        let told: Vec<&str> = wire
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .filter(|block| {
+                block["tool"]["name"] == INITIATIVE
+                    || block["tool"]["definition"]["name"] == INITIATIVE
+            })
+            .filter_map(|block| block["type"].as_str())
+            .collect();
+        assert_eq!(told, vec!["tool_removal", "tool_addition", "tool_removal"]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_globally_unavailable_tool_leaves_an_array_provider_at_one_transition() -> Result<()> {
+    a_globally_unavailable_tool_is_withdrawn_at_each_change_of_availability(false).await
+}
+
+#[tokio::test]
+async fn a_globally_unavailable_tool_is_withdrawn_inside_a_message_on_a_declared_tool() -> Result<()>
+{
+    a_globally_unavailable_tool_is_withdrawn_at_each_change_of_availability(true).await
 }

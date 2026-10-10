@@ -158,10 +158,18 @@ async fn legacy_work_tracking_removal_is_one_announced_tool_set_change() {
             &second.announced[0].change,
             ToolSetChange::Removed { name } if name == "initiative"
         ));
-        assert!(!second.tools.iter().any(|tool| tool.name == "initiative"));
-        // A globally unavailable tool leaves the provider array at the
-        // recorded transition, as Swarm does.
-        assert!(second.array_changed, "inline={inline}");
+        assert!(second.record.is_withdrawn("initiative"), "inline={inline}");
+        if inline {
+            // In-message changes: the first-sent array stays, and the removal
+            // inside the message names a tool it still declares.
+            assert_eq!(second.tools, first.tools);
+            assert!(!second.array_changed);
+        } else {
+            // Otherwise the definition leaves the array at one recorded
+            // transition (Phase 4: never advertised).
+            assert!(!second.tools.iter().any(|tool| tool.name == "initiative"));
+            assert!(second.array_changed);
+        }
 
         // The next request announces nothing and carries the same tools.
         let announced: Vec<ToolSetChange> = second

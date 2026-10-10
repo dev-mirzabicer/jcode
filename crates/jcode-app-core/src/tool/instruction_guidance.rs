@@ -349,6 +349,7 @@ mod workspace_tests {
                     definition: structural("STRUCTURAL\n\nANNOUNCED TEXT"),
                 },
                 schema_changed: false,
+                withdrawn: false,
             });
         session.set_tool_set(record);
         let provider_array = vec![ToolDefinition {
