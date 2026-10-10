@@ -162,16 +162,24 @@ impl Agent {
         if open.is_none() {
             return;
         }
-        let outcome = if let Some(error) = error {
-            TurnOutcome::Failed {
-                class: self.failure_class(error),
-            }
-        } else if self.is_graceful_shutdown() {
+        if let Some(error) = error {
+            crate::logging::info(&format!(
+                "Session work: turn of {} returned an error: {error:#}",
+                self.session.id
+            ));
+        }
+        // A cancellation decides the outcome even when the turn returned an
+        // error because of it: the error is a consequence, not a failure.
+        let outcome = if self.is_graceful_shutdown() {
             match self.graceful_shutdown.stop_cause() {
                 Some(jcode_tool_types::StopCause::ReloadQuiescence) => {
                     TurnOutcome::InterruptedByReload
                 }
                 _ => TurnOutcome::InterruptedByUser,
+            }
+        } else if let Some(error) = error {
+            TurnOutcome::Failed {
+                class: self.failure_class(error),
             }
         } else {
             crate::logging::warn(&format!(

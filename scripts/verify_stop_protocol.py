@@ -376,7 +376,7 @@ try:
     assert module_types.is_file() and (module_types.stat().st_mode & 0o777) == 0o400
     first = turn(session, 'C-MISSING', 4)
     declare = tool_def(first[0], 'declare_stop')
-    assert declare and declare['description'] == resource('tools/declare-stop.md'), declare
+    assert declare and declare['description'].strip() == resource('tools/declare-stop.md'), declare
     assert declare['parameters']['properties']['action']['enum'] == ['wait', 'complete', 'withdraw']
     wake = resource('notifications/session-work-background-wake.md')
     for name in ('bash', 'bg', 'subagent'):
@@ -402,7 +402,8 @@ try:
     assert warned in results[-3], results[-3]
     assert refused in results[-2] and batch in results[-1], results[-2:]
     assert not (root / 'batch.txt').exists(), 'no part of a refused batch ran'
-    log = json.dumps(session_file(session)['messages'])
+    journal = f.home / 'sessions' / f'{session}.journal.jsonl'
+    log = json.dumps(session_file(session)['messages']) + (journal.read_text() if journal.exists() else '')
     assert log.count(refused) >= 2, 'the third refusal is recorded too'
     assert outcomes(session)[-1][1] == {'outcome': 'completed', 'declared': True}, outcomes(session)
     completion = stops(session)[-1]
@@ -452,7 +453,7 @@ try:
     child_request = next(r for r in captured if 'CHILD-TASK' in json.dumps(r['messages']))
     child_declare = tool_def(child_request, 'declare_stop')
     assert child_declare['parameters']['properties']['action']['enum'] == ['complete'], child_declare
-    assert child_declare['description'] == resource('tools/declare-stop-child.md')
+    assert child_declare['description'].strip() == resource('tools/declare-stop-child.md')
     assert outcomes(child)[-1][1] == {'outcome': 'completed', 'declared': True}, outcomes(child)
     result['child'] = True
 

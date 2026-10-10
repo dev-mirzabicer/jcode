@@ -19,21 +19,6 @@ impl DeclareStopTool {
     pub fn new() -> Self {
         Self
     }
-
-    /// The child variant: completion only.
-    pub fn child_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "intent": crate::tool::intent_schema_property(),
-                "action": {"type": "string", "enum": ["complete"]},
-                "summary": {"type": "string"},
-                "leave_running": {"type": "array", "items": {"type": "string"}}
-            },
-            "required": ["action"],
-            "additionalProperties": false
-        })
-    }
 }
 
 impl Default for DeclareStopTool {
@@ -55,10 +40,24 @@ pub fn retain_for_session(
                 .iter_mut()
                 .filter(|tool| tool.name == DECLARE_STOP_TOOL)
             {
-                tool.input_schema = DeclareStopTool::child_schema();
+                restrict_to_completion(&mut tool.input_schema);
             }
         }
         Some(_) => {}
+    }
+}
+
+/// The child variant of the schema: `complete` only, without the
+/// primary-only parameters. Everything the registry added stays.
+fn restrict_to_completion(schema: &mut Value) {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert(
+            "action".into(),
+            json!({"type": "string", "enum": ["complete"]}),
+        );
+        for primary_only in ["condition", "timeout", "closeout", "documents", "accepted"] {
+            properties.remove(primary_only);
+        }
     }
 }
 
