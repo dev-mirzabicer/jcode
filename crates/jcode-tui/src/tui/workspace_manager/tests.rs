@@ -62,6 +62,7 @@ fn answer_probes(m: &mut WorkspaceManager, wire: &mut Wire, launch: bool) {
                 id,
                 version: 1,
                 enabled: launch,
+                session_work_opt_in: true,
             },
             Request::RuntimeProbe { .. } => ServerEvent::RuntimeCapabilities {
                 id,

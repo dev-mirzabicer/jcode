@@ -2258,6 +2258,9 @@ pub(crate) fn build(
                     agent: Some(text("agent")).filter(|a| !a.is_empty()),
                     model,
                     selfdev: form.flag("selfdev"),
+                    // A session Mirza launches here is an interactive hosted
+                    // primary, like a new TUI session.
+                    session_work: manager.caps.launch_session_work,
                 },
             };
             manager.confirm = Some(confirm(

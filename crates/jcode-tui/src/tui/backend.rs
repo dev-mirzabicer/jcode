@@ -495,6 +495,7 @@ impl RemoteConnection {
                         id,
                         version: 1,
                         enabled: true,
+                        ..
                     }) if id == probe => break,
                     _ => anyhow::bail!(
                         "Managed primary launch is unavailable or staged on this server"

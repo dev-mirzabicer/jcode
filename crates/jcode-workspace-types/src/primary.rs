@@ -39,6 +39,10 @@ pub struct PrimaryLaunchInput {
     pub model: Option<PrimaryModel>,
     #[serde(default)]
     pub selfdev: bool,
+    /// Opt the new session into session work when the runtime has it on.
+    /// Sent only to runtimes whose launch capabilities accept it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_work: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

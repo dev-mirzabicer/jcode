@@ -1103,6 +1103,7 @@ fn primary_launch_checks_bridge_and_runtime_capabilities_before_mutation() {
                 ApiEvent::PrimaryLaunchCapabilities {
                     version: 1,
                     enabled: false,
+                    session_work_opt_in: false,
                 },
                 writer,
             ),
@@ -1121,6 +1122,7 @@ fn primary_launch_checks_bridge_and_runtime_capabilities_before_mutation() {
                 ApiEvent::PrimaryLaunchCapabilities {
                     version: 1,
                     enabled: true,
+                    session_work_opt_in: false,
                 },
                 writer,
             ),

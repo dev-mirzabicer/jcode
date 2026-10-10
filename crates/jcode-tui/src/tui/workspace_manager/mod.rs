@@ -113,6 +113,8 @@ pub struct Capabilities {
     pub context_scope: bool,
     pub session_inspection: bool,
     pub launch: Option<bool>,
+    /// The runtime accepts the session-work launch opt-in.
+    pub launch_session_work: bool,
     pub runtime: Option<bool>,
     pub supervision: bool,
 }

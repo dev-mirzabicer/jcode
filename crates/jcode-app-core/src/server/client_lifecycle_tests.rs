@@ -3051,7 +3051,8 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         ServerEvent::PrimaryLaunchCapabilities {
             id: 3,
             version: 1,
-            enabled: false
+            enabled: false,
+            session_work_opt_in: true,
         }
     ));
     let launch:crate::workspace::PrimaryLaunchRequest=serde_json::from_value(serde_json::json!({"request":"12a99e11-e967-4a1e-a47c-000000000001","expected_revision":0,"input":{"placement":{"kind":"standalone","root":"/fixture"},"cwd":{"kind":"existing","path":"/fixture"},"agent":null,"model":null,"selfdev":false}})).unwrap();

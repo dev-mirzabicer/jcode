@@ -635,16 +635,21 @@ impl JcodeClient {
             ));
         }
         let probe = self.request_ok(ApiRequest::PrimaryLaunchProbe)?;
-        if !matches!(
-            probe.event,
-            ApiEvent::PrimaryLaunchCapabilities {
-                version: 1,
-                enabled: true
-            }
-        ) {
+        let ApiEvent::PrimaryLaunchCapabilities {
+            version: 1,
+            enabled: true,
+            session_work_opt_in,
+        } = probe.event
+        else {
             return Err(Error::new(
                 ErrorKind::UnsupportedCapability,
                 "Managed primary launch is unavailable or staged on this runtime",
+            ));
+        };
+        if request.input.session_work && !session_work_opt_in {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "This runtime does not accept the session-work launch opt-in",
             ));
         }
         let expected = request.request;

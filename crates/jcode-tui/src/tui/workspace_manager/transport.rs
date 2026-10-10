@@ -450,9 +450,15 @@ pub(super) fn reduce(manager: &mut WorkspaceManager, op: Op, event: ServerEvent)
         (
             Op::Probe(Probe::Launch),
             ServerEvent::PrimaryLaunchCapabilities {
-                version, enabled, ..
+                version,
+                enabled,
+                session_work_opt_in,
+                ..
             },
-        ) => manager.caps.launch = Some(version == 1 && enabled),
+        ) => {
+            manager.caps.launch = Some(version == 1 && enabled);
+            manager.caps.launch_session_work = session_work_opt_in;
+        }
         (
             Op::Probe(Probe::Runtime),
             ServerEvent::RuntimeCapabilities {

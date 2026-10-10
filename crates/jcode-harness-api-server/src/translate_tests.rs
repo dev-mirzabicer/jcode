@@ -1870,7 +1870,8 @@ fn primary_launch_is_session_independent_and_correlates_exact_replies() {
         replies[0].event,
         ApiEvent::PrimaryLaunchCapabilities {
             version: 1,
-            enabled: false
+            enabled: false,
+            ..
         }
     ));
     assert!(bridge.session_id.is_none());

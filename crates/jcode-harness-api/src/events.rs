@@ -70,6 +70,9 @@ pub enum ApiEvent {
     PrimaryLaunchCapabilities {
         version: u32,
         enabled: bool,
+        /// The runtime accepts `PrimaryLaunchInput.session_work`.
+        #[serde(default)]
+        session_work_opt_in: bool,
     },
     PrimaryLaunch {
         response: crate::PrimaryLaunchResponse,

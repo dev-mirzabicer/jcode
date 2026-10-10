@@ -23,6 +23,8 @@ export interface PrimaryLaunchInput {
   placement: { kind: "existing"; placement: WorkspacePlacement } | { kind: "standalone"; root: string };
   cwd: {kind: "existing"; path: string} | {kind: "create_empty"; path: string; home: WorkspaceHome | null} | null;
   agent: string | null; model: PrimaryModel | null; selfdev?: boolean;
+  /** Opt into session work; send only when the runtime advertises `session_work_opt_in`. */
+  session_work?: boolean;
 }
 export interface PrimaryLaunchRequest { request: string; expected_revision: number; input: PrimaryLaunchInput }
 export interface PrimaryLaunchRecord {
@@ -281,7 +283,7 @@ export type ApiEvent =
   | {ev: "primary_input_receipt"; receipt:PrimaryInputReceipt}
   | {ev: "primary_input_detail"; receipt:PrimaryInputReceipt; input:PrimaryInputEnvelope}
   | {ev: "primary_location"; response:PrimaryLocationResponse}
-  | {ev: "primary_launch_capabilities"; version: number; enabled: boolean}
+  | {ev: "primary_launch_capabilities"; version: number; enabled: boolean; session_work_opt_in?: boolean}
   | {ev: "primary_launch"; response: PrimaryLaunchResponse}
   | {ev: "execution"; session_id: string; response: ExecutionResponse}
   | {ev: "session_inspection"; session_id: string; response: InspectionResponse}

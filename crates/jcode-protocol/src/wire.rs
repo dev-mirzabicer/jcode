@@ -1269,6 +1269,9 @@ pub enum ServerEvent {
         id: u64,
         version: u32,
         enabled: bool,
+        /// The runtime accepts `PrimaryLaunchInput.session_work`.
+        #[serde(default)]
+        session_work_opt_in: bool,
     },
     #[serde(rename = "primary_launch_response")]
     PrimaryLaunchResponse {

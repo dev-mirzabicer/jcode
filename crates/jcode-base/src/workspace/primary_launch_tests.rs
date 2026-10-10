@@ -50,6 +50,7 @@ fn primary_launch_journal_reconciles_checkpoint_without_duplicate_publication() 
         agent: None,
         model: None,
         selfdev: false,
+        session_work: false,
     };
     let model = PrimaryModel {
         model: "synthetic".into(),

@@ -276,6 +276,18 @@ impl PrimaryLauncher {
             self.workspace
                 .stage_context_scope(scope, &mut session, NewContextKind::Clear)?;
         }
+        // Harness and SDK launches opt into session work explicitly; the
+        // runtime's feature flag still decides whether it is activated.
+        if record.input.session_work
+            && let Err(error) = crate::session_work::activate_new_session(
+                &mut session,
+                crate::session_work::NewSessionWork::Primary,
+                &self.repositories,
+            )
+        {
+            crate::session::remove_unpublished_session(&record.session)?;
+            return Err(error.context("Session work could not be activated"));
+        }
         let (mut agent, outcome) = Agent::prepare_primary_session(
             provider,
             registry,

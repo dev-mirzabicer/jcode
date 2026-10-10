@@ -723,6 +723,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                             id: *id,
                             version: 1,
                             enabled: crate::primary::launch_enabled(),
+                            session_work_opt_in: true,
                         },
                     )
                     .await?;
@@ -3702,7 +3703,7 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 });
             }
             Request::PrimaryLaunchProbe{id}=>{
-                let _=client_event_tx.send(ServerEvent::PrimaryLaunchCapabilities{id,version:1,enabled:crate::primary::launch_enabled()});
+                let _=client_event_tx.send(ServerEvent::PrimaryLaunchCapabilities{id,version:1,enabled:crate::primary::launch_enabled(),session_work_opt_in:true});
             }
             Request::PrimaryLocation { id, command } => {
                 let host = sessions.clone();

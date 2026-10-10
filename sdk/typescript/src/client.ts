@@ -604,6 +604,7 @@ export class JcodeClient extends EventEmitter {
     if (!this.supports("primary_launch_v1")) throw new HarnessError("unsupported_capability", "Managed primary launch requires primary_launch_v1");
     const capability = await this.expectReply({req: "primary_launch_probe"}, "primary_launch_capabilities");
     if (capability.ev !== "primary_launch_capabilities" || capability.version !== 1 || !capability.enabled) throw new HarnessError("unsupported_capability", "Managed primary launch is unavailable or staged on this runtime");
+    if (request.input.session_work && !capability.session_work_opt_in) throw new HarnessError("unsupported_capability", "This runtime does not accept the session-work launch opt-in");
     const reply = await this.expectReply({req: "primary_launch", request}, "primary_launch");
     if (reply.ev !== "primary_launch") throw new HarnessError("unexpected_reply", `expected primary_launch, got ${reply.ev}`);
     if (reply.response.status === "rejected") throw new HarnessError("primary_launch", reply.response.issue.detail, reply.response.issue);

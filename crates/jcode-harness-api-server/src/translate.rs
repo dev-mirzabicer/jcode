@@ -1804,9 +1804,13 @@ impl BridgeState {
                             .and_then(|v| u32::try_from(v).ok()),
                         event["enabled"].as_bool(),
                     ) {
-                        (Some(version), Some(enabled)) => {
-                            ApiEvent::PrimaryLaunchCapabilities { version, enabled }
-                        }
+                        (Some(version), Some(enabled)) => ApiEvent::PrimaryLaunchCapabilities {
+                            version,
+                            enabled,
+                            session_work_opt_in: event["session_work_opt_in"]
+                                .as_bool()
+                                .unwrap_or(false),
+                        },
                         _ => ApiEvent::Error {
                             code: ErrorCode::Internal,
                             message: "Invalid launch capability reply".into(),

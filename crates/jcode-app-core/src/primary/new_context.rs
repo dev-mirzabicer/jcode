@@ -136,6 +136,7 @@ impl PrimaryHost {
                         agent,
                         model: None,
                         selfdev: source.is_canary(),
+                        session_work: false,
                     },
                     super::launch::PrimaryPreparation {
                         caller: StartupContextCaller::Clear,

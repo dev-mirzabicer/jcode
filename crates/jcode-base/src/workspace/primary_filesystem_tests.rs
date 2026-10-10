@@ -24,6 +24,7 @@ fn empty_primary_cwd_recovers_witnessed_publication_and_never_reuses_foreign_tar
             agent: None,
             model: None,
             selfdev: false,
+            session_work: false,
         };
         service
             .reserve_primary_launch(
@@ -82,6 +83,7 @@ fn empty_primary_cwd_recovers_witnessed_publication_and_never_reuses_foreign_tar
                 agent: None,
                 model: None,
                 selfdev: false,
+                session_work: false,
             },
             model.clone(),
         )
@@ -113,6 +115,7 @@ fn empty_primary_cwd_recovers_witnessed_publication_and_never_reuses_foreign_tar
                 agent: None,
                 model: None,
                 selfdev: false,
+                session_work: false,
             },
             model.clone(),
         )
@@ -154,6 +157,7 @@ fn empty_primary_cwd_recovers_witnessed_publication_and_never_reuses_foreign_tar
                 agent: None,
                 model: None,
                 selfdev: false,
+                session_work: false,
             },
             model.clone(),
         )
@@ -207,6 +211,7 @@ fn empty_primary_cwd_recovers_witnessed_publication_and_never_reuses_foreign_tar
                 agent: None,
                 model: None,
                 selfdev: false,
+                session_work: false,
             },
             model.clone(),
         )
@@ -245,6 +250,7 @@ fn empty_primary_cwd_recovers_witnessed_publication_and_never_reuses_foreign_tar
                 agent: None,
                 model: None,
                 selfdev: false,
+                session_work: false,
             },
             model,
         )

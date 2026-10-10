@@ -88,7 +88,7 @@ fn primary_location_idle_notice_prefix_and_missing_cwd_repair() -> Result<()> {
         let provider = FixtureProvider::default();
         let launcher = PrimaryLauncher { workspace:service.clone(), repositories:InstructionRepositoryService::new(), provider:Arc::new(provider.clone()), registry:PrimaryRegistryMode::Process };
         let host = Arc::new(PrimaryHost::default());
-        let launch = launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput { placement:PrimaryPlacement::Existing { placement:Placement::Standalone(roots[0].0) }, cwd:Some(PrimaryCwd::Existing { path:roots[0].1.clone() }), agent:None,model:None,selfdev:false },StartupContextCaller::HarnessApi).await?;
+        let launch = launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput { placement:PrimaryPlacement::Existing { placement:Placement::Standalone(roots[0].0) }, cwd:Some(PrimaryCwd::Existing { path:roots[0].1.clone() }), agent:None,model:None,selfdev:false, session_work:false },StartupContextCaller::HarnessApi).await?;
         let before = Session::load(&launch.session)?;
         let request = LocationChangeRequest { request:RequestId::new(), session:launch.session.clone(), expected_session_revision:1, expected_catalog_revision:service.status()?.revision, placement:Placement::Standalone(roots[1].0), cwd:roots[1].1.clone() };
         use crate::runtime_lifecycle::{RuntimeStopStore, admission::RuntimeAdmission};
@@ -273,6 +273,7 @@ fn launch_service_prepares_all_placements_replays_once_and_retains_exclusive_own
                 agent: None,
                 model: None,
                 selfdev: false,
+                session_work: false,
             };
             let record = launcher
                 .launch_hosted(
@@ -349,6 +350,7 @@ fn launch_service_prepares_all_placements_replays_once_and_retains_exclusive_own
             agent: None,
             model: None,
             selfdev: false,
+            session_work: false,
         };
         let (mut local, record) = launcher
             .launch_local(
@@ -439,6 +441,7 @@ fn launch_service_rejects_invalid_preparation_without_dispatch_or_session_and_re
             agent: None,
             model: None,
             selfdev: false,
+            session_work: false,
         };
         let mut missing = valid.clone();
         missing.cwd = None;
@@ -620,7 +623,7 @@ fn shared_clear_carries_only_reviewed_direct_grants_as_independent_authority() -
         let provider=FixtureProvider::default();let pool=Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
         let launcher=PrimaryLauncher{workspace:service.clone(),repositories:InstructionRepositoryService::new(),provider:Arc::new(provider.clone()),registry:PrimaryRegistryMode::Shared(pool.clone())};
         let host=Arc::new(PrimaryHost::default());
-        let created=launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput{placement:PrimaryPlacement::Existing{placement:Placement::Standalone(roots[0].0)},cwd:Some(PrimaryCwd::Existing{path:roots[0].1.clone()}),agent:None,model:None,selfdev:false},StartupContextCaller::HarnessApi).await?;
+        let created=launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput{placement:PrimaryPlacement::Existing{placement:Placement::Standalone(roots[0].0)},cwd:Some(PrimaryCwd::Existing{path:roots[0].1.clone()}),agent:None,model:None,selfdev:false,session_work:false},StartupContextCaller::HarnessApi).await?;
         let source=host.read().await.get(&created.session).cloned().unwrap();
         let auth=WorkspaceClientAuthority::authenticated("human-fixture")?;
         let review=service.review_grant_change(service.status()?.revision,GrantChange::Issue{audience:Audience::Session(created.session.clone()),target:WriteTarget::Root(roots[1].0),proposal:None})?;
@@ -663,7 +666,7 @@ fn scope_notices_are_durable_non_waking_and_do_not_delay_revocation() -> Result<
         let mut roots=Vec::new();for name in ["source","other"] {let path=temp.path().join(name);std::fs::create_dir(&path)?;let path=path.canonicalize()?;let EntityId::Location(id)=change(&service,OrganizationChange::RegisterLocation{name:name.into(),path:path.clone(),registration:Registration::Standalone})?.targets[0] else {panic!()};roots.push((id,path));}
         let provider=FixtureProvider::default();let host=Arc::new(PrimaryHost::default());
         let launcher=PrimaryLauncher{workspace:service.clone(),repositories:InstructionRepositoryService::new(),provider:Arc::new(provider.clone()),registry:PrimaryRegistryMode::Process};
-        let created=launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput{placement:PrimaryPlacement::Existing{placement:Placement::Standalone(roots[0].0)},cwd:Some(PrimaryCwd::Existing{path:roots[0].1.clone()}),agent:None,model:None,selfdev:false},StartupContextCaller::HarnessApi).await?;
+        let created=launcher.launch_hosted(&host,RequestId::new(),service.status()?.revision,PrimaryLaunchInput{placement:PrimaryPlacement::Existing{placement:Placement::Standalone(roots[0].0)},cwd:Some(PrimaryCwd::Existing{path:roots[0].1.clone()}),agent:None,model:None,selfdev:false,session_work:false},StartupContextCaller::HarnessApi).await?;
         let agent=host.read().await.get(&created.session).cloned().unwrap();
         host.reconcile_idle_scope_notices().await;
         let initial=Session::load(&created.session)?;assert!(initial.scope_notice.is_some());
