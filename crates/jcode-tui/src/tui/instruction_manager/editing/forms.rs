@@ -493,6 +493,7 @@ impl EditForm {
             subtypes: original.and_then(|value| value.subtypes.clone()),
             skill: original.and_then(|value| value.skill.clone()),
             workflow: original.and_then(|value| value.workflow.clone()),
+            disable_model_invocation: original.is_some_and(|value| value.disable_model_invocation),
         }
     }
     fn submit(&mut self) -> Result<FormResult, String> {

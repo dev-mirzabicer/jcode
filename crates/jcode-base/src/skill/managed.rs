@@ -313,6 +313,7 @@ fn load_scope(
                             name: name.clone(),
                             description: description.clone(),
                             allowed_tools: document.metadata.allowed_tools.clone(),
+                            model_invocable: !document.metadata.disable_model_invocation,
                             content: rendered.text.clone(),
                             path: document.path.clone(),
                             search_text: build_skill_search_text(

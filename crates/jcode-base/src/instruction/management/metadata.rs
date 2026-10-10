@@ -126,6 +126,7 @@ pub(super) fn fields(document: &InstructionDocument) -> InstructionResourceField
             .as_ref()
             .and_then(|metadata| metadata.skill.clone()),
         workflow: document.metadata.workflow_template.clone(),
+        disable_model_invocation: document.metadata.disable_model_invocation,
     }
 }
 pub(super) fn document(
@@ -169,6 +170,7 @@ pub(super) fn document(
                 .collect::<std::result::Result<_, _>>()
                 .map_err(|error| fail("module references", error))?,
             allowed_tools: fields.allowed_tools.clone(),
+            disable_model_invocation: fields.disable_model_invocation,
             module_type: (kind(fields.kind) == InstructionKind::ModuleType).then(|| {
                 ModuleTypeMetadata {
                     subtypes: fields.subtypes.clone().unwrap_or_default(),

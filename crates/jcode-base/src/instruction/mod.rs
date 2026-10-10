@@ -264,6 +264,8 @@ pub struct InstructionMetadata {
     pub addendum: Option<AddendumMetadata>,
     pub includes: Vec<InstructionSelector>,
     pub allowed_tools: Option<Vec<String>>,
+    /// A skill only a person invokes: left out of the model's catalog.
+    pub disable_model_invocation: bool,
     pub module_type: Option<ModuleTypeMetadata>,
     /// A task preset's workflow template: an isolated child's revision 1.
     pub workflow_template: Option<String>,

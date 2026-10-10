@@ -58,6 +58,9 @@ pub struct InstructionResourceFields {
     /// A task preset's workflow template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<String>,
+    /// A skill only a person invokes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_model_invocation: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

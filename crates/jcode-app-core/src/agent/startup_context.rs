@@ -302,14 +302,7 @@ impl Agent {
     ) -> Result<crate::instruction::SystemPromptActivation, PrimaryInstructionActivationError> {
         let working_dir = session.working_dir.as_deref().map(Path::new);
         let skills = self.current_skills_snapshot_for_working_dir(working_dir);
-        let available_skills = skills
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect::<Vec<_>>();
+        let available_skills = skills.model_catalog();
         crate::instruction::SystemPromptComposer::from_repository_service(
             self.instruction_repositories.clone(),
         )
@@ -424,14 +417,7 @@ impl Agent {
             }
             super::AgentProfileChangeMode::ReplaceSystem => {
                 let skills = self.current_skills_snapshot_for_working_dir(working_dir);
-                let available_skills = skills
-                    .list()
-                    .iter()
-                    .map(|skill| crate::prompt::SkillInfo {
-                        name: skill.name.clone(),
-                        description: skill.description.clone(),
-                    })
-                    .collect::<Vec<_>>();
+                let available_skills = skills.model_catalog();
                 let replacement = composer.replace_system_prompt(
                     crate::instruction::SystemPromptActivationRequest {
                         working_dir,

@@ -1043,6 +1043,8 @@ struct ResourceFrontmatter {
     skill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workflow: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    disable_model_invocation: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1167,6 +1169,7 @@ pub(super) fn parse_document(
             addendum,
             includes,
             allowed_tools,
+            disable_model_invocation: raw.disable_model_invocation,
             module_type,
             // A template becomes a file's text; it ends with a newline like one.
             workflow_template: raw.workflow.as_ref().map(|template| {
@@ -1194,6 +1197,11 @@ fn validate_kind_specific_frontmatter(
     if raw.target.is_some() && expected_kind != InstructionKind::AgentAddendum {
         return Err(format!(
             "frontmatter field 'target' is only valid for agent-addendum resources, not {expected_kind}"
+        ));
+    }
+    if raw.disable_model_invocation && expected_kind != InstructionKind::Skill {
+        return Err(format!(
+            "frontmatter field 'disable-model-invocation' is only valid for skill resources, not {expected_kind}"
         ));
     }
     if raw.allowed_tools.is_some() && expected_kind != InstructionKind::Skill {
@@ -1354,6 +1362,7 @@ pub(super) fn serialize_document(
             .as_ref()
             .and_then(|metadata| metadata.skill.clone()),
         workflow: document.metadata.workflow_template.clone(),
+        disable_model_invocation: document.metadata.disable_model_invocation,
     };
     let yaml = serde_yaml::to_string(&raw).map_err(|error| InstructionError::Serialization {
         detail: error.to_string(),

@@ -135,6 +135,10 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// False for `disable-model-invocation: true`: the skill stays out of the
+    /// model's available-skills catalog and only a person invokes it. Its file
+    /// stays readable.
+    pub model_invocable: bool,
     pub content: String,
     pub path: PathBuf,
     search_text: String,
@@ -146,6 +150,8 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<String>,
+    #[serde(rename = "disable-model-invocation", default)]
+    disable_model_invocation: bool,
 }
 
 /// Registry of available skills
@@ -766,6 +772,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            disable_model_invocation,
         } = frontmatter;
 
         let allowed_tools =
@@ -776,6 +783,7 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            model_invocable: !disable_model_invocation,
             content: body,
             path: path.to_path_buf(),
             search_text,
@@ -821,6 +829,19 @@ impl SkillRegistry {
         let mut skills: Vec<&Skill> = self.skills.values().map(Arc::as_ref).collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills
+    }
+
+    /// The skills an agent may invoke on its own, as its available-skills
+    /// catalog lists them. Skills only a person invokes are left out.
+    pub fn model_catalog(&self) -> Vec<crate::prompt::SkillInfo> {
+        self.list()
+            .into_iter()
+            .filter(|skill| skill.model_invocable)
+            .map(|skill| crate::prompt::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect()
     }
 
     /// Reload a specific skill by name
@@ -1416,11 +1437,37 @@ fn normalize_skill_search_text(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_model_catalog_leaves_out_person_invoked_skills() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("SKILL.md");
+        let person = SkillRegistry::parse_skill_source(
+            &path,
+            "---\nname: person\ndescription: Synthetic\ndisable-model-invocation: true\n---\nBody",
+        )
+        .unwrap();
+        assert!(!person.model_invocable);
+        let mut registry = SkillRegistry::default();
+        registry.skills.insert("person".into(), Arc::new(person));
+        registry.skills.insert(
+            "agent".into(),
+            Arc::new(test_skill("agent", "Synthetic", "Body")),
+        );
+        let catalog: Vec<String> = registry
+            .model_catalog()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        assert_eq!(catalog, ["agent"]);
+        assert_eq!(registry.list().len(), 2, "people still see both");
+    }
+
     fn test_skill(name: &str, description: &str, content: &str) -> Skill {
         Skill {
             name: name.to_string(),
             description: description.to_string(),
             allowed_tools: None,
+            model_invocable: true,
             content: content.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             search_text: build_skill_search_text(name, description, content),

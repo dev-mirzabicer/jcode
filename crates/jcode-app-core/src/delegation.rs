@@ -238,14 +238,7 @@ impl Host {
                 Some(&cwd),
                 &self.repositories,
             );
-            let available = skills
-                .list()
-                .iter()
-                .map(|skill| crate::prompt::SkillInfo {
-                    name: skill.name.clone(),
-                    description: skill.description.clone(),
-                })
-                .collect::<Vec<_>>();
+            let available = skills.model_catalog();
             let composer = SystemPromptComposer::from_repository_service(self.repositories.clone());
             let activation = composer.activate_isolated(SystemPromptActivationRequest {
                 working_dir: Some(&cwd),

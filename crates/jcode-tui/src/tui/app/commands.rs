@@ -3347,14 +3347,7 @@ pub(super) fn apply_local_primary_agent_change(
 
     if !dispatched {
         let skills = app.current_skills_snapshot();
-        let available_skills = skills
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect::<Vec<_>>();
+        let available_skills = skills.model_catalog();
         let activation = composer
             .activate(crate::instruction::SystemPromptActivationRequest {
                 working_dir,
@@ -3409,14 +3402,7 @@ pub(super) fn apply_local_primary_agent_change(
         }
         crate::agent::AgentProfileChangeMode::ReplaceSystem => {
             let skills = app.current_skills_snapshot();
-            let available_skills = skills
-                .list()
-                .iter()
-                .map(|skill| crate::prompt::SkillInfo {
-                    name: skill.name.clone(),
-                    description: skill.description.clone(),
-                })
-                .collect::<Vec<_>>();
+            let available_skills = skills.model_catalog();
             let replacement = composer
                 .replace_system_prompt(
                     crate::instruction::SystemPromptActivationRequest {

@@ -28,6 +28,7 @@ fn synthetic_draft() -> InstructionEditDraft {
                 subtypes: None,
                 skill: None,
                 workflow: None,
+                disable_model_invocation: false,
             }),
             deleted: false,
         }],

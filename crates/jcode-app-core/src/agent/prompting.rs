@@ -83,14 +83,7 @@ impl Agent {
             static_part.to_string()
         } else {
             let skills = self.current_skills_snapshot();
-            let available_skills = skills
-                .list()
-                .iter()
-                .map(|skill| crate::prompt::SkillInfo {
-                    name: skill.name.clone(),
-                    description: skill.description.clone(),
-                })
-                .collect::<Vec<_>>();
+            let available_skills = skills.model_catalog();
             let working_dir = self
                 .session
                 .working_dir

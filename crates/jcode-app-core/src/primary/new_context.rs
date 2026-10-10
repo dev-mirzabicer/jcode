@@ -323,14 +323,7 @@ fn prepare_fresh_context(
             &global_skills,
             child.working_dir.as_deref().map(std::path::Path::new),
         );
-        let available_skills = effective_skills
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect::<Vec<_>>();
+        let available_skills = effective_skills.model_catalog();
         crate::instruction::SystemPromptComposer::from_repository_service(
             instruction_repositories.clone(),
         )

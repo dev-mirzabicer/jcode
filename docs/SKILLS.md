@@ -157,6 +157,8 @@ The prose for the available-skills section is managed at:
 
 The composer supplies the sorted effective skill names and complete descriptions as typed values. The complete rendered section is frozen in the system prompt at activation.
 
+A skill with `disable-model-invocation: true` in its frontmatter is invoked only by a person. It is left out of this section and of `skill_manage list`, so it costs no context and no agent discovers it on its own. Everything else stays: `/name` invokes it, `/skills` lists it, and `skill_manage read`/`load` by its exact name still work, for example when an instruction points an agent at it. The field is valid only on skills; managed resources keep it through edits. The managed `session-work` skill uses it ([Session work](SESSION_WORK.md#the-session-work-skill)).
+
 Discovery changes and `skill_manage reload_all` affect later listings and later activations. They do not rewrite an existing session's true system prompt. An explicit true-system replacement, clear, transfer, or fresh session renders the current catalog.
 
 ## Commands and tool behavior
@@ -165,7 +167,7 @@ Existing surfaces remain available:
 
 - `/skills` refreshes discovery for the listing and shows the active name.
 - Slash invocation supports trailing prompts and multi-word names.
-- `skill_manage list` shows effective skills and endorsed entries.
+- `skill_manage list` shows effective skills the agent may invoke and endorsed entries.
 - `skill_manage load` returns the latest completely rendered skill as a tool result.
 - `skill_manage read` shows current effective source content and source class.
 - `skill_manage reload` refreshes one loaded external global skill.

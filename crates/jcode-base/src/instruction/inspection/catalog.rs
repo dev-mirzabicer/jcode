@@ -496,14 +496,7 @@ impl InstructionInspector {
             self.context.working_dir.as_deref(),
             &self.repositories,
         );
-        self.skills = registry
-            .list()
-            .iter()
-            .map(|skill| SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect();
+        self.skills = registry.model_catalog();
         for entry in registry.catalog_entries() {
             canceled(cancel)?;
             let path = entry.source.package_root.join("SKILL.md");

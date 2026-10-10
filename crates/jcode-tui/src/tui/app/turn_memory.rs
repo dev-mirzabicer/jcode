@@ -26,14 +26,7 @@ impl App {
             (static_part.to_string(), info)
         } else {
             let skills = self.current_skills_snapshot();
-            let available_skills = skills
-                .list()
-                .iter()
-                .map(|s| crate::prompt::SkillInfo {
-                    name: s.name.clone(),
-                    description: s.description.clone(),
-                })
-                .collect::<Vec<_>>();
+            let available_skills = skills.model_catalog();
             let (split, info) = crate::prompt::build_system_prompt_split(
                 &available_skills,
                 self.session.is_canary,

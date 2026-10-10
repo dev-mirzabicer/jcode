@@ -327,6 +327,7 @@ fn manager_create_global_project_redefine_addendum_clear_and_external_commit_are
                     subtypes: None,
                     skill: None,
                     workflow: None,
+                    disable_model_invocation: false,
                 };
                 let draft = super::draft(
                     fixture

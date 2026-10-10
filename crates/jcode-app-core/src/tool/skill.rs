@@ -167,7 +167,13 @@ impl SkillTool {
 
     async fn list_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
         let registry = self.effective_registry(working_dir).await;
-        let mut skills = registry.list();
+        // Discovery lists what the agent may invoke on its own; a skill only
+        // a person invokes stays readable by name.
+        let mut skills: Vec<_> = registry
+            .list()
+            .into_iter()
+            .filter(|skill| skill.model_invocable)
+            .collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
 
         let installed: std::collections::HashSet<&str> =
