@@ -59,7 +59,7 @@ Swarm grouping, coordinator messages, plan broadcasts, task staleness work and S
 
 ## Cache boundary
 
-Removing Swarm is an intentional provider-prefix transition. A session whose persisted tool set held the definition stops advertising it once, records the removal as a tool-set change with an appended notice, and invalidates its continuation ([tool set](CLAUDE_PROVIDER_PARITY.md#tool-set)). Subsequent requests remain stable without Swarm. New registries and restored sessions build their available definitions under the same global policy. Frozen historical routing text is neither reapplied nor cleared, and old conversation messages are not rewritten.
+A session whose persisted tool set held the definition stops offering it once: it records a withdrawn removal, announced by an appended notice ([tool set](CLAUDE_PROVIDER_PARITY.md#tool-set)). Claude models that take tool changes inside a message keep their first-sent `tools` and receive the removal of that declared tool inside the notice; every other provider drops the definition at one recorded tool-set transition that invalidates its continuation. Subsequent requests remain stable without Swarm. New registries and restored sessions build their available definitions under the same global policy. Frozen historical routing text is neither reapplied nor cleared, and old conversation messages are not rewritten.
 
 ## Maintainer verification
 

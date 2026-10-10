@@ -115,8 +115,26 @@ Further rules:
   while its servers are still connecting after a start is kept, and a call to
   it returns "its MCP server is reconnecting". If the server settles without
   it, it is removed like any other tool.
-- A globally unavailable tool (Swarm while it is disabled) is never
-  advertised, even when the frozen set held it.
+- A globally unavailable tool (Swarm while it is disabled, or a retired
+  feature such as `initiative` while its gate is off) is never offered, even
+  when the frozen set held it. Its removal is recorded as withdrawn, in the
+  persisted record, so every array stays a function of the record alone and
+  each change of availability is compared and recorded. On the left of the
+  table it is removed like any other tool: `tools` keeps its first-sent bytes
+  and the notice carries the `tool_removal` of that declared tool (no cache
+  or thinking loss). Elsewhere its definition leaves `tools` at a recorded
+  `tool set change` transition. If it becomes available again, it returns as
+  an addition: by value inside the notice on the left, at another recorded
+  transition elsewhere.
+- A rendered tool change names only a tool the request knows: one in its
+  `tools`, or added by value earlier in its messages. The API rejects any
+  other reference ("tool_addition/tool_removal references unknown tool"), so
+  such a change keeps only its notice text.
+- A notice that becomes user text (see [operator notices](#operator-notices))
+  moves its tool changes to the next valid position: the next notice kept as
+  a system message, ahead of that notice's own changes, otherwise a system
+  message before the next reply. The model is always told the changes in the
+  order they happened.
 - In-message changes exist only while their notice is in the projected
   history. When a context summary or a rewind hides a notice, the next
   request announces its changes again, appended, so the model's tools never

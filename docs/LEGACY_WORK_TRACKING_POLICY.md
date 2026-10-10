@@ -59,7 +59,7 @@ Session workflows, stop declarations and the workflow guidance written later. Pl
 
 ## Cache boundary
 
-Removing `initiative` is an intentional provider-prefix transition. A session whose persisted tool set held it stops advertising it once, records the removal as a tool-set change with an appended notice, and stays stable afterwards ([tool set](CLAUDE_PROVIDER_PARITY.md#tool-set)). Earlier transcript content is not rewritten.
+A session whose persisted tool set held `initiative` records one withdrawn removal, announced by one appended notice; later requests stay stable ([tool set](CLAUDE_PROVIDER_PARITY.md#tool-set)). On Claude models that take tool changes inside a message, the first-sent `tools` array is unchanged and the notice carries the removal of that declared tool, so the prompt cache and earlier thinking survive. On every other provider the definition leaves the `tools` array at one recorded tool-set transition. Reactivating the gate returns the tool as an addition, the same way in reverse. Earlier transcript content is not rewritten.
 
 ## Maintainer verification
 
