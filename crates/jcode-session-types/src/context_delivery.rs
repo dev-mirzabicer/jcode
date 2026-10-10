@@ -23,6 +23,9 @@ pub enum ContextDeliveryChannel {
     /// A change to the session's tool set (INT-01/WP-06, D15). The changes
     /// travel structurally in the delivery's origin.
     ToolSet,
+    /// A session-work notice, such as a workflow file restored after it was
+    /// changed outside the native file tools.
+    SessionWork,
 }
 
 impl ContextDeliveryChannel {
@@ -30,7 +33,9 @@ impl ContextDeliveryChannel {
     /// and nudges are operator guidance (INT-01/WP-06, D17).
     pub fn preferred_authority(self) -> DeliveryAuthority {
         match self {
-            Self::TurnReminder | Self::BatchNudge | Self::ToolSet => DeliveryAuthority::Operator,
+            Self::TurnReminder | Self::BatchNudge | Self::ToolSet | Self::SessionWork => {
+                DeliveryAuthority::Operator
+            }
         }
     }
 }
@@ -81,7 +86,9 @@ pub fn context_delivery_text(channel: ContextDeliveryChannel, body: &str) -> Opt
     }
     let heading = match channel {
         ContextDeliveryChannel::TurnReminder => REMINDER_HEADING,
-        ContextDeliveryChannel::BatchNudge | ContextDeliveryChannel::ToolSet => "",
+        ContextDeliveryChannel::BatchNudge
+        | ContextDeliveryChannel::ToolSet
+        | ContextDeliveryChannel::SessionWork => "",
     };
     Some(format!("{OPEN}{heading}{body}{CLOSE}"))
 }

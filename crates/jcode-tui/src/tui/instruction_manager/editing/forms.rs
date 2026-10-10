@@ -211,6 +211,7 @@ impl EditForm {
                     "notification",
                     "tool-guidance",
                     "skill",
+                    "module-type",
                 ]
                 .into_iter()
                 .map(str::to_string)
@@ -456,6 +457,7 @@ impl EditForm {
                 "notification" => InstructionEditKind::Notification,
                 "tool-guidance" => InstructionEditKind::ToolGuidance,
                 "skill" => InstructionEditKind::Skill,
+                "module-type" => InstructionEditKind::ModuleType,
                 _ => InstructionEditKind::Module,
             }
         });
@@ -487,6 +489,10 @@ impl EditForm {
                 .map(|field| field.value.clone())
                 .collect(),
             allowed_tools: original.and_then(|value| value.allowed_tools.clone()),
+            // Fields this form does not edit keep the resource's own values.
+            subtypes: original.and_then(|value| value.subtypes.clone()),
+            skill: original.and_then(|value| value.skill.clone()),
+            workflow: original.and_then(|value| value.workflow.clone()),
         }
     }
     fn submit(&mut self) -> Result<FormResult, String> {
@@ -514,10 +520,14 @@ impl EditForm {
                 }
                 if matches!(
                     fields.kind,
-                    InstructionEditKind::Agent | InstructionEditKind::Skill
+                    InstructionEditKind::Agent
+                        | InstructionEditKind::Skill
+                        | InstructionEditKind::ModuleType
                 ) && (fields.name.is_none() || fields.description.is_none())
                 {
-                    return Err("Agents and skills need a name and description.".into());
+                    return Err(
+                        "Agents, skills and module types need a name and description.".into(),
+                    );
                 }
                 Ok(FormResult::Begin(InstructionEditAction::Create {
                     scope: if matches!(self.purpose, Purpose::Action(EditAction::CreateProject)) {

@@ -713,6 +713,7 @@ impl InstructionRuntime {
             InstructionKind::Module,
             InstructionKind::Notification,
             InstructionKind::ToolGuidance,
+            InstructionKind::ModuleType,
         ] {
             let directory = root.join(kind.directory());
             if !self.inspect_directory(scope, &directory) {
@@ -1036,6 +1037,12 @@ struct ResourceFrontmatter {
         skip_serializing_if = "Option::is_none"
     )]
     allowed_tools: Option<AllowedTools>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    subtypes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1098,6 +1105,34 @@ pub(super) fn parse_document(
         nonempty(raw.name.as_deref(), "agent name")?;
         nonempty(raw.description.as_deref(), "agent description")?;
     }
+    let module_type = if expected_kind == InstructionKind::ModuleType {
+        nonempty(raw.name.as_deref(), "module type name")?;
+        nonempty(raw.description.as_deref(), "module type description")?;
+        for subtype in &raw.subtypes {
+            jcode_session_work_types::ModuleId::parse(subtype)
+                .map_err(|error| format!("module type subtype: {error}"))?;
+        }
+        if let Some(skill) = raw.skill.as_deref() {
+            InstructionSelector::parse(InstructionKind::Skill, skill)
+                .map_err(|error| error.to_string())?;
+        }
+        Some(ModuleTypeMetadata {
+            subtypes: raw.subtypes.clone(),
+            skill: raw.skill.clone(),
+        })
+    } else {
+        None
+    };
+    if let Some(template) = raw.workflow.as_deref() {
+        if !id.as_str().starts_with("task-preset.") {
+            return Err(
+                "frontmatter field 'workflow' is only valid for task-preset notification resources"
+                    .to_string(),
+            );
+        }
+        crate::session_work::parse_workflow(template)
+            .map_err(|errors| format!("workflow template: {errors}"))?;
+    }
     let addendum = if expected_kind == InstructionKind::AgentAddendum {
         Some(AddendumMetadata {
             target: InstructionSelector::parse(
@@ -1132,6 +1167,8 @@ pub(super) fn parse_document(
             addendum,
             includes,
             allowed_tools,
+            module_type,
+            workflow_template: raw.workflow.clone(),
         },
         body: body.to_string(),
         path: path.to_path_buf(),
@@ -1155,6 +1192,18 @@ fn validate_kind_specific_frontmatter(
     if raw.allowed_tools.is_some() && expected_kind != InstructionKind::Skill {
         return Err(format!(
             "frontmatter field 'allowed-tools' is only valid for skill resources, not {expected_kind}"
+        ));
+    }
+    if (!raw.subtypes.is_empty() || raw.skill.is_some())
+        && expected_kind != InstructionKind::ModuleType
+    {
+        return Err(format!(
+            "frontmatter fields 'subtypes' and 'skill' are only valid for module-type resources, not {expected_kind}"
+        ));
+    }
+    if raw.workflow.is_some() && expected_kind != InstructionKind::Notification {
+        return Err(format!(
+            "frontmatter field 'workflow' is only valid for task-preset notification resources, not {expected_kind}"
         ));
     }
     Ok(())
@@ -1286,6 +1335,18 @@ pub(super) fn serialize_document(
             .as_ref()
             .map(|addendum| selector_source(&addendum.target)),
         allowed_tools,
+        subtypes: document
+            .metadata
+            .module_type
+            .as_ref()
+            .map(|metadata| metadata.subtypes.clone())
+            .unwrap_or_default(),
+        skill: document
+            .metadata
+            .module_type
+            .as_ref()
+            .and_then(|metadata| metadata.skill.clone()),
+        workflow: document.metadata.workflow_template.clone(),
     };
     let yaml = serde_yaml::to_string(&raw).map_err(|error| InstructionError::Serialization {
         detail: error.to_string(),

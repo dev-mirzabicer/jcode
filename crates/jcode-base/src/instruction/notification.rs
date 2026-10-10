@@ -155,6 +155,8 @@ notifications! {
     StartupContextStaleCurrent => ("startup-context-stale-current", "Startup Context observation", Handlebars),
     SessionFork { parent: &'a str, parent_id: &'a str } => ("session-fork", "session fork", Handlebars),
     SessionTransferHandoff => ("session-transfer-handoff", "session transfer", Plain),
+    SessionWorkContext { workflow_path: &'a str, skill_path: &'a str } => ("session-work-context", "session work activation", Handlebars),
+    SessionWorkWorkflowRestored { revision: u32 } => ("session-work-workflow-restored", "workflow file reconciliation", Handlebars),
     BatchNudge => ("batch-nudge", "agent turn loop", Plain),
     EmptyPostToolContinuation => ("empty-post-tool-continuation", "agent response recovery", Plain),
     IncompleteResponseContinuation { stop_reason: &'a str } => ("incomplete-response-continuation", "agent response recovery", Handlebars),

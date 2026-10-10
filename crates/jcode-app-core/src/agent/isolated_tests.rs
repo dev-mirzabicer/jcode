@@ -109,6 +109,7 @@ async fn fixture(
                     id: InstructionId::parse("task-preset.general").unwrap(),
                 },
                 text: "SYNTHETIC PRESET".into(),
+                workflow_template: None,
             },
         )
         .unwrap();
@@ -260,6 +261,7 @@ async fn child_directives_are_locked_before_curator_work_and_survive_rewind_undo
             id: InstructionId::parse("task-preset.special").unwrap(),
         },
         text: "SYNTHETIC SPECIAL".into(),
+        workflow_template: None,
     };
     agent
         .prepare_isolated_turn(

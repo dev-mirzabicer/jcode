@@ -324,6 +324,9 @@ fn manager_create_global_project_redefine_addendum_clear_and_external_commit_are
                     target: None,
                     includes: Vec::new(),
                     allowed_tools: None,
+                    subtypes: None,
+                    skill: None,
+                    workflow: None,
                 };
                 let draft = super::draft(
                     fixture

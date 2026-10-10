@@ -46,6 +46,8 @@ pub(super) struct SessionJournalMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) primary_creation: Option<super::StoredPrimaryCreation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) session_work: Option<jcode_session_work_types::SessionWorkBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) scope_copy: Option<super::StoredContextScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) scope_notice: Option<jcode_session_types::StoredScopeNotice>,
@@ -130,6 +132,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.working_dir != current.working_dir
         || prev.location != current.location
         || prev.primary_creation != current.primary_creation
+        || prev.session_work != current.session_work
         || prev.scope_copy != current.scope_copy
         || prev.scope_notice != current.scope_notice
         || prev.primary_inputs != current.primary_inputs

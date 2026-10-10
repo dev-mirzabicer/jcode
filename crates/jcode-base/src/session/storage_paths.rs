@@ -79,6 +79,9 @@ pub fn remove_unpublished_session(session_id: &str) -> Result<()> {
     if let Err(error) = crate::todo::remove_todos(session_id) {
         failures.push(error.to_string());
     }
+    if let Err(error) = crate::session_work::remove_unpublished(session_id) {
+        failures.push(error.to_string());
+    }
     if failures.is_empty() {
         Ok(())
     } else {

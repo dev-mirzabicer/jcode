@@ -56,6 +56,48 @@ fn swarm_retirement_defaults_and_explicit_global_compatibility() {
 }
 
 #[test]
+fn session_work_defaults_off_with_file_and_environment_overrides() {
+    assert!(!Config::default().features.session_work);
+    assert!(!toml::from_str::<Config>("").unwrap().features.session_work);
+    assert!(
+        toml::from_str::<Config>("[features]\nsession_work = true\n")
+            .unwrap()
+            .features
+            .session_work
+    );
+    assert!(
+        !toml::from_str::<Config>(&Config::default_config_file_contents())
+            .unwrap()
+            .features
+            .session_work
+    );
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[features]\nsession_work = true\n",
+    )
+    .unwrap();
+    {
+        let _off = super::feature_override::ScopedFeatureOverride::session_work(false);
+        assert!(!crate::session_work::session_work_enabled());
+    }
+    {
+        let _on = super::feature_override::ScopedFeatureOverride::session_work(true);
+        std::fs::write(temp.path().join("config.toml"), "").unwrap();
+        super::invalidate_config_cache();
+        assert!(crate::session_work::session_work_enabled());
+    }
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    super::invalidate_config_cache();
+}
+
+#[test]
 fn legacy_work_tracking_defaults_off_with_file_and_environment_overrides() {
     assert!(!Config::default().features.legacy_work_tracking);
     assert!(

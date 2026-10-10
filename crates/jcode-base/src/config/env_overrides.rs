@@ -319,6 +319,11 @@ impl Config {
                 self.features.legacy_work_tracking = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SESSION_WORK_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.session_work = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_ENABLE_MERMAID") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.mermaid = parsed;

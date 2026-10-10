@@ -1015,6 +1015,10 @@ pub struct FeatureConfig {
     /// Globally enable the retired missions, initiatives and upstream command
     /// workflows (default: false). Their code and data stay dormant while off.
     pub legacy_work_tracking: bool,
+    /// Create new hosted primaries and isolated children with session work:
+    /// workflows and, later, stop declarations and interactions (default:
+    /// false). A session's activation is fixed when it is created.
+    pub session_work: bool,
     /// Enable Mermaid rendering and Mermaid-specific model guidance (default: true)
     pub mermaid: bool,
     /// Default state of auto-poke (automatic follow-up when the model stops with
@@ -1044,6 +1048,7 @@ impl Default for FeatureConfig {
             memory: false,
             swarm: false,
             legacy_work_tracking: false,
+            session_work: false,
             mermaid: true,
             auto_poke: true,
             message_timestamps: true,

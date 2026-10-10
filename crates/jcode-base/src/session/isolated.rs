@@ -289,6 +289,7 @@ mod tests {
                 id: InstructionId::parse(format!("task-preset.{id}")).unwrap(),
             },
             text: text.into(),
+            workflow_template: None,
         }
     }
 

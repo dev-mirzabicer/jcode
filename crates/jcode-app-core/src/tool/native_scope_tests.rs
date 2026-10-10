@@ -571,6 +571,7 @@ async fn native_scope_child_permissions_remain_frozen_but_parent_scope_is_live()
                     id: InstructionId::parse("task-preset.general").unwrap(),
                 },
                 text: "SYNTHETIC PRESET".into(),
+                workflow_template: None,
             },
         )
         .unwrap();

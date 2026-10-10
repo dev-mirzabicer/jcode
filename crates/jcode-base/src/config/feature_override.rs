@@ -19,6 +19,11 @@ impl ScopedFeatureOverride {
         Self::set("JCODE_LEGACY_WORK_TRACKING_ENABLED", enabled)
     }
 
+    /// `features.session_work` through `JCODE_SESSION_WORK_ENABLED`.
+    pub fn session_work(enabled: bool) -> Self {
+        Self::set("JCODE_SESSION_WORK_ENABLED", enabled)
+    }
+
     /// `features.memory` through `JCODE_MEMORY_ENABLED`.
     pub fn memory(enabled: bool) -> Self {
         Self::set("JCODE_MEMORY_ENABLED", enabled)

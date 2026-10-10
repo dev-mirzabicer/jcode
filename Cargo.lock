@@ -3544,6 +3544,7 @@ dependencies = [
  "jcode-provider-openrouter-runtime",
  "jcode-render-core",
  "jcode-session-types",
+ "jcode-session-work-types",
  "jcode-side-panel-types",
  "jcode-storage",
  "jcode-task-types",
@@ -4256,6 +4257,16 @@ dependencies = [
  "memchr",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-session-work-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

@@ -1,0 +1,1 @@
+Workflow file: {{workflow_path}}. Read the session-work skill ({{skill_path}}) before you start working; it explains workflows, stopping and waiting.

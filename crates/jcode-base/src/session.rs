@@ -403,6 +403,10 @@ pub struct Session {
     pub location: Option<StoredSessionLocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_creation: Option<StoredPrimaryCreation>,
+    /// Session-work activation, fixed when the session was created. Its
+    /// workflow and other records live in the session-work store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_work: Option<jcode_session_work_types::SessionWorkBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_copy: Option<StoredContextScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +526,8 @@ struct SessionStartupStub {
     location: Option<StoredSessionLocation>,
     #[serde(default)]
     primary_creation: Option<StoredPrimaryCreation>,
+    #[serde(default)]
+    session_work: Option<jcode_session_work_types::SessionWorkBinding>,
     #[serde(default)]
     scope_copy: Option<StoredContextScope>,
     #[serde(default)]
@@ -1471,6 +1477,7 @@ impl Session {
         session.working_dir = stub.working_dir;
         session.location = stub.location;
         session.primary_creation = stub.primary_creation;
+        session.session_work = stub.session_work;
         session.scope_copy = stub.scope_copy;
         session.scope_notice = stub.scope_notice;
         session.primary_inputs = stub.primary_inputs;
@@ -1704,6 +1711,7 @@ impl Session {
             working_dir: self.working_dir.clone(),
             location: self.location.clone(),
             primary_creation: self.primary_creation.clone(),
+            session_work: self.session_work.clone(),
             scope_copy: self.scope_copy,
             scope_notice: self.scope_notice.clone(),
             primary_inputs: self.primary_inputs.clone(),
@@ -2024,6 +2032,7 @@ impl Session {
         self.working_dir = meta.working_dir;
         self.location = meta.location;
         self.primary_creation = meta.primary_creation;
+        self.session_work = meta.session_work;
         self.scope_copy = meta.scope_copy;
         self.scope_notice = meta.scope_notice;
         self.primary_inputs = meta.primary_inputs;
@@ -2281,6 +2290,7 @@ impl Session {
             working_dir: current_working_dir_string(),
             location: None,
             primary_creation: None,
+            session_work: None,
             scope_copy: None,
             scope_notice: None,
             primary_inputs: Vec::new(),
@@ -2363,6 +2373,7 @@ impl Session {
             working_dir: current_working_dir_string(),
             location: None,
             primary_creation: None,
+            session_work: None,
             scope_copy: None,
             scope_notice: None,
             primary_inputs: Vec::new(),
@@ -2511,6 +2522,10 @@ impl Session {
             context.push('\n');
             context.push_str(&facts);
         }
+        if let Some(session_work) = &self.session_work {
+            context.push('\n');
+            context.push_str(&session_work.context_line);
+        }
         context
     }
 
@@ -2603,6 +2618,12 @@ impl Session {
             parent_id: parent_session_id,
         }
         .render(self.working_dir.as_deref().map(Path::new))?;
+        // A split keeps its source's transcript, whose Session Context names
+        // the source's workflow file. Its own file is named here.
+        let prose = match &self.session_work {
+            Some(session_work) => format!("{prose}\n\n{}", session_work.context_line),
+            None => prose,
+        };
         let text = format!("<system-reminder>\n{prose}\n</system-reminder>");
         self.add_message_with_display_role(
             Role::User,

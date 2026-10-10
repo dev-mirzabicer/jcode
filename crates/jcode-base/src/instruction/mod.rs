@@ -96,6 +96,9 @@ pub enum InstructionKind {
     Notification,
     ToolGuidance,
     Skill,
+    /// A workflow module type: what kind of work a module is, for sessions
+    /// that keep a workflow. Frozen into each session at activation.
+    ModuleType,
 }
 
 impl InstructionKind {
@@ -108,6 +111,7 @@ impl InstructionKind {
             Self::Notification => "notifications",
             Self::ToolGuidance => "tools",
             Self::Skill => "skills",
+            Self::ModuleType => "module-types",
         }
     }
 }
@@ -122,6 +126,7 @@ impl fmt::Display for InstructionKind {
             Self::Notification => "notification",
             Self::ToolGuidance => "tool-guidance",
             Self::Skill => "skill",
+            Self::ModuleType => "module-type",
         })
     }
 }
@@ -243,6 +248,14 @@ pub struct AddendumMetadata {
     pub target: InstructionSelector,
 }
 
+/// Module-type fields beyond the shared name and description.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModuleTypeMetadata {
+    pub subtypes: Vec<String>,
+    /// The skill describing this kind of module, as a skill selector.
+    pub skill: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InstructionMetadata {
     pub display_name: Option<String>,
@@ -251,6 +264,9 @@ pub struct InstructionMetadata {
     pub addendum: Option<AddendumMetadata>,
     pub includes: Vec<InstructionSelector>,
     pub allowed_tools: Option<Vec<String>>,
+    pub module_type: Option<ModuleTypeMetadata>,
+    /// A task preset's workflow template: an isolated child's revision 1.
+    pub workflow_template: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

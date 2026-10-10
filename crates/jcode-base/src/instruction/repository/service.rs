@@ -2821,6 +2821,7 @@ fn kind_for_path(path: &Path) -> InstructionRepositoryResult<crate::instruction:
         "notifications" => Ok(crate::instruction::InstructionKind::Notification),
         "tools" => Ok(crate::instruction::InstructionKind::ToolGuidance),
         "skills" => Ok(crate::instruction::InstructionKind::Skill),
+        "module-types" => Ok(crate::instruction::InstructionKind::ModuleType),
         _ => Err(InstructionRepositoryError::new(
             InstructionRepositoryErrorKind::InvalidPath,
             "identify instruction resource kind",

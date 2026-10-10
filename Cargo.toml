@@ -44,6 +44,7 @@ members = [
     "crates/jcode-protocol",
     "crates/jcode-selfdev-types",
     "crates/jcode-session-types",
+    "crates/jcode-session-work-types",
     "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",

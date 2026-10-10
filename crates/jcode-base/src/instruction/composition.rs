@@ -2,6 +2,8 @@
 mod compatibility;
 #[path = "composition_isolated.rs"]
 mod isolated;
+#[path = "composition_session_work.rs"]
+mod session_work;
 #[path = "composition_workspace.rs"]
 mod workspace;
 pub use isolated::{

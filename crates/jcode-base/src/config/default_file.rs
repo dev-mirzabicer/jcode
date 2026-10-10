@@ -273,6 +273,11 @@ swarm = false
 # dormant while false. Reactivation requires a restart.
 # Global environment override: JCODE_LEGACY_WORK_TRACKING_ENABLED
 legacy_work_tracking = false
+# Session work: new hosted primaries and isolated children keep a validated
+# workflow file. Off until its human client is available. A session's
+# activation is fixed when it is created.
+# Global environment override: JCODE_SESSION_WORK_ENABLED
+session_work = false
 # Mermaid: render Mermaid code blocks and tell the model that diagrams are supported
 mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with

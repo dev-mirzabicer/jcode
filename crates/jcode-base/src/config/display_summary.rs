@@ -69,6 +69,7 @@ impl Config {
 - Memory: {}
 - Swarm: {}
 - Legacy work tracking: {}
+- Session work: {}
 - Auto-poke: {}
 - Message timestamps: {}
 - Persist memory injections: {}
@@ -215,6 +216,7 @@ impl Config {
             self.features.memory,
             self.features.swarm,
             self.features.legacy_work_tracking,
+            self.features.session_work,
             self.features.auto_poke,
             self.features.message_timestamps,
             self.features.persist_memory_injections,

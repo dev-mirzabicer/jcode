@@ -10,6 +10,7 @@ pub(super) fn kind(value: InstructionEditKind) -> InstructionKind {
         InstructionEditKind::Notification => InstructionKind::Notification,
         InstructionEditKind::ToolGuidance => InstructionKind::ToolGuidance,
         InstructionEditKind::Skill => InstructionKind::Skill,
+        InstructionEditKind::ModuleType => InstructionKind::ModuleType,
     }
 }
 fn edit_kind(value: InstructionKind) -> InstructionEditKind {
@@ -21,6 +22,7 @@ fn edit_kind(value: InstructionKind) -> InstructionEditKind {
         InstructionKind::Notification => InstructionEditKind::Notification,
         InstructionKind::ToolGuidance => InstructionEditKind::ToolGuidance,
         InstructionKind::Skill => InstructionEditKind::Skill,
+        InstructionKind::ModuleType => InstructionEditKind::ModuleType,
     }
 }
 pub(super) fn scope(repository: &InstructionRepositoryRef) -> InstructionScope {
@@ -62,6 +64,7 @@ pub(super) fn path_kind(path: &Path) -> Result<InstructionKind> {
         InstructionKind::Notification,
         InstructionKind::ToolGuidance,
         InstructionKind::Skill,
+        InstructionKind::ModuleType,
     ]
     .into_iter()
     .find(|kind| kind.directory() == first)
@@ -112,6 +115,17 @@ pub(super) fn fields(document: &InstructionDocument) -> InstructionResourceField
             .map(selector_text)
             .collect(),
         allowed_tools: document.metadata.allowed_tools.clone(),
+        subtypes: document
+            .metadata
+            .module_type
+            .as_ref()
+            .map(|metadata| metadata.subtypes.clone()),
+        skill: document
+            .metadata
+            .module_type
+            .as_ref()
+            .and_then(|metadata| metadata.skill.clone()),
+        workflow: document.metadata.workflow_template.clone(),
     }
 }
 pub(super) fn document(
@@ -155,6 +169,13 @@ pub(super) fn document(
                 .collect::<std::result::Result<_, _>>()
                 .map_err(|error| fail("module references", error))?,
             allowed_tools: fields.allowed_tools.clone(),
+            module_type: (kind(fields.kind) == InstructionKind::ModuleType).then(|| {
+                ModuleTypeMetadata {
+                    subtypes: fields.subtypes.clone().unwrap_or_default(),
+                    skill: fields.skill.clone(),
+                }
+            }),
+            workflow_template: fields.workflow.clone(),
         },
         body,
         path: repository.root.join(path),

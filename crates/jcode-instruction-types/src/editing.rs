@@ -19,6 +19,7 @@ pub enum InstructionEditKind {
     Notification,
     ToolGuidance,
     Skill,
+    ModuleType,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +49,15 @@ pub struct InstructionResourceFields {
     pub target: Option<String>,
     pub includes: Vec<String>,
     pub allowed_tools: Option<Vec<String>>,
+    /// Module-type subtypes. Absent for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtypes: Option<Vec<String>>,
+    /// A module type's skill selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    /// A task preset's workflow template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

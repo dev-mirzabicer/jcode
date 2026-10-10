@@ -23,6 +23,8 @@ pub struct DelegationInstructionCatalog {
 pub struct TaskPresetActivation {
     pub resource: InstructionResourceRef,
     pub text: String,
+    /// The preset's workflow template: a new child's first workflow revision.
+    pub workflow_template: Option<String>,
 }
 
 fn preset_selector(value: &str) -> Result<InstructionSelector, InstructionError> {
@@ -115,6 +117,7 @@ impl SystemPromptComposer {
         Ok(Some(TaskPresetActivation {
             resource,
             text: rendered.text,
+            workflow_template: document.metadata.workflow_template.clone(),
         }))
     }
 
