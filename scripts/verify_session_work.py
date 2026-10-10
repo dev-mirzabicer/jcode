@@ -45,7 +45,7 @@ result = {'status': 'failed', 'binary': f.BIN, 'root': str(f.ROOT)}
 WORKFLOW_LINE = re.compile(r'Workflow file: (/\S+?/workflow\.md)\. ')
 RESTORED = 'was changed outside the file tools and has been restored to revision'
 VALID = '- [>] ground: Understand the fixture {research}\n- [ ] build: Build it\n'
-EDITED = '- [x] ground: Understand the fixture {research}\n- [>] build: Build it\n'
+EDITED = '- [x] ground: Understand the fixture {research}\n- [ ] build: Build it\n'
 INVALID = '- [>] ground: One\n- [>] build: Two\n'
 TEMPLATE = '- [>] gather: Gather sources\n- [ ] report: Report findings\n'
 
@@ -267,6 +267,11 @@ def stop_daemon():
 try:
     set_flag(True)
     f.start(); admin = connect()
+    # The first session seeds the global instruction store.
+    seed = connect()
+    assert rpc(seed, 'subscribe', until={'done', 'error'}, working_dir=str(root), selfdev=False)['type'] == 'done'
+    close(seed)
+    wait(lambda: (f.home / 'instructions' / 'agents').is_dir(), 'seeded instruction store')
     # Fixture instructions: an isolated-capable agent, a roster alias, a task
     # preset carrying a workflow template, and a module type.
     instructions = f.home / 'instructions'

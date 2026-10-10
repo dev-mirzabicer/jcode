@@ -181,6 +181,17 @@ impl ChildToolPolicy {
             .is_some_and(|root| resolved.starts_with(root) && resolved != root)
     }
 
+    fn own_session_work(&self, resolved: &Path) -> bool {
+        use jcode_base::session_work::{SessionWorkSurface, SurfaceFile};
+        SessionWorkSurface::new()
+            .ok()
+            .and_then(|surface| surface.classify(resolved))
+            .is_some_and(|place| {
+                place.session == self.session_id
+                    && matches!(place.file, SurfaceFile::Workflow | SurfaceFile::Summary)
+            })
+    }
+
     pub(super) fn check_path(&self, path: &Path) -> Result<()> {
         ensure!(
             path.is_absolute(),
@@ -223,6 +234,11 @@ impl ChildToolPolicy {
         }
         let artifact = resolved.starts_with(&self.artifacts) && resolved != self.artifacts;
         let scratch = self.in_scratch(&resolved);
+        // A child's own workflow and summary are written through the
+        // session-work destination, which admits only its own session.
+        if self.own_session_work(&resolved) {
+            return Ok(());
+        }
         ensure!(
             self.permission == Permission::ReadWrite || artifact || scratch,
             "Read-only child mutations are restricted to {} and the agent scratch directory",
@@ -269,6 +285,42 @@ mod tests {
         };
         assert!(writable.check_path(&temp.path().join("project.md")).is_ok());
         assert!(writable.check_path(&state.join("config.toml")).is_err());
+    }
+
+    #[test]
+    fn read_only_children_may_name_only_their_own_workflow_and_summary() {
+        let _env = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("jcode");
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", &home);
+        let artifacts = home.join("artifacts/child");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let policy = ChildToolPolicy {
+            original_parent: "parent_fixture".into(),
+            session_id: "session_child_fixture".into(),
+            permission: Permission::ReadOnly,
+            artifacts: artifacts.canonicalize().unwrap(),
+            state_root: home.canonicalize().unwrap(),
+            scratch: None,
+        };
+        let work = home.canonicalize().unwrap().join("session-work");
+        let own = work.join("session_child_fixture");
+        let results = [
+            policy.check_path(&own.join("workflow.md")).is_ok(),
+            policy.check_path(&own.join("summary.md")).is_ok(),
+            policy.check_path(&own.join("history/r01.md")).is_ok(),
+            policy.check_path(&own.join("other.md")).is_ok(),
+            policy
+                .check_path(&work.join("parent_fixture/workflow.md"))
+                .is_ok(),
+        ];
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        assert_eq!(results, [true, true, false, false, false]);
     }
 
     #[test]

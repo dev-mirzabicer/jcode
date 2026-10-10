@@ -154,6 +154,12 @@ pub fn reconcile_session(session: &Session) -> Result<Option<u32>, SessionWorkEr
     }
     let surface =
         SessionWorkSurface::new().map_err(|error| SessionWorkError::Io(error.to_string()))?;
+    // The Session says it was activated; a store without that activation
+    // (replaced or restored from elsewhere) is a contradiction, not "no
+    // workflow".
+    if surface.store().activation(&session.id)?.is_none() {
+        return Err(SessionWorkError::NotActivated(session.id.clone()));
+    }
     Ok(match surface.reconcile(&session.id)? {
         super::Reconciled::Restored { revision } => Some(revision),
         _ => None,

@@ -284,3 +284,33 @@ fn reconcile_ignores_sessions_without_session_work() {
     let session = fixture.session("session_plain");
     assert_eq!(reconcile_session(&session).unwrap(), None);
 }
+
+#[test]
+fn reconcile_fails_closed_when_the_store_lost_an_activated_session() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let previous = [
+        ("JCODE_HOME", std::env::var_os("JCODE_HOME")),
+        ("JCODE_RUNTIME_DIR", std::env::var_os("JCODE_RUNTIME_DIR")),
+    ];
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path().join("runtime"));
+    let _on = ScopedFeatureOverride::session_work(true);
+    let mut session = Session::create_with_id("session_lost".into(), None, None);
+    let repositories = InstructionRepositoryService::new();
+    assert!(activate_new_session(&mut session, NewSessionWork::Primary, &repositories).unwrap());
+    assert_eq!(reconcile_session(&session).unwrap(), None);
+    let mut stranger = Session::create_with_id("session_stranger".into(), None, None);
+    stranger.session_work = session.session_work.clone();
+    let outcome = reconcile_session(&stranger);
+    for (key, value) in previous {
+        match value {
+            Some(value) => crate::env::set_var(key, value),
+            None => crate::env::remove_var(key),
+        }
+    }
+    assert!(
+        matches!(outcome, Err(SessionWorkError::NotActivated(_))),
+        "{outcome:?}"
+    );
+}
