@@ -1576,3 +1576,6 @@ impl crate::context::RequestPrefixSource for Agent {
 #[cfg(test)]
 #[path = "agent/session_work_tests.rs"]
 mod session_work_tests;
+#[cfg(test)]
+#[path = "agent/stop_protocol_tests.rs"]
+mod stop_protocol_tests;

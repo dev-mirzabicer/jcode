@@ -265,7 +265,8 @@ requires every primary to be placed before it runs. Attachment-independent
 primary lifetime does not depend on it. Enabling it and placing existing
 sessions is described in [managed placement rollout](WORKSPACE_ROLLOUT.md).
 
-Before Subscribe, `primary_launch_probe` reports version 1 and enabled state.
+Before Subscribe, `primary_launch_probe` reports version 1, enabled state and
+`session_work_opt_in` (whether `PrimaryLaunchInput.session_work` is accepted).
 `primary_launch` accepts a `PrimaryLaunchRequest` and returns its durable receipt
 or a structured issue. Neither probe nor a rejected disabled launch allocates a
 provisional Session. Accepted preparation runs under the runtime's owned task

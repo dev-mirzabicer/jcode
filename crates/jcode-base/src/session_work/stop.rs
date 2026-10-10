@@ -411,8 +411,10 @@ pub fn natural_end(
 ) -> Result<EndDecision, SessionWorkError> {
     store.begin_turn(session, now)?;
     if let Some(outcome) = &end.nonvoluntary {
-        // A refusal, truncation or empty response is not the agent's
-        // decision to stop; a declaration made earlier stays as it is.
+        // A refusal or truncation is not the agent's decision to stop. It is
+        // never corrected, and a declaration made earlier in the turn
+        // survives it.
+        survive_failure(store, session, items, now)?;
         return Ok(EndDecision::End(outcome.clone()));
     }
     if let Some(current) = store.current_stop(session)? {
@@ -493,6 +495,65 @@ pub fn end_after_refusals(
             Ok(refused)
         }
     }
+}
+
+/// A turn ended by a failure: a provider error, a preflight block, a
+/// refusal or truncated output. A declaration made in the turn survives it:
+/// it takes effect if it still holds, and is invalidated otherwise.
+pub fn survive_failure(
+    store: &SessionWorkStore,
+    session: &str,
+    items: &[ObservedItem],
+    now: DateTime<Utc>,
+) -> Result<(), SessionWorkError> {
+    let Some(current) = store.current_stop(session)? else {
+        return Ok(());
+    };
+    if current.state != DeclarationState::Pending {
+        return Ok(());
+    }
+    match validate(store, session, &current.declaration, items)? {
+        Ok(()) => {
+            settle_valid(store, session, current, None, now)?;
+        }
+        Err(refusal) => {
+            store.settle_stop(
+                session,
+                current.number,
+                DeclarationState::Invalidated {
+                    reason: refusal_summary(&refusal),
+                },
+                None,
+                None,
+                now,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Mirza stopped the turn. A declaration made in it is revoked; a wait that
+/// was already in effect stays.
+pub fn revoke_on_stop(
+    store: &SessionWorkStore,
+    session: &str,
+    now: DateTime<Utc>,
+) -> Result<(), SessionWorkError> {
+    if let Some(current) = store.current_stop(session)?
+        && current.state == DeclarationState::Pending
+    {
+        store.settle_stop(
+            session,
+            current.number,
+            DeclarationState::Withdrawn {
+                cause: jcode_session_work_types::WithdrawCause::Revoked,
+            },
+            None,
+            None,
+            now,
+        )?;
+    }
+    Ok(())
 }
 
 /// Record how a turn ended. `request` identifies this recording.

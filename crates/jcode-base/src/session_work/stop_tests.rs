@@ -558,21 +558,72 @@ fn nonvoluntary_ends_never_correct_and_leave_declarations_alone() {
         store.open_turn("s").unwrap().unwrap().1.corrections.len(),
         0
     );
-    // An empty final message after a valid declaration still settles it.
+    // A valid declaration survives a refusal and takes effect.
     let items =
         observe_items(&store, "s", &[task("x", ItemKind::Task, true, true)], at(1)).unwrap();
     declare_ok(&store, "d1", &wait("t1"), &items);
     let mut refusal = end("", "m-r");
     refusal.nonvoluntary = Some(TurnOutcome::ProviderRefusal);
-    natural(&store, &refusal, &items);
     assert_eq!(
-        store.current_stop("s").unwrap().unwrap().state,
-        DeclarationState::Pending
+        natural(&store, &refusal, &items),
+        EndDecision::End(TurnOutcome::ProviderRefusal)
     );
+    let current = store.current_stop("s").unwrap().unwrap();
+    assert_eq!(current.state, DeclarationState::Effective);
+    assert_eq!(current.final_text, None);
+    // An empty final message after a valid declaration settles it too.
+    let (_temp, store) = store_with("s", SessionWorkRole::Primary);
+    let items =
+        observe_items(&store, "s", &[task("x", ItemKind::Task, true, true)], at(1)).unwrap();
+    declare_ok(&store, "d1", &wait("t1"), &items);
     assert_eq!(
         natural(&store, &empty, &items),
         EndDecision::End(TurnOutcome::Waiting { stop: 1 })
     );
+}
+
+#[test]
+fn failures_keep_a_valid_declaration_and_stop_revokes_one_made_in_the_turn() {
+    let (_temp, store) = store_with("s", SessionWorkRole::Primary);
+    let items =
+        observe_items(&store, "s", &[task("x", ItemKind::Task, true, true)], at(1)).unwrap();
+    declare_ok(&store, "d1", &wait("t1"), &items);
+    survive_failure(&store, "s", &items, at(2)).unwrap();
+    assert_eq!(
+        store.current_stop("s").unwrap().unwrap().state,
+        DeclarationState::Effective
+    );
+    // A wait already in effect stays when Mirza stops a later turn.
+    revoke_on_stop(&store, "s", at(3)).unwrap();
+    assert_eq!(
+        store.current_stop("s").unwrap().unwrap().state,
+        DeclarationState::Effective
+    );
+    // A declaration made in the stopped turn is revoked.
+    declare_ok(&store, "d2", &wait("t1"), &items);
+    revoke_on_stop(&store, "s", at(4)).unwrap();
+    assert!(store.current_stop("s").unwrap().is_none());
+    assert_eq!(
+        store.stops("s").unwrap()[1].state,
+        DeclarationState::Withdrawn {
+            cause: jcode_session_work_types::WithdrawCause::Revoked
+        }
+    );
+    // A declaration that no longer holds does not survive a failure.
+    declare_ok(&store, "d3", &wait("t1"), &items);
+    let finished = observe_items(
+        &store,
+        "s",
+        &[task("x", ItemKind::Task, false, true)],
+        at(5),
+    )
+    .unwrap();
+    survive_failure(&store, "s", &finished, at(6)).unwrap();
+    assert!(store.current_stop("s").unwrap().is_none());
+    assert!(matches!(
+        store.stops("s").unwrap()[2].state,
+        DeclarationState::Invalidated { .. }
+    ));
 }
 
 #[test]

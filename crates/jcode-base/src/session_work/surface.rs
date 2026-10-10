@@ -13,6 +13,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub const WORKFLOW_FILE: &str = "workflow.md";
 pub const SUMMARY_FILE: &str = "summary.md";
+/// The session's frozen module types, generated and read-only.
+pub const MODULE_TYPES_FILE: &str = "module-types.md";
 pub const HISTORY_DIR: &str = "history";
 /// Revisions kept as files in `history/`. The store keeps all of them.
 pub const HISTORY_FILES: usize = 40;
@@ -30,6 +32,7 @@ pub enum SurfaceFile {
     Directory,
     Workflow,
     Summary,
+    ModuleTypes,
     /// Anything under `history/`.
     History,
     /// Any other name.
@@ -100,6 +103,10 @@ impl SessionWorkSurface {
         Ok(self.session_dir(session)?.join(WORKFLOW_FILE))
     }
 
+    pub fn module_types_path(&self, session: &str) -> Result<PathBuf, SessionWorkError> {
+        Ok(self.session_dir(session)?.join(MODULE_TYPES_FILE))
+    }
+
     pub fn summary_path(&self, session: &str) -> Result<PathBuf, SessionWorkError> {
         Ok(self.session_dir(session)?.join(SUMMARY_FILE))
     }
@@ -144,6 +151,7 @@ impl SessionWorkSurface {
             [] => SurfaceFile::Directory,
             [name] if name == WORKFLOW_FILE => SurfaceFile::Workflow,
             [name] if name == SUMMARY_FILE => SurfaceFile::Summary,
+            [name] if name == MODULE_TYPES_FILE => SurfaceFile::ModuleTypes,
             [name, ..] if name == HISTORY_DIR => SurfaceFile::History,
             _ => SurfaceFile::Other,
         };
@@ -195,6 +203,7 @@ impl SessionWorkSurface {
     /// Create the session directory and bring the files up to the store.
     pub fn materialize(&self, session: &str) -> Result<(), SessionWorkError> {
         private_dir(&self.session_dir(session)?)?;
+        self.refresh_module_types(session)?;
         if self.store.workflow_head(session)?.is_some() {
             self.sync_file(session)?;
             self.refresh_history(session)?;
@@ -204,6 +213,7 @@ impl SessionWorkSurface {
 
     /// Bring `workflow.md` and `history/` back to the store at a safe point.
     pub fn reconcile(&self, session: &str) -> Result<Reconciled, SessionWorkError> {
+        self.refresh_module_types(session)?;
         let Some(head) = self.store.workflow_head(session)? else {
             return Ok(Reconciled::NoWorkflow);
         };
@@ -256,6 +266,17 @@ impl SessionWorkSurface {
         private_dir(&dir)?;
         write_atomic(&dir, WORKFLOW_FILE, head.revision.text.as_bytes(), 0o600)?;
         self.store.mark_synced(session, head.revision.revision)
+    }
+
+    /// Keep `module-types.md` equal to the activation's frozen module types.
+    fn refresh_module_types(&self, session: &str) -> Result<(), SessionWorkError> {
+        let text = super::render_module_types(&super::frozen_module_types(&self.store, session)?);
+        let dir = self.session_dir(session)?;
+        private_dir(&dir)?;
+        if !read_file(&dir.join(MODULE_TYPES_FILE))?.holds(text.as_bytes()) {
+            write_atomic(&dir, MODULE_TYPES_FILE, text.as_bytes(), 0o400)?;
+        }
+        Ok(())
     }
 
     /// Keep the newest revisions as read-only `history/rNN.md` files.

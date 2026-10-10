@@ -23,6 +23,54 @@ pub(crate) enum TurnPhase {
     Tools,
 }
 
+/// Records the outcome of a turn whose future is dropped before it returns,
+/// such as a Stop that had to abort the turn. Disarmed once the turn records
+/// its own outcome.
+pub(super) struct TurnOutcomeGuard {
+    session: Option<String>,
+    cancel: jcode_agent_runtime::InterruptSignal,
+}
+
+impl TurnOutcomeGuard {
+    pub(super) fn disarm(mut self) {
+        self.session = None;
+    }
+}
+
+impl Drop for TurnOutcomeGuard {
+    fn drop(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        // Without a cause the process itself is going away; the turn stays
+        // open, like after a crash, and its continuation keeps its counters.
+        let outcome = match self.cancel.stop_cause() {
+            Some(jcode_tool_types::StopCause::ReloadQuiescence) => TurnOutcome::InterruptedByReload,
+            Some(_) => TurnOutcome::InterruptedByUser,
+            None => return,
+        };
+        let store = crate::session_work::SessionWorkStore::new();
+        if outcome == TurnOutcome::InterruptedByUser
+            && let Err(error) = stop::revoke_on_stop(&store, &session, chrono::Utc::now())
+        {
+            crate::logging::warn(&format!(
+                "Session work: declaration of the stopped turn of {session} not revoked: {error}"
+            ));
+        }
+        if let Err(error) = stop::record_outcome(
+            &store,
+            &session,
+            &uuid::Uuid::new_v4().to_string(),
+            &outcome,
+            chrono::Utc::now(),
+        ) {
+            crate::logging::warn(&format!(
+                "Session work: outcome of the aborted turn of {session} not recorded: {error}"
+            ));
+        }
+    }
+}
+
 /// What the turn loop does with one tool call.
 pub(super) enum ToolGate {
     Run,
@@ -77,21 +125,26 @@ impl Agent {
 
     /// Open or continue the session's turn. A turn interrupted by a reload
     /// or crash is continued with its counters.
-    pub(super) fn begin_session_work_turn(&mut self) -> Result<()> {
+    pub(super) fn begin_session_work_turn(&mut self) -> Result<TurnOutcomeGuard> {
         self.turn_phase = TurnPhase::Preparing;
+        let mut guard = TurnOutcomeGuard {
+            session: None,
+            cancel: self.graceful_shutdown.clone(),
+        };
         if self.session.session_work.is_none() {
-            return Ok(());
+            return Ok(guard);
         }
         crate::session_work::SessionWorkStore::new()
             .begin_turn(&self.session.id, chrono::Utc::now())
             .context("Session work is unavailable for this session")?;
-        Ok(())
+        guard.session = Some(self.session.id.clone());
+        Ok(guard)
     }
 
     /// Record how a turn ended when it did not reach a natural end: a
     /// cancellation, a reload or a failure. Natural ends record their own
     /// outcome. Recording never replaces the turn's own error.
-    pub(super) fn finish_session_work_turn(&mut self, error: Option<&anyhow::Error>) {
+    pub(super) async fn finish_session_work_turn(&mut self, error: Option<&anyhow::Error>) {
         if self.session.session_work.is_none() {
             return;
         }
@@ -127,6 +180,22 @@ impl Agent {
             ));
             return;
         };
+        let now = chrono::Utc::now();
+        let settled = match &outcome {
+            TurnOutcome::InterruptedByUser => stop::revoke_on_stop(&store, &self.session.id, now),
+            TurnOutcome::Failed { .. } => {
+                let work = crate::tool::declare_stop::background_work(&self.session.id).await;
+                stop::observe_items(&store, &self.session.id, &work, now)
+                    .and_then(|items| stop::survive_failure(&store, &self.session.id, &items, now))
+            }
+            _ => Ok(()),
+        };
+        if let Err(store_error) = settled {
+            crate::logging::warn(&format!(
+                "Session work: declaration of {} not settled after {outcome:?}: {store_error}",
+                self.session.id
+            ));
+        }
         self.record_session_work_outcome(&outcome, &uuid::Uuid::new_v4().to_string());
     }
 

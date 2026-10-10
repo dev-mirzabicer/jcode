@@ -296,3 +296,59 @@ fn unpublished_sessions_lose_their_files_and_rows_only() {
     assert!(fixture.surface.session_dir("../escape").is_err());
     assert!(fixture.surface.session_dir("a.b").is_err());
 }
+
+#[test]
+fn module_types_md_lists_the_frozen_module_types_and_is_restored() {
+    let fixture = Fixture::new();
+    let path = fixture.surface.module_types_path("s1").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# Module types\n\nNone.\n"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o400);
+    }
+    fixture
+        .surface
+        .store()
+        .activate(
+            &SessionWorkActivation {
+                session: "s2".into(),
+                role: SessionWorkRole::Primary,
+                origin: ActivationOrigin::Fresh {},
+                activated_at: Utc::now(),
+                module_types: vec![jcode_session_work_types::ModuleTypeDescriptor {
+                    id: "global:research".into(),
+                    title: "Research".into(),
+                    description: "Synthetic description.".into(),
+                    subtypes: vec!["web".into()],
+                    skill: Some("global:synthetic".into()),
+                }],
+            },
+            None,
+        )
+        .unwrap();
+    fixture.surface.materialize("s2").unwrap();
+    let path = fixture.surface.module_types_path("s2").unwrap();
+    let expected = "# Module types\n\n- `research`: Research. Synthetic description.\n  Subtypes: `web`\n  Skill: `global:synthetic`\n";
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    // Changed or removed, it is rewritten at the next safe point without a
+    // workflow notice.
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        fixture.surface.reconcile("s2").unwrap(),
+        Reconciled::NoWorkflow
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    assert_eq!(
+        fixture
+            .surface
+            .classify(&fixture.surface.resolved_root().join("s2/module-types.md"))
+            .unwrap()
+            .file,
+        SurfaceFile::ModuleTypes
+    );
+}

@@ -58,6 +58,9 @@ impl SessionWorkFiles {
                 SurfaceFile::History => anyhow::bail!(
                     "history/ is read-only. To undo, write an older revision's text to workflow.md"
                 ),
+                SurfaceFile::ModuleTypes => anyhow::bail!(
+                    "module-types.md is read-only: it lists the module types this session was created with"
+                ),
                 SurfaceFile::Directory | SurfaceFile::Other => anyhow::bail!(
                     "The session-work directory holds only workflow.md and summary.md; {} can't be written",
                     path.display()

@@ -26,9 +26,18 @@ impl Agent {
     }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
-        self.begin_session_work_turn()?;
+        // Register this turn's cancel signal so session-level cancels reach
+        // this in-flight turn even through stale control handles (issue #428).
+        // Registered around the whole turn: dropping it resets the signal, and
+        // the turn's outcome is decided from it after the body returns.
+        let _turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
+            &self.session.id,
+            self.graceful_shutdown.clone(),
+        );
+        let guard = self.begin_session_work_turn()?;
         let result = self.run_turn_inner(print_output).await;
-        self.finish_session_work_turn(result.as_ref().err());
+        self.finish_session_work_turn(result.as_ref().err()).await;
+        guard.disarm();
         result
     }
 
@@ -38,12 +47,6 @@ impl Agent {
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
         let _streaming_guard = crate::session::StreamingGuard::for_session(&self.session)?;
-        // Register this turn's cancel signal so session-level cancels reach
-        // this in-flight turn even through stale control handles (issue #428).
-        let _turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
-            &self.session.id,
-            self.graceful_shutdown.clone(),
-        );
         let mut final_text = String::new();
         let trace = trace_enabled();
         let mut incomplete_continuations = 0u32;

@@ -104,22 +104,34 @@ pub(super) fn registrations() -> Result<Vec<ConsumerRegistration>, InstructionEr
     ])
 }
 
+/// The managed `session-work` skill. Only a person invokes it, so it stays
+/// out of every session's available-skills catalog; activated sessions reach
+/// it through their Session Context line.
+const SESSION_WORK_SKILL_PATH: &str = "skills/session-work/SKILL.md";
+
 pub(super) fn seed_documents() -> Result<Vec<InstructionDocument>, InstructionError> {
     [
         (
+            InstructionKind::ToolGuidance,
             DECLARE_STOP_GUIDANCE_PATH,
             include_str!("assets/declare-stop-guidance.md"),
         ),
         (
+            InstructionKind::ToolGuidance,
             DECLARE_STOP_CHILD_GUIDANCE_PATH,
             include_str!("assets/declare-stop-child-guidance.md"),
         ),
+        (
+            InstructionKind::Skill,
+            SESSION_WORK_SKILL_PATH,
+            include_str!("assets/session-work-skill.md"),
+        ),
     ]
     .into_iter()
-    .map(|(path, text)| {
+    .map(|(kind, path, text)| {
         crate::instruction::runtime::parse_document(
             InstructionScope::Global,
-            InstructionKind::ToolGuidance,
+            kind,
             Path::new(path),
             text,
         )
@@ -143,6 +155,47 @@ mod tests {
         source: &str,
     ) -> Result<super::InstructionDocument, String> {
         parse_document(InstructionScope::Global, kind, Path::new(path), source)
+    }
+
+    #[test]
+    fn person_invoked_skills_round_trip_and_only_skills_take_the_flag() {
+        let source = "---\nid: synthetic\nkind: skill\nname: synthetic\ndescription: Synthetic\ndisable-model-invocation: true\n---\nBody.\n";
+        let document = parse(InstructionKind::Skill, "skills/synthetic/SKILL.md", source).unwrap();
+        assert!(document.metadata.disable_model_invocation);
+        let again = parse(
+            InstructionKind::Skill,
+            "skills/synthetic/SKILL.md",
+            &serialize_document(&document).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(again.metadata, document.metadata);
+        assert!(
+            parse(
+                InstructionKind::Module,
+                "modules/m.md",
+                "---\nid: m\ndisable-model-invocation: true\n---\nx\n",
+            )
+            .unwrap_err()
+            .contains("disable-model-invocation")
+        );
+    }
+
+    #[test]
+    fn the_seed_ships_session_work_guidance_and_a_person_invoked_skill() {
+        let documents = super::seed_documents().unwrap();
+        let skill = documents
+            .iter()
+            .find(|document| document.path == Path::new("skills/session-work/SKILL.md"))
+            .unwrap();
+        assert_eq!(skill.kind, InstructionKind::Skill);
+        assert!(skill.metadata.disable_model_invocation);
+        for path in ["tools/declare-stop.md", "tools/declare-stop-child.md"] {
+            let document = documents
+                .iter()
+                .find(|document| document.path == Path::new(path))
+                .unwrap();
+            assert_eq!(document.kind, InstructionKind::ToolGuidance);
+        }
     }
 
     #[test]
