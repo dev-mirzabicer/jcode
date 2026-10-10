@@ -503,16 +503,16 @@ impl EditForm {
         }
         self.stash_alias();
         match &self.purpose {
-            Purpose::Action(EditAction::CopyGlobal | EditAction::CopyProject) => {
-                Ok(FormResult::Begin(InstructionEditAction::CopySkill {
+            Purpose::Action(EditAction::CopyGlobal | EditAction::CopyProject) => Ok(
+                FormResult::Begin(Box::new(InstructionEditAction::CopySkill {
                     scope: if matches!(self.purpose, Purpose::Action(EditAction::CopyProject)) {
                         InstructionEditScope::Project
                     } else {
                         InstructionEditScope::Global
                     },
                     destination_id: optional(self.value(FieldKey::Id)),
-                }))
-            }
+                })),
+            ),
             Purpose::Action(EditAction::CreateGlobal | EditAction::CreateProject) => {
                 let fields = self.resource_fields(None);
                 if fields.id.is_empty() {
@@ -529,40 +529,40 @@ impl EditForm {
                         "Agents, skills and module types need a name and description.".into(),
                     );
                 }
-                Ok(FormResult::Begin(InstructionEditAction::Create {
+                Ok(FormResult::Begin(Box::new(InstructionEditAction::Create {
                     scope: if matches!(self.purpose, Purpose::Action(EditAction::CreateProject)) {
                         InstructionEditScope::Project
                     } else {
                         InstructionEditScope::Global
                     },
                     fields,
-                }))
+                })))
             }
             Purpose::Action(EditAction::Rename) => {
-                Ok(FormResult::Begin(InstructionEditAction::Rename {
+                Ok(FormResult::Begin(Box::new(InstructionEditAction::Rename {
                     id: self.value(FieldKey::Id),
-                }))
+                })))
             }
-            Purpose::Action(EditAction::Addendum) => {
-                Ok(FormResult::Begin(InstructionEditAction::Addendum {
+            Purpose::Action(EditAction::Addendum) => Ok(FormResult::Begin(Box::new(
+                InstructionEditAction::Addendum {
                     id: self.value(FieldKey::Id),
-                }))
-            }
-            Purpose::Resource(original) => Ok(FormResult::Metadata(
+                },
+            ))),
+            Purpose::Resource(original) => Ok(FormResult::Metadata(Box::new(
                 InstructionEditMetadata::Resource(self.resource_fields(Some(original))),
-            )),
-            Purpose::Settings => Ok(FormResult::Metadata(
+            ))),
+            Purpose::Settings => Ok(FormResult::Metadata(Box::new(
                 InstructionEditMetadata::StoreSettings {
                     default_agent: optional(self.value(FieldKey::DefaultAgent)),
                 },
-            )),
+            ))),
             Purpose::Repository(choices, mode) => Ok(FormResult::Repository(
                 choices.scope,
                 self.repository_action(*mode),
             )),
-            Purpose::Roster(entries, _) => Ok(FormResult::Metadata(
+            Purpose::Roster(entries, _) => Ok(FormResult::Metadata(Box::new(
                 InstructionEditMetadata::Roster(entries.clone()),
-            )),
+            ))),
             _ => Err("Form action is unavailable.".into()),
         }
     }
@@ -819,8 +819,8 @@ enum FormResult {
     EditValue,
     ReviewTarget,
     Repository(InstructionEditScope, InstructionRepositoryAction),
-    Begin(InstructionEditAction),
-    Metadata(InstructionEditMetadata),
+    Begin(Box<InstructionEditAction>),
+    Metadata(Box<InstructionEditMetadata>),
 }
 enum FormEvent {
     Continue,
@@ -903,7 +903,7 @@ impl InstructionManager {
                         self.editing.queued =
                             Some(InstructionManagementRequest::PlanRepository { scope, action });
                     }
-                    FormResult::Begin(action) => self.begin_edit(action),
+                    FormResult::Begin(action) => self.begin_edit(*action),
                     FormResult::Metadata(metadata) => {
                         if let Some(draft) = &self.editing.draft
                             && let Some(file) = draft.files.get(self.editing.file_index)
@@ -913,7 +913,7 @@ impl InstructionManager {
                                 generation: draft.generation,
                                 change: InstructionDraftChange::Metadata {
                                     file: file.key.clone(),
-                                    metadata,
+                                    metadata: *metadata,
                                 },
                             });
                         }
