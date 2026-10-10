@@ -1,0 +1,1 @@
+Also running, outside your condition: {{items}}. Their results are held until you wake, so they will arrive with your wait condition. To be woken by them too, declare again with a wider condition.

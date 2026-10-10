@@ -90,6 +90,16 @@ impl Agent {
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
+        self.begin_session_work_turn()?;
+        let result = self.run_turn_streaming_mpsc_inner(event_tx).await;
+        self.finish_session_work_turn(result.as_ref().err());
+        result
+    }
+
+    async fn run_turn_streaming_mpsc_inner(
+        &mut self,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
         self.set_log_context();
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
@@ -118,6 +128,7 @@ impl Agent {
                 logging::info("Cancel observed at turn-loop head - not starting another request");
                 break;
             }
+            self.turn_phase = super::session_work::TurnPhase::Preparing;
             let repaired = self.repair_missing_tool_outputs().await?;
             if repaired > 0 {
                 logging::warn(&format!(
@@ -264,6 +275,7 @@ impl Agent {
             drop(cache_signature_messages);
             drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
+            self.turn_phase = super::session_work::TurnPhase::Requesting;
             let provider_ingress =
                 crate::execution::ProviderCaptureScope::new(self.session.id.clone());
             let mut stream = {
@@ -1129,6 +1141,7 @@ impl Agent {
                 });
             }
 
+            self.turn_phase = super::session_work::TurnPhase::Tools;
             let had_tool_calls_before = !tool_calls.is_empty();
             live_text = turn.visible_text();
             if self.recover_text_wrapped_tool_call(&mut live_text, &mut tool_calls) {
@@ -1254,6 +1267,19 @@ impl Agent {
                                 message: notice,
                             });
                         }
+                        if !self.is_graceful_shutdown()
+                            && matches!(
+                                self.session_work_natural_end(
+                                    stop_reason.as_deref(),
+                                    &live_text,
+                                    assistant_message_id.as_deref(),
+                                )
+                                .await?,
+                                super::session_work::TurnEnd::Continue
+                            )
+                        {
+                            continue;
+                        }
                         break;
                     }
                     NoToolCallOutcome::ContinueWithoutEvent => continue,
@@ -1316,6 +1342,19 @@ impl Agent {
                             let _ = event_tx.send(event);
                         }
                         // Don't break - continue loop to process injected message
+                        continue;
+                    }
+                    if !self.is_graceful_shutdown()
+                        && matches!(
+                            self.session_work_natural_end(
+                                stop_reason.as_deref(),
+                                &live_text,
+                                assistant_message_id.as_deref(),
+                            )
+                            .await?,
+                            super::session_work::TurnEnd::Continue
+                        )
+                    {
                         continue;
                     }
                     break;
@@ -1391,6 +1430,30 @@ impl Agent {
                 }
 
                 self.validate_tool_allowed(&tc.name)?;
+
+                let warning = match self.session_work_gate(tc)? {
+                    super::session_work::ToolGate::Run => None,
+                    super::session_work::ToolGate::RunWarned(warning) => Some(warning),
+                    super::session_work::ToolGate::Refuse { text, end_turn } => {
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            output: text.clone(),
+                            error: Some(text.clone()),
+                        });
+                        self.append_refused_tool_result(tc, &text);
+                        tool_results_dirty = true;
+                        if end_turn {
+                            for skipped in &tool_calls[(tool_index + 1)..] {
+                                self.append_refused_tool_result(skipped, &text);
+                            }
+                            self.session.save()?;
+                            self.end_session_work_turn_after_refusals().await?;
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                };
 
                 let is_native_tool = self.provider_leaves_tool_to_host(&tc.name);
                 let mut provider_rejection = None;
@@ -1547,6 +1610,13 @@ impl Agent {
                         self.publish_inline_tail();
                     }
 
+                    let result = match (result, &warning) {
+                        (Ok(mut output), Some(warning)) => {
+                            output.output = format!("{}\n\n{warning}", output.output);
+                            Ok(output)
+                        }
+                        (result, _) => result,
+                    };
                     match result {
                         Ok(output) => {
                             let _ = event_tx.send(ServerEvent::ToolDone {
@@ -1580,7 +1650,10 @@ impl Agent {
                             tool_results_dirty = true;
                         }
                         Err(e) => {
-                            let error_msg = format!("Error: {}", e);
+                            let mut error_msg = format!("Error: {}", e);
+                            if let Some(warning) = &warning {
+                                error_msg = format!("{error_msg}\n\n{warning}");
+                            }
                             let _ = event_tx.send(ServerEvent::ToolDone {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
@@ -1696,12 +1769,15 @@ impl Agent {
                             .await
                     };
 
-                    let bg_msg = format!(
+                    let mut bg_msg = format!(
                         "Tool '{}' was moved to background by the user (task_id: {}). \
                          Use the `bg` tool with action 'wait' to wait for completion/checkpoints, \
                          or action 'status'/'output' to inspect it.",
                         tc.name, bg_info.task_id
                     );
+                    if let Some(warning) = &warning {
+                        bg_msg = format!("{bg_msg}\n\n{warning}");
+                    }
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),

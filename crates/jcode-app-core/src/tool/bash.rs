@@ -689,6 +689,11 @@ fn default_true() -> bool {
     true
 }
 
+/// The unit sentence of the `timeout` parameter, shared with the wording of
+/// sessions with session work.
+pub(crate) const TIMEOUT_UNITS_DESCRIPTION: &str =
+    "Optional deadline in MILLISECONDS (not seconds), e.g. 600000 = 10min.";
+
 #[path = "bash_destructive_gate.rs"]
 mod destructive_gate;
 use destructive_gate::destructive_command_refusal;

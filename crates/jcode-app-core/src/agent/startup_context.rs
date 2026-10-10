@@ -823,10 +823,14 @@ mod tests {
         write(&"X".repeat(2_000_000));
         assert!(agent.run_once("preflight block").await.is_err());
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-        assert!(agent.session.swarm_routing_prompt.is_none());
+        assert!(agent.session.frozen_tool_guidance("swarm").is_none());
         write("FIRST ROUTING");
         agent.run_once("first").await.unwrap();
-        let saved = agent.session.swarm_routing_prompt.clone().unwrap();
+        let saved = agent
+            .session
+            .frozen_tool_guidance("swarm")
+            .and_then(|guidance| guidance.description)
+            .unwrap();
         assert!(saved.ends_with("FIRST ROUTING"));
         write("NEW ROUTING");
         agent.run_once("second").await.unwrap();
@@ -845,7 +849,8 @@ mod tests {
         assert_eq!(
             Session::load(agent.session_id())
                 .unwrap()
-                .swarm_routing_prompt,
+                .frozen_tool_guidance("swarm")
+                .and_then(|guidance| guidance.description),
             Some(saved)
         );
     }

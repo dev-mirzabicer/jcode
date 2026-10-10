@@ -1,0 +1,1 @@
+Omit for the 30-minute default, or pass 0 to wait without a limit. When the limit passes the task keeps running, and you get its status.

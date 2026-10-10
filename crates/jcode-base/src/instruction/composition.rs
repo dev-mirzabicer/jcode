@@ -1002,6 +1002,7 @@ pub fn shipped_instruction_seed() -> Result<InstructionStoreSeed, InstructionErr
     documents.extend(super::workflow::seed_documents()?);
     documents.extend(isolated::seed_documents()?);
     documents.extend(workspace::seed_documents()?);
+    documents.extend(session_work::seed_documents()?);
     Ok(InstructionStoreSeed {
         manifest: InstructionStoreManifest::current(),
         files: documents
@@ -1231,6 +1232,7 @@ pub fn composition_registrations() -> Result<Vec<ConsumerRegistration>, Instruct
     ];
     registrations.extend(isolated::registrations()?);
     registrations.extend(workspace::registrations()?);
+    registrations.extend(session_work::registrations()?);
     for id in [KERNEL_ID, MERMAID_ID] {
         registrations.push(ConsumerRegistration::new(format!("primary-system-{id}"), id, InstructionKind::System, format!("system/{id}.md"), "primary system composer", "Required when the owning composition slot is selected; capability policy remains code-owned.")?);
     }

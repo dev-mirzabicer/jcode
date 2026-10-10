@@ -56,6 +56,81 @@ impl SystemPromptComposer {
     }
 }
 
+const DECLARE_STOP_GUIDANCE_PATH: &str = "tools/declare-stop.md";
+const DECLARE_STOP_CHILD_GUIDANCE_PATH: &str = "tools/declare-stop-child.md";
+
+fn declare_stop_registration(
+    role: jcode_session_work_types::SessionWorkRole,
+) -> Result<ConsumerRegistration, InstructionError> {
+    match role {
+        jcode_session_work_types::SessionWorkRole::Primary => ConsumerRegistration::new(
+            "declare-stop-guidance",
+            "declare-stop",
+            InstructionKind::ToolGuidance,
+            DECLARE_STOP_GUIDANCE_PATH,
+            "primary declare_stop tool",
+            "Framework-stage guidance, frozen after successful request preflight. Validation and enforcement remain code-owned.",
+        ),
+        jcode_session_work_types::SessionWorkRole::Child => ConsumerRegistration::new(
+            "declare-stop-child-guidance",
+            "declare-stop-child",
+            InstructionKind::ToolGuidance,
+            DECLARE_STOP_CHILD_GUIDANCE_PATH,
+            "isolated child declare_stop tool",
+            "Framework-stage guidance, frozen after successful request preflight. Children declare completion only.",
+        ),
+    }
+}
+
+impl SystemPromptComposer {
+    /// Rendered `declare_stop` description for a session's role.
+    pub fn declare_stop_tool_guidance(
+        &self,
+        role: jcode_session_work_types::SessionWorkRole,
+        working_dir: Option<&Path>,
+    ) -> Result<String, SystemPromptActivationError> {
+        let environment = self.prepare_environment(working_dir)?;
+        Ok(environment
+            .runtime
+            .render_registered(&declare_stop_registration(role)?, &())?
+            .text)
+    }
+}
+
+pub(super) fn registrations() -> Result<Vec<ConsumerRegistration>, InstructionError> {
+    Ok(vec![
+        declare_stop_registration(jcode_session_work_types::SessionWorkRole::Primary)?,
+        declare_stop_registration(jcode_session_work_types::SessionWorkRole::Child)?,
+    ])
+}
+
+pub(super) fn seed_documents() -> Result<Vec<InstructionDocument>, InstructionError> {
+    [
+        (
+            DECLARE_STOP_GUIDANCE_PATH,
+            include_str!("assets/declare-stop-guidance.md"),
+        ),
+        (
+            DECLARE_STOP_CHILD_GUIDANCE_PATH,
+            include_str!("assets/declare-stop-child-guidance.md"),
+        ),
+    ]
+    .into_iter()
+    .map(|(path, text)| {
+        crate::instruction::runtime::parse_document(
+            InstructionScope::Global,
+            InstructionKind::ToolGuidance,
+            Path::new(path),
+            text,
+        )
+        .map_err(|detail| InstructionError::InvalidDocument {
+            path: path.into(),
+            detail,
+        })
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::instruction::runtime::{parse_document, serialize_document};

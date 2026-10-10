@@ -91,6 +91,7 @@ struct SessionToolPolicy {
 }
 
 pub(crate) mod child_policy;
+pub(crate) mod declare_stop;
 mod native_files;
 pub(crate) mod subagent;
 pub(crate) mod workspace;
@@ -558,6 +559,12 @@ impl Registry {
                 &mut timings,
                 workspace::WORKSPACE_TOOL,
                 workspace::WorkspaceTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                declare_stop::DECLARE_STOP_TOOL,
+                declare_stop::DeclareStopTool::new,
             );
             let nonzero: Vec<String> = timings
                 .iter()

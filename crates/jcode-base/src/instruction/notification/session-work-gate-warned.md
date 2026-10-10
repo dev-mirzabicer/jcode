@@ -1,0 +1,1 @@
+You declared a stop but made a tool call. This tool call ran; the next one will be refused. Write your final message now, or declare_stop withdraw to keep working.

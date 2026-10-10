@@ -1,61 +1,198 @@
-//! Session-owned managed tool descriptions, frozen only after successful preflight.
+//! Session-owned managed tool text, frozen only after successful preflight.
+//!
+//! A tool's managed text is its description (delegation, workspace, Swarm
+//! routing and `declare_stop` guidance) and, in sessions with session work,
+//! the wording of some background-work parameters. Each session freezes what
+//! its first successful request carried in one map keyed by tool name; the
+//! older single-tool Session fields are read as entries of that map.
+use crate::session::StoredToolGuidance;
 use crate::{message::ToolDefinition, session::Session};
+use std::collections::BTreeMap;
+
+/// Tools that may carry managed text, in a fixed order.
+const MANAGED_TOOLS: [&str; 6] = [
+    "subagent",
+    "workspace",
+    "swarm",
+    "declare_stop",
+    "bash",
+    "bg",
+];
 
 /// Read-only request preparation. Do not freeze a source that fails preflight.
 pub fn preview(session: &Session, tools: &mut [ToolDefinition]) -> anyhow::Result<()> {
-    if let Some(tool) = tools.iter_mut().find(|tool| tool.name == "subagent") {
-        if let Some(text) = &session.delegation_guidance {
-            tool.description = text.clone();
-        } else {
-            let body = crate::instruction::SystemPromptComposer::new().delegation_tool_guidance(
-                session.working_dir.as_deref().map(std::path::Path::new),
-            )?;
-            if !body.is_empty() {
-                tool.description = format!("{}\n\n{body}", tool.description);
-            }
+    for tool in tools.iter_mut() {
+        if !MANAGED_TOOLS.contains(&tool.name.as_str()) {
+            continue;
         }
-    }
-    if let Some(tool) = tools.iter_mut().find(|tool| tool.name == "workspace") {
-        if let Some(text) = &session.workspace_guidance {
-            tool.description = text.clone();
-        } else {
-            let body = crate::instruction::SystemPromptComposer::new().workspace_tool_guidance(
-                session.working_dir.as_deref().map(std::path::Path::new),
-            )?;
-            if !body.is_empty() {
-                tool.description = format!("{}\n\n{body}", tool.description);
-            }
+        if tool.name == "swarm" && !crate::config::config().features.swarm {
+            continue;
         }
-    }
-    if !crate::config::config().features.swarm {
-        return Ok(());
-    }
-    let Some(tool) = tools.iter_mut().find(|tool| tool.name == "swarm") else {
-        return Ok(());
-    };
-    if let Some(text) = &session.swarm_routing_prompt {
-        tool.description = text.clone();
-        return Ok(());
-    }
-    let (body, _) = crate::instruction::routing::swarm_routing_source(
-        &crate::instruction::InstructionRepositoryService::new(),
-        session.working_dir.as_deref().map(std::path::Path::new),
-    )?;
-    if !body.is_empty() {
-        tool.description = format!(
-            "{}\n\nSwarm prompt (user-tunable via /swarm-prompt):\n{body}",
-            tool.description
-        );
+        let guidance = match session.frozen_tool_guidance(&tool.name) {
+            Some(frozen) => frozen,
+            None => live_guidance(session, tool)?,
+        };
+        apply(tool, &guidance);
     }
     Ok(())
 }
 
-/// After successful request preflight, persist the exact description already
-/// counted for this request. Returns whether an old session needs continuation reset.
+/// The managed text the current sources give `tool` in this session.
+fn live_guidance(session: &Session, tool: &ToolDefinition) -> anyhow::Result<StoredToolGuidance> {
+    let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+    let composer = crate::instruction::SystemPromptComposer::new();
+    let appended = |body: String| {
+        (!body.is_empty()).then(|| {
+            if tool.description.is_empty() {
+                body
+            } else {
+                format!("{}\n\n{body}", tool.description)
+            }
+        })
+    };
+    let description = match tool.name.as_str() {
+        "subagent" => appended(composer.delegation_tool_guidance(working_dir)?),
+        "workspace" => appended(composer.workspace_tool_guidance(working_dir)?),
+        "swarm" => {
+            let (body, _) = crate::instruction::routing::swarm_routing_source(
+                &crate::instruction::InstructionRepositoryService::new(),
+                working_dir,
+            )?;
+            (!body.is_empty()).then(|| {
+                format!(
+                    "{}\n\nSwarm prompt (user-tunable via /swarm-prompt):\n{body}",
+                    tool.description
+                )
+            })
+        }
+        "declare_stop" => match &session.session_work {
+            Some(binding) => {
+                appended(composer.declare_stop_tool_guidance(binding.role, working_dir)?)
+            }
+            None => None,
+        },
+        _ => None,
+    };
+    let parameters = match &session.session_work {
+        Some(_) => session_work_parameters(tool, working_dir)?,
+        None => BTreeMap::new(),
+    };
+    Ok(StoredToolGuidance {
+        description,
+        parameters,
+    })
+}
+
+/// New-session wording for background-work parameters.
+fn session_work_parameters(
+    tool: &ToolDefinition,
+    working_dir: Option<&std::path::Path>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    use crate::instruction::notification::Notification;
+    let render = |notification: Notification<'_>| notification.render(working_dir);
+    let structural = |name: &str| {
+        tool.input_schema
+            .pointer(&format!("/properties/{name}/description"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut parameters = BTreeMap::new();
+    match tool.name.as_str() {
+        "bash" => {
+            parameters.insert(
+                "wake".into(),
+                render(Notification::SessionWorkBackgroundWake)?,
+            );
+            parameters.insert(
+                "timeout".into(),
+                format!(
+                    "{} {}",
+                    crate::tool::bash::TIMEOUT_UNITS_DESCRIPTION,
+                    render(Notification::SessionWorkBashTimeout)?
+                ),
+            );
+        }
+        "bg" => {
+            parameters.insert(
+                "wake".into(),
+                render(Notification::SessionWorkBackgroundWake)?,
+            );
+            parameters.insert(
+                "max_wait_seconds".into(),
+                render(Notification::SessionWorkBgMaxWait)?,
+            );
+            parameters.insert(
+                "task_id".into(),
+                format!(
+                    "{} {}",
+                    structural("task_id"),
+                    render(Notification::SessionWorkBgTaskAlias)?
+                ),
+            );
+        }
+        "subagent" => {
+            parameters.insert(
+                "wake".into(),
+                render(Notification::SessionWorkBackgroundWake)?,
+            );
+        }
+        _ => {}
+    }
+    parameters.retain(|name, _| {
+        tool.input_schema
+            .pointer(&format!("/properties/{name}"))
+            .is_some()
+    });
+    Ok(parameters)
+}
+
+fn apply(tool: &mut ToolDefinition, guidance: &StoredToolGuidance) {
+    if let Some(description) = &guidance.description {
+        tool.description = description.clone();
+    }
+    for (name, text) in &guidance.parameters {
+        if let Some(property) = tool
+            .input_schema
+            .pointer_mut(&format!("/properties/{name}"))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            property.insert(
+                "description".into(),
+                serde_json::Value::String(text.clone()),
+            );
+        }
+    }
+}
+
+/// The managed text a sent definition carries, given what is managed for it.
+fn captured(definition: &ToolDefinition, live: &StoredToolGuidance) -> StoredToolGuidance {
+    StoredToolGuidance {
+        description: live
+            .description
+            .as_ref()
+            .map(|_| definition.description.clone()),
+        parameters: live
+            .parameters
+            .keys()
+            .filter_map(|name| {
+                definition
+                    .input_schema
+                    .pointer(&format!("/properties/{name}/description"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(|text| (name.clone(), text.to_string()))
+            })
+            .collect(),
+    }
+}
+
+/// After successful request preflight, persist the exact managed text already
+/// counted for this request. Returns whether an old session needs continuation
+/// reset.
 ///
 /// `tools` is the request's provider array. A tool that joined through an
-/// in-message tool-set notice is not in that array; the description the model
-/// was given is the one in the session's tool-set record, so it is taken from
+/// in-message tool-set notice is not in that array; the text the model was
+/// given is the one in the session's tool-set record, so it is taken from
 /// there.
 pub fn commit(session: &mut Session, tools: &[ToolDefinition]) -> anyhow::Result<bool> {
     let offered: Vec<ToolDefinition> = session
@@ -63,44 +200,43 @@ pub fn commit(session: &mut Session, tools: &[ToolDefinition]) -> anyhow::Result
         .as_ref()
         .map(|record| record.effective())
         .unwrap_or_default();
-    let find = |name: &str| {
-        tools
+    let mut captures = Vec::new();
+    for name in MANAGED_TOOLS {
+        if name == "swarm" && !crate::config::config().features.swarm {
+            continue;
+        }
+        if session.frozen_tool_guidance(name).is_some() {
+            continue;
+        }
+        let Some(definition) = tools
             .iter()
             .find(|tool| tool.name == name)
             .or_else(|| offered.iter().find(|tool| tool.name == name))
-            .cloned()
-    };
-    let swarm = (crate::config::config().features.swarm && session.swarm_routing_prompt.is_none())
-        .then(|| find("swarm"))
-        .flatten();
-    let delegation = session
-        .delegation_guidance
-        .is_none()
-        .then(|| find("subagent"))
-        .flatten();
-    let workspace = session
-        .workspace_guidance
-        .is_none()
-        .then(|| find("workspace"))
-        .flatten();
-    if swarm.is_none() && delegation.is_none() && workspace.is_none() {
+        else {
+            continue;
+        };
+        // What is managed for this tool comes from the session's own rules;
+        // the text frozen is the text the request carried.
+        let live = live_guidance_shape(session, definition);
+        if live.description.is_none() && live.parameters.is_empty() {
+            continue;
+        }
+        captures.push((name, captured(definition, &live)));
+    }
+    if captures.is_empty() {
         return Ok(false);
     }
     let previous = session.clone();
-    // Workspace guidance arrives with its tool, so its first capture is part of
-    // the tool-set change already recorded for that request, not a migration
-    // of a description the provider has already seen.
-    let migrated = (swarm.is_some() || delegation.is_some())
+    // Delegation and Swarm guidance used to be captured late; a session that
+    // already sent requests gets a continuation reset. Other managed text
+    // arrives with its tool, as part of the tool-set change already recorded.
+    let migrated = captures
+        .iter()
+        .any(|(name, _)| matches!(*name, "swarm" | "subagent"))
         && (session.first_provider_dispatch_at().is_some()
             || session.provider_session_id.is_some());
-    if let Some(tool) = swarm {
-        session.set_swarm_routing_prompt(tool.description.clone());
-    }
-    if let Some(tool) = delegation {
-        session.set_delegation_guidance(tool.description.clone());
-    }
-    if let Some(tool) = workspace {
-        session.set_workspace_guidance(tool.description.clone());
+    for (name, guidance) in captures {
+        session.set_tool_guidance(name, guidance);
     }
     if migrated {
         session.provider_session_id = None;
@@ -110,6 +246,36 @@ pub fn commit(session: &mut Session, tools: &[ToolDefinition]) -> anyhow::Result
         return Err(error);
     }
     Ok(migrated)
+}
+
+/// Which parts of a tool are managed in this session, without reading
+/// sources: descriptions of the guided tools, and in sessions with session
+/// work the background-work parameters.
+fn live_guidance_shape(session: &Session, definition: &ToolDefinition) -> StoredToolGuidance {
+    let description = match definition.name.as_str() {
+        "subagent" | "workspace" | "swarm" => Some(String::new()),
+        "declare_stop" => session.session_work.as_ref().map(|_| String::new()),
+        _ => None,
+    };
+    let names: &[&str] = match (definition.name.as_str(), &session.session_work) {
+        ("bash", Some(_)) => &["wake", "timeout"],
+        ("bg", Some(_)) => &["wake", "max_wait_seconds", "task_id"],
+        ("subagent", Some(_)) => &["wake"],
+        _ => &[],
+    };
+    StoredToolGuidance {
+        description,
+        parameters: names
+            .iter()
+            .filter(|name| {
+                definition
+                    .input_schema
+                    .pointer(&format!("/properties/{name}"))
+                    .is_some()
+            })
+            .map(|name| (name.to_string(), String::new()))
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -142,7 +308,7 @@ mod tests {
         write(home.root(), "FIRST");
         let mut first = tools();
         preview(&session, &mut first).unwrap();
-        assert!(session.swarm_routing_prompt.is_none());
+        assert!(session.frozen_tool_guidance("swarm").is_none());
         write(home.root(), "SECOND");
         let mut second = tools();
         preview(&session, &mut second).unwrap();
@@ -181,18 +347,18 @@ mod tests {
         assert_eq!(serde_json::to_value(&fresh).unwrap(), before);
         preview(&fresh, &mut []).unwrap();
         assert!(!commit(&mut fresh, &[]).unwrap());
-        assert!(fresh.swarm_routing_prompt.is_none());
+        assert!(fresh.frozen_tool_guidance("swarm").is_none());
         assert!(
             Session::load_startup_stub(&session.id)
                 .unwrap()
-                .swarm_routing_prompt
+                .frozen_tool_guidance("swarm")
                 .is_none()
         );
         assert_eq!(
             Session::load_for_remote_startup(&session.id)
                 .unwrap()
-                .swarm_routing_prompt,
-            session.swarm_routing_prompt
+                .frozen_tool_guidance("swarm"),
+            session.frozen_tool_guidance("swarm")
         );
         write(home.root(), "");
         let mut empty = tools();
@@ -249,7 +415,7 @@ mod delegation_tests {
             input_schema: serde_json::json!({}),
         }];
         preview(&session, &mut tools).unwrap();
-        assert!(session.delegation_guidance.is_none());
+        assert!(session.frozen_tool_guidance("subagent").is_none());
         let expected = tools[0].description.clone();
         commit(&mut session, &tools).unwrap();
         std::fs::write(file, "invalid source").unwrap();
@@ -259,18 +425,21 @@ mod delegation_tests {
         assert_eq!(tools[0].description, expected);
         let mut split = Session::create(Some(session.id.clone()), None);
         split.inherit_continuation_state_from(&loaded);
-        assert_eq!(split.delegation_guidance, loaded.delegation_guidance);
+        assert_eq!(
+            split.frozen_tool_guidance("subagent"),
+            loaded.frozen_tool_guidance("subagent")
+        );
         assert!(
             Session::load_startup_stub(&session.id)
                 .unwrap()
-                .delegation_guidance
+                .frozen_tool_guidance("subagent")
                 .is_none()
         );
         assert_eq!(
             Session::load_for_remote_startup(&session.id)
                 .unwrap()
-                .delegation_guidance,
-            loaded.delegation_guidance
+                .frozen_tool_guidance("subagent"),
+            loaded.frozen_tool_guidance("subagent")
         );
     }
 }
@@ -300,7 +469,7 @@ mod workspace_tests {
             input_schema: serde_json::json!({}),
         }];
         preview(&session, &mut tools).unwrap();
-        assert!(session.workspace_guidance.is_none());
+        assert!(session.frozen_tool_guidance("workspace").is_none());
         assert!(tools[0].description.starts_with("STRUCTURAL TOOL\n\n"));
         assert!(tools[0].description.ends_with("SYNTHETIC WORKSPACE FIRST"));
         let expected = tools[0].description.clone();
@@ -317,12 +486,15 @@ mod workspace_tests {
         assert_eq!(tools[0].description, expected);
         let mut split = Session::create(Some(session.id.clone()), None);
         split.inherit_continuation_state_from(&loaded);
-        assert_eq!(split.workspace_guidance, loaded.workspace_guidance);
+        assert_eq!(
+            split.frozen_tool_guidance("workspace"),
+            loaded.frozen_tool_guidance("workspace")
+        );
         assert_eq!(
             Session::load_for_remote_startup(&session.id)
                 .unwrap()
-                .workspace_guidance,
-            loaded.workspace_guidance
+                .frozen_tool_guidance("workspace"),
+            loaded.frozen_tool_guidance("workspace")
         );
     }
 
@@ -359,12 +531,17 @@ mod workspace_tests {
         }];
         assert!(!commit(&mut session, &provider_array).unwrap());
         assert_eq!(
-            session.workspace_guidance.as_deref(),
+            session
+                .frozen_tool_guidance("workspace")
+                .and_then(|guidance| guidance.description)
+                .as_deref(),
             Some("STRUCTURAL\n\nANNOUNCED TEXT")
         );
         assert_eq!(
-            Session::load(&session.id).unwrap().workspace_guidance,
-            session.workspace_guidance
+            Session::load(&session.id)
+                .unwrap()
+                .frozen_tool_guidance("workspace"),
+            session.frozen_tool_guidance("workspace")
         );
         // Later requests reuse the frozen text, whatever the store now says.
         let mut later = vec![structural("STRUCTURAL")];

@@ -1,0 +1,1 @@
+When the background task finishes: true joins your turn or starts one, false holds the result for your next turn.

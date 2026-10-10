@@ -1,0 +1,1 @@
+Completion refused: still running: {{items}}. Wait for them, cancel them with bg, or name them in leave_running.

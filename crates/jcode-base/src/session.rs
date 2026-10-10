@@ -56,7 +56,7 @@ impl StreamingGuard {
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 mod capture;
 mod crash;
@@ -286,6 +286,16 @@ pub use jcode_session_types::{StoredContextScope, StoredPrimaryCreation};
 pub type StoredSessionLocation =
     jcode_session_types::StoredSessionLocation<crate::location::volume::PhysicalBinding>;
 
+/// Managed text a session froze for one tool: its complete description and
+/// complete descriptions of individual parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredToolGuidance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     /// Checkpoint/journal pairing, independent of conversation/context identity.
@@ -332,6 +342,11 @@ pub struct Session {
     /// Exact managed workspace tool guidance captured after successful preflight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_guidance: Option<String>,
+    /// Managed tool text frozen after successful preflight, by tool name.
+    /// The three single-tool fields above are read as legacy entries; every
+    /// new capture is stored here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_guidance: BTreeMap<String, StoredToolGuidance>,
     /// The tool set this session's provider history advertised, and every
     /// change announced since (INT-01/WP-06, D15). Set at the first request;
     /// a new provider history starts without one.
@@ -999,6 +1014,30 @@ impl Session {
         }
     }
 
+    /// The managed text frozen for `tool`: a map entry, or a legacy field.
+    pub fn frozen_tool_guidance(&self, tool: &str) -> Option<StoredToolGuidance> {
+        if let Some(guidance) = self.tool_guidance.get(tool) {
+            return Some(guidance.clone());
+        }
+        let legacy = match tool {
+            "subagent" => self.delegation_guidance.as_ref(),
+            "workspace" => self.workspace_guidance.as_ref(),
+            "swarm" => self.swarm_routing_prompt.as_ref(),
+            _ => None,
+        }?;
+        Some(StoredToolGuidance {
+            description: Some(legacy.clone()),
+            parameters: BTreeMap::new(),
+        })
+    }
+
+    pub fn set_tool_guidance(&mut self, tool: &str, guidance: StoredToolGuidance) {
+        self.tool_guidance.insert(tool.to_string(), guidance);
+        self.updated_at = Utc::now();
+        self.persist_state.force_snapshot = true;
+        self.mark_memory_profile_dirty();
+    }
+
     pub fn set_workspace_guidance(&mut self, text: String) {
         self.workspace_guidance = Some(text);
         self.updated_at = Utc::now();
@@ -1421,6 +1460,7 @@ impl Session {
         self.swarm_routing_prompt = parent.swarm_routing_prompt.clone();
         self.delegation_guidance = parent.delegation_guidance.clone();
         self.workspace_guidance = parent.workspace_guidance.clone();
+        self.tool_guidance = parent.tool_guidance.clone();
         self.tool_set = parent.tool_set.clone();
         self.provider_client_identity = parent.provider_client_identity.clone();
         self.system_prompt_metadata = parent.system_prompt_metadata.clone();
@@ -1515,6 +1555,7 @@ impl Session {
         session.swarm_routing_prompt = snapshot.swarm_routing_prompt;
         session.delegation_guidance = snapshot.delegation_guidance;
         session.workspace_guidance = snapshot.workspace_guidance;
+        session.tool_guidance = snapshot.tool_guidance;
         // A remote client sends no provider requests: the server's session
         // owns the tool set, so the startup projection does not load it.
         session.tool_set = None;
@@ -2269,6 +2310,7 @@ impl Session {
             swarm_routing_prompt: None,
             delegation_guidance: None,
             workspace_guidance: None,
+            tool_guidance: BTreeMap::new(),
             tool_set: None,
             provider_client_identity: None,
             system_prompt_metadata: None,
@@ -2352,6 +2394,7 @@ impl Session {
             swarm_routing_prompt: None,
             delegation_guidance: None,
             workspace_guidance: None,
+            tool_guidance: BTreeMap::new(),
             tool_set: None,
             provider_client_identity: None,
             system_prompt_metadata: None,
@@ -3558,6 +3601,8 @@ struct RemoteStartupSessionSnapshot {
     delegation_guidance: Option<String>,
     #[serde(default)]
     workspace_guidance: Option<String>,
+    #[serde(default)]
+    tool_guidance: BTreeMap<String, StoredToolGuidance>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
     #[serde(default)]

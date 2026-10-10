@@ -11,7 +11,7 @@ use jcode_base::location::native_files::{resolve_removal_entry, resolve_target};
 #[path = "native_files_legacy.rs"]
 mod legacy;
 #[path = "native_session_work.rs"]
-mod session_work;
+pub(crate) mod session_work;
 use jcode_tool_core::native_files::{NativeFilePermit, NativeFilePlan, NativeFilePolicy};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

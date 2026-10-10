@@ -26,6 +26,13 @@ impl Agent {
     }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        self.begin_session_work_turn()?;
+        let result = self.run_turn_inner(print_output).await;
+        self.finish_session_work_turn(result.as_ref().err());
+        result
+    }
+
+    async fn run_turn_inner(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
         crate::session_metrics::record_turn(&self.session.id);
         // Mark this session as actively streaming for presence UIs (e.g. the
@@ -53,6 +60,7 @@ impl Agent {
                 logging::info("Cancel observed at turn-loop head - not starting another request");
                 break;
             }
+            self.turn_phase = super::session_work::TurnPhase::Preparing;
             let repaired = self.repair_missing_tool_outputs().await?;
             if repaired > 0 {
                 logging::warn(&format!(
@@ -180,6 +188,7 @@ impl Agent {
             let request_payload = crate::context::request_payload_pressure(send_messages);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = reasoning_notice.or_else(|| self.take_tool_name_notice());
+            self.turn_phase = super::session_work::TurnPhase::Requesting;
             let provider_ingress =
                 crate::execution::ProviderCaptureScope::new(self.session.id.clone());
             let mut stream = match self
@@ -877,6 +886,7 @@ impl Agent {
                 turn.replace_visible_text(text_content.clone());
             }
 
+            self.turn_phase = super::session_work::TurnPhase::Tools;
             let visible_text_is_empty = text_content.trim().is_empty();
 
             // Add assistant message to history, in the order the provider
@@ -964,6 +974,19 @@ impl Agent {
                         text_content = format!("[provider guardrail] {}", notice);
                     }
                 }
+                if !self.is_graceful_shutdown()
+                    && matches!(
+                        self.session_work_natural_end(
+                            stop_reason.as_deref(),
+                            &text_content,
+                            assistant_message_id.as_deref(),
+                        )
+                        .await?,
+                        super::session_work::TurnEnd::Continue
+                    )
+                {
+                    continue;
+                }
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {
                     println!();
@@ -1003,6 +1026,19 @@ impl Agent {
                         );
                         continue;
                     }
+                    if !self.is_graceful_shutdown()
+                        && matches!(
+                            self.session_work_natural_end(
+                                stop_reason.as_deref(),
+                                &text_content,
+                                assistant_message_id.as_deref(),
+                            )
+                            .await?,
+                            super::session_work::TurnEnd::Continue
+                        )
+                    {
+                        continue;
+                    }
                     logging::info("Provider handles tools internally - task complete");
                     break;
                 }
@@ -1021,7 +1057,10 @@ impl Agent {
 
             // Execute tools and add results
             let mut tool_results_dirty = false;
+            let mut refusal_end: Option<String> = None;
+            let mut remaining_calls = tool_calls.clone();
             for tc in tool_calls {
+                remaining_calls.remove(0);
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
@@ -1053,6 +1092,20 @@ impl Agent {
                 }
 
                 self.validate_tool_allowed(&tc.name)?;
+
+                let warning = match self.session_work_gate(&tc)? {
+                    super::session_work::ToolGate::Run => None,
+                    super::session_work::ToolGate::RunWarned(warning) => Some(warning),
+                    super::session_work::ToolGate::Refuse { text, end_turn } => {
+                        self.append_refused_tool_result(&tc, &text);
+                        tool_results_dirty = true;
+                        if end_turn {
+                            refusal_end = Some(text);
+                            break;
+                        }
+                        continue;
+                    }
+                };
 
                 let is_native_tool = self.provider_leaves_tool_to_host(&tc.name);
                 let mut provider_rejection = None;
@@ -1168,6 +1221,13 @@ impl Agent {
                     tool_elapsed.as_secs_f64()
                 ));
 
+                let result = match (result, &warning) {
+                    (Ok(mut output), Some(warning)) => {
+                        output.output = format!("{}\n\n{warning}", output.output);
+                        Ok(output)
+                    }
+                    (result, _) => result,
+                };
                 match result {
                     Ok(output) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -1215,7 +1275,10 @@ impl Agent {
                             title: None,
                         }));
 
-                        let error_msg = format!("Error: {}", e);
+                        let mut error_msg = format!("Error: {}", e);
+                        if let Some(warning) = &warning {
+                            error_msg = format!("{error_msg}\n\n{warning}");
+                        }
                         if trace {
                             eprintln!(
                                 "[trace] tool_exec_error name={} id={} {}",
@@ -1237,6 +1300,15 @@ impl Agent {
                         tool_results_dirty = true;
                     }
                 }
+            }
+
+            if let Some(text) = refusal_end {
+                for skipped in &remaining_calls {
+                    self.append_refused_tool_result(skipped, &text);
+                }
+                self.session.save()?;
+                self.end_session_work_turn_after_refusals().await?;
+                break;
             }
 
             if tool_results_dirty {

@@ -26,6 +26,8 @@ pub enum ContextDeliveryChannel {
     /// A session-work notice, such as a workflow file restored after it was
     /// changed outside the native file tools.
     SessionWork,
+    /// A correction of a stop that needed a valid stop declaration.
+    StopCorrection,
 }
 
 impl ContextDeliveryChannel {
@@ -33,9 +35,11 @@ impl ContextDeliveryChannel {
     /// and nudges are operator guidance (INT-01/WP-06, D17).
     pub fn preferred_authority(self) -> DeliveryAuthority {
         match self {
-            Self::TurnReminder | Self::BatchNudge | Self::ToolSet | Self::SessionWork => {
-                DeliveryAuthority::Operator
-            }
+            Self::TurnReminder
+            | Self::BatchNudge
+            | Self::ToolSet
+            | Self::SessionWork
+            | Self::StopCorrection => DeliveryAuthority::Operator,
         }
     }
 }
@@ -88,7 +92,8 @@ pub fn context_delivery_text(channel: ContextDeliveryChannel, body: &str) -> Opt
         ContextDeliveryChannel::TurnReminder => REMINDER_HEADING,
         ContextDeliveryChannel::BatchNudge
         | ContextDeliveryChannel::ToolSet
-        | ContextDeliveryChannel::SessionWork => "",
+        | ContextDeliveryChannel::SessionWork
+        | ContextDeliveryChannel::StopCorrection => "",
     };
     Some(format!("{OPEN}{heading}{body}{CLOSE}"))
 }

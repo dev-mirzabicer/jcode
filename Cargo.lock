@@ -3447,6 +3447,7 @@ dependencies = [
  "jcode-schema-dialect",
  "jcode-selfdev-types",
  "jcode-session-types",
+ "jcode-session-work-types",
  "jcode-setup-hints",
  "jcode-swarm-core",
  "jcode-task-types",

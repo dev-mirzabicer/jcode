@@ -361,6 +361,8 @@ pub struct Agent {
     /// Exact pending-turn boundary used only for prompt-safe preflight and
     /// pre-output provider rejection rollback.
     active_turn_context: Option<ActiveTurnContext>,
+    /// Where the current turn is, so a failure can be classified.
+    turn_phase: session_work::TurnPhase,
     /// Narrow persistence boundary for startup dispatch and acceptance metadata.
     startup_context_persistence: Arc<dyn StartupContextSessionPersistence>,
     /// Tool call ids observed in the current session transcript.
@@ -453,6 +455,7 @@ impl Agent {
             last_status_detail: None,
             pending_alerts: Vec::new(),
             active_turn_context: None,
+            turn_phase: session_work::TurnPhase::Preparing,
             startup_context_persistence: Arc::new(DurableStartupContextSessionPersistence),
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
@@ -1459,7 +1462,10 @@ impl Agent {
                 active_skill.skill_id, active_skill.rendered_text
             ));
         }
-        if let Some(guidance) = session.swarm_routing_prompt.as_ref() {
+        if let Some(guidance) = session
+            .frozen_tool_guidance("swarm")
+            .and_then(|guidance| guidance.description)
+        {
             md.push_str(&format!(
                 "## Swarm tool instructions\n\n```text\n{guidance}\n```\n\n"
             ));

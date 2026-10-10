@@ -23,7 +23,9 @@ pub(super) fn classify(surface: &SessionWorkSurface, path: &Path) -> Result<Opti
     Ok(surface.classify(&entry))
 }
 
-pub(super) fn request_base(ctx: &ToolContext) -> String {
+/// The request identity of one invocation: stable across a replay of the
+/// same invocation, so a recovered call converges on its original effect.
+pub(crate) fn request_base(ctx: &ToolContext) -> String {
     match &ctx.invocation.identity {
         Some(identity) => identity.id.clone(),
         None if !ctx.tool_call_id.is_empty() => {

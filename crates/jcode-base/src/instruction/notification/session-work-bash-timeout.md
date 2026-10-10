@@ -1,0 +1,1 @@
+In the background, a time check: when it passes you get a notice and the task keeps running. In the foreground, the command moves to the background and keeps running.

@@ -1131,11 +1131,13 @@ impl Agent {
         tools
     }
 
-    /// Session-scoped exposure: self-development tools and the placed-primary
-    /// workspace tool.
+    /// Session-scoped exposure: self-development tools, the placed-primary
+    /// workspace tool and, for sessions with session work, `declare_stop` in
+    /// the session's role.
     fn apply_session_tool_surface(tools: &mut Vec<ToolDefinition>, session: &Session) {
         Self::apply_selfdev_tool_surface(tools, session.is_canary);
         crate::tool::retain_workspace_tool_for_session(tools, session);
+        crate::tool::declare_stop::retain_for_session(tools, session);
     }
 
     /// Expose the `selfdev` tool only while running in self-development mode.

@@ -96,6 +96,7 @@ jcode-plan = { path = "../jcode-plan" }
 jcode-swarm-core = { path = "../jcode-swarm-core" }
 jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-session-types = { path = "../jcode-session-types" }
+jcode-session-work-types = { path = "../jcode-session-work-types" }
 jcode-setup-hints = { path = "../jcode-setup-hints" }
 jcode-task-types = { path = "../jcode-task-types" }
 jcode-tool-core = { path = "../jcode-tool-core" }

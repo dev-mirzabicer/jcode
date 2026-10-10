@@ -1,0 +1,1 @@
+Tool not run: a stop is declared for this turn. Write your final message, or declare_stop withdraw to keep working.
