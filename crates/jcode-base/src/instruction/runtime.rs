@@ -1168,7 +1168,14 @@ pub(super) fn parse_document(
             includes,
             allowed_tools,
             module_type,
-            workflow_template: raw.workflow.clone(),
+            // A template becomes a file's text; it ends with a newline like one.
+            workflow_template: raw.workflow.as_ref().map(|template| {
+                if template.ends_with('\n') {
+                    template.clone()
+                } else {
+                    format!("{template}\n")
+                }
+            }),
         },
         body: body.to_string(),
         path: path.to_path_buf(),
