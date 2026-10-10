@@ -30,7 +30,7 @@ pub use cache_breakpoints::{
 /// Format messages for a model with no mid-conversation operator channel:
 /// every operator notice is user text, exactly as it was stored.
 pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
-    format_messages_for(messages, AnthropicConversationCaps::default())
+    format_messages_for(messages, AnthropicConversationCaps::default(), &[])
 }
 
 /// Format messages for a model with the given mid-conversation capabilities.
@@ -49,9 +49,18 @@ pub fn format_messages(messages: &[Message]) -> Vec<ApiMessage> {
 /// accepts them there. When the notice is user text, they move to a system
 /// message of their own before the next assistant message, the first position
 /// where the placement rules hold.
+///
+/// `tools` is the request's `tools` array. A removal names a tool by
+/// reference, and the API rejects a reference to a tool the request does not
+/// know: one neither in `tools` nor added by value earlier in the messages. A
+/// tool outside both is already unavailable to the model (for example a
+/// globally unavailable tool, which leaves `tools` at a recorded tool-set
+/// transition), so its removal is not rendered; the notice text still
+/// announces it.
 pub fn format_messages_for(
     messages: &[Message],
     caps: AnthropicConversationCaps,
+    tools: &[ToolDefinition],
 ) -> Vec<ApiMessage> {
     use std::collections::HashSet;
 
@@ -98,7 +107,7 @@ pub fn format_messages_for(
     // that have dangling tool_uses
     let mut result: Vec<ApiMessage> = Vec::new();
 
-    let mut inline_tools = InlineToolState::default();
+    let mut inline_tools = InlineToolState::declared(tools);
     // Operator notice entries of `result`, by index, with their user form.
     let mut notices: std::collections::HashMap<usize, OperatorForms> =
         std::collections::HashMap::new();
@@ -320,7 +329,9 @@ struct OperatorForms {
 
 /// Keep each run of system messages where the placement rules hold; turn the
 /// others into user text, moving their tool changes to the next valid
-/// position (before the next assistant message, or the end).
+/// position: the next run that is kept, before its own changes; otherwise
+/// before the next assistant message, or the end. The model is told every
+/// change in the order it happened.
 fn place_operator_messages(
     entries: Vec<ApiMessage>,
     notices: &std::collections::HashMap<usize, OperatorForms>,
@@ -350,7 +361,20 @@ fn place_operator_messages(
         let follows_user = placed.last().is_some_and(|last| last.role == "user");
         let before_assistant = entries.get(end).is_none_or(|next| next.role == "assistant");
         if follows_user && before_assistant {
-            placed.extend(entries[index..end].iter().cloned());
+            let mut run = entries[index..end].to_vec();
+            // Changes moved from earlier notices land here, the first valid
+            // position, ahead of this run's own changes, so the model is told
+            // every change in the order it happened. They go after the run's
+            // leading text, keeping the text-then-changes block shape.
+            if !pending.is_empty() {
+                let first = &mut run[0].content;
+                let at = first
+                    .iter()
+                    .take_while(|block| matches!(block, ApiContentBlock::Text { .. }))
+                    .count();
+                first.splice(at..at, std::mem::take(&mut pending));
+            }
+            placed.extend(run);
         } else {
             for position in index..end {
                 let forms = &notices[&position];
@@ -376,28 +400,48 @@ fn place_operator_messages(
 }
 
 /// What the tool changes rendered so far in a conversation have done to each
-/// tool name. A change that repeats the standing one is not rendered again:
-/// a notice announced again after a context edit hid it, and then visible
-/// beside its original once the edit is reverted, would otherwise remove a
-/// tool twice.
-#[derive(Default)]
-struct InlineToolState(std::collections::HashMap<String, Option<ToolDefinition>>);
+/// tool name, over the tools the request declares. A change that repeats the
+/// standing one is not rendered again: a notice announced again after a
+/// context edit hid it, and then visible beside its original once the edit is
+/// reverted, would otherwise remove a tool twice.
+struct InlineToolState {
+    /// Names in the request's `tools` array.
+    declared: std::collections::HashSet<String>,
+    /// The standing change per name: a definition added by value, or removed.
+    standing: std::collections::HashMap<String, Option<ToolDefinition>>,
+}
 
 impl InlineToolState {
-    /// Record `change`; false when it repeats the standing change to its tool.
+    fn declared(tools: &[ToolDefinition]) -> Self {
+        Self {
+            declared: tools.iter().map(|tool| tool.name.clone()).collect(),
+            standing: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Record `change`; true when it is rendered as a block. A change that
+    /// repeats the standing one is not. Neither is a removal of a tool the
+    /// request does not know (not in `tools` and not added by value so far):
+    /// that tool is already unavailable, and a reference to it is rejected.
     fn apply(&mut self, change: &jcode_message_types::ToolSetChange) -> bool {
         use jcode_message_types::ToolSetChange;
+        let name = change.name();
         let next = match change {
             ToolSetChange::Added { definition } | ToolSetChange::Redefined { definition } => {
                 Some(definition.clone())
             }
             ToolSetChange::Removed { .. } => None,
         };
-        if self.0.get(change.name()) == Some(&next) {
+        let standing = self.standing.get(name);
+        if standing == Some(&next) {
             return false;
         }
-        self.0.insert(change.name().to_string(), next);
-        true
+        let known = match standing {
+            Some(previous) => previous.is_some(),
+            None => self.declared.contains(name),
+        };
+        self.standing.insert(name.to_string(), next.clone());
+        next.is_some() || known
     }
 }
 

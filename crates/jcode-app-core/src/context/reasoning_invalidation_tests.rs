@@ -72,7 +72,7 @@ pub(crate) fn fixture_request_for(
         model: "claude-sonnet-5-5".to_string(),
         max_tokens: 1024,
         system: build_system_param(system, false),
-        messages: jcode_provider_anthropic::format_messages_for(messages, caps),
+        messages: jcode_provider_anthropic::format_messages_for(messages, caps, tools),
         tool_choice: ApiToolChoice::for_tools(&api_tools),
         tools: (!api_tools.is_empty()).then_some(api_tools),
         metadata: None,

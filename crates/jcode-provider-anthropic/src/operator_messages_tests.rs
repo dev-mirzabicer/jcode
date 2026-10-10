@@ -36,8 +36,13 @@ fn stored(body: &str) -> Message {
     Message::user(&format!("<system-reminder>\n{body}\n</system-reminder>"))
 }
 
+/// The request's `tools` in these fixtures: the tools their removals name.
+fn declared() -> Vec<ToolDefinition> {
+    vec![tool("read", "Read a file"), tool("bash", "Run a command")]
+}
+
 fn wire(messages: &[Message], caps: AnthropicConversationCaps) -> Value {
-    serde_json::to_value(format_messages_for(messages, caps)).unwrap()
+    serde_json::to_value(format_messages_for(messages, caps, &declared())).unwrap()
 }
 
 fn roles(value: &Value) -> Vec<&str> {
@@ -259,7 +264,7 @@ fn thinking_produced_after_a_system_message_is_bound_to_it() {
         model: "claude-opus-5-5".to_string(),
         max_tokens: 1024,
         system: build_system_param("sys", false),
-        messages: format_messages_for(messages, BOTH),
+        messages: format_messages_for(messages, BOTH, &[]),
         tools: None,
         tool_choice: None,
         metadata: None,
@@ -318,6 +323,7 @@ fn the_cache_reads_where_a_request_that_ended_on_a_notice_wrote() {
                 Message::user("next"),
             ],
             BOTH,
+            &[],
         ),
         tools: None,
         tool_choice: None,
@@ -334,4 +340,141 @@ fn the_cache_reads_where_a_request_that_ended_on_a_notice_wrote() {
         "the previous request's newest block was the notice"
     );
     assert!(request.messages[3].content[0].has_cache_control());
+}
+
+/// The API rejects a request whose tool change references a tool it does not
+/// know ("tool_addition/tool_removal references unknown tool"). A removal is
+/// rendered only for a tool in `tools` or added by value earlier; a tool
+/// outside both is already unavailable, and its notice keeps only its text.
+#[test]
+fn a_removal_references_only_a_tool_the_request_knows() {
+    let retired = || ToolSetChange::Removed {
+        name: "retired".to_string(),
+    };
+    let readded = ToolSetChange::Added {
+        definition: tool("retired", "Back again"),
+    };
+    let kinds = |value: &Value| -> Vec<Vec<String>> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .map(|message| {
+                message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| block["type"].as_str().unwrap().to_string())
+                    .collect()
+            })
+            .collect()
+    };
+
+    // Not in `tools`: the removal is text only.
+    let messages = [
+        Message::user("go"),
+        notice_with("update 1", vec![retired()]),
+    ];
+    assert_eq!(kinds(&wire(&messages, BOTH)), vec![vec!["text"]]);
+
+    // Removed, added again by value, removed again (a retirement, a rollback
+    // and a second retirement): the second removal names the tool the
+    // addition introduced.
+    let messages = [
+        Message::user("one"),
+        notice_with("update 1", vec![retired()]),
+        Message::assistant_text("ok"),
+        Message::user("two"),
+        notice_with("update 2", vec![readded]),
+        Message::assistant_text("ok"),
+        Message::user("three"),
+        notice_with("update 3", vec![retired()]),
+    ];
+    let value = wire(&messages, BOTH);
+    assert_eq!(
+        kinds(&value),
+        vec![
+            vec!["text"],
+            vec!["text", "tool_addition"],
+            vec!["text", "tool_removal"]
+        ]
+    );
+    assert_eq!(value[7]["content"][1]["tool"]["name"], "retired");
+
+    // The same rule where a notice is user text and its changes move.
+    let resumed = [
+        Message::user("task"),
+        Message::assistant_text("working"),
+        notice_with(
+            "tools changed",
+            vec![
+                retired(),
+                ToolSetChange::Removed {
+                    name: "read".to_string(),
+                },
+            ],
+        ),
+        Message::user("continue"),
+        Message::assistant_text("ok"),
+    ];
+    let value = wire(&resumed, BOTH);
+    let moved: Vec<&Value> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .collect();
+    assert_eq!(
+        moved,
+        vec![&json!({"type": "tool_removal", "tool": {"type": "tool_reference", "name": "read"}})]
+    );
+}
+
+/// A notice whose request failed before any reply becomes user text when a
+/// new user message follows, and its tool changes move. When a later notice
+/// is kept as a system message before the next reply, the moved changes come
+/// first in it: the model is told the removal, then the addition, as they
+/// happened, and the tool ends available.
+#[test]
+fn moved_tool_changes_keep_their_order_before_a_later_kept_notice() {
+    let messages = [
+        Message::user("one"),
+        Message::assistant_text("ok"),
+        Message::user("two"),
+        notice_with(
+            "update 1",
+            vec![ToolSetChange::Removed {
+                name: "read".to_string(),
+            }],
+        ),
+        Message::user("the request failed; try again"),
+        notice_with(
+            "update 2",
+            vec![ToolSetChange::Added {
+                definition: tool("read", "Read a file"),
+            }],
+        ),
+        Message::assistant_text("ok"),
+    ];
+    let value = wire(&messages, BOTH);
+    let system: Vec<&Value> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .collect();
+    assert_eq!(system.len(), 1, "{value}");
+    let kinds: Vec<&str> = system[0]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["text", "tool_removal", "tool_addition"]);
+    assert_eq!(system[0]["content"][0]["text"], "update 2");
+    // The first notice is user text in place.
+    let texts = serde_json::to_string(&value).unwrap();
+    assert!(texts.contains("update 1"));
 }

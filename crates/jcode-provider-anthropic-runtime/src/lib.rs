@@ -1140,10 +1140,17 @@ impl AnthropicProvider {
 
     /// Convert our Message type to Anthropic API format
     /// Also repairs dangling tool_uses by injecting synthetic tool_results
-    fn format_messages(&self, model: &str, messages: &[Message]) -> Vec<ApiMessage> {
+    /// `tools` is the request's tool array; tool changes render against it.
+    fn format_messages(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Vec<ApiMessage> {
         jcode_provider_anthropic::format_messages_for(
             messages,
             jcode_provider_core::anthropic_conversation_caps(model),
+            tools,
         )
     }
 
@@ -1174,7 +1181,7 @@ impl AnthropicProvider {
             model: String::new(),
             max_tokens: 0,
             system,
-            messages: self.format_messages(model, messages),
+            messages: self.format_messages(model, messages, tools),
             tool_choice: ApiToolChoice::for_tools(&api_tools),
             tools: (!api_tools.is_empty()).then_some(api_tools),
             metadata: is_oauth.then(|| oauth_request_metadata(&self.oauth_session_id)),

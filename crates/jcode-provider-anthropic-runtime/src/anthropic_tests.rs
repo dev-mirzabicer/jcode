@@ -1151,7 +1151,7 @@ async fn test_dangling_tool_use_repair() {
         // Missing tool_results for tool_123 and tool_456!
     ];
 
-    let formatted = provider.format_messages(&provider.model(), &messages);
+    let formatted = provider.format_messages(&provider.model(), &messages, &[]);
 
     // Should have 3 messages:
     // 1. User: "Hello"
@@ -1226,7 +1226,7 @@ async fn test_no_repair_when_tool_results_present() {
         },
     ];
 
-    let formatted = provider.format_messages(&provider.model(), &messages);
+    let formatted = provider.format_messages(&provider.model(), &messages, &[]);
 
     // Should have exactly 3 messages (no synthetic ones added)
     assert_eq!(formatted.len(), 3);
@@ -1308,7 +1308,7 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
         make_image_result("tool_c", "c.png"),
     ];
 
-    let formatted = provider.format_messages(&provider.model(), &messages);
+    let formatted = provider.format_messages(&provider.model(), &messages, &[]);
 
     // assistant message + merged user tool_result message
     assert_eq!(formatted.len(), 2);
@@ -1421,7 +1421,7 @@ async fn test_sanitize_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&provider.model(), &messages);
+    let formatted = provider.format_messages(&provider.model(), &messages, &[]);
 
     let sanitized_id = "chatcmpl-BF2xX_tool_call_0";
     for msg in &formatted {
@@ -1466,7 +1466,7 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&provider.model(), &messages);
+    let formatted = provider.format_messages(&provider.model(), &messages, &[]);
 
     let sanitized_id = "call_with_dots";
     for msg in &formatted {
@@ -2771,6 +2771,47 @@ fn an_unconfigured_effort_is_the_model_default_not_none() {
     assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
 }
 
+/// The production request renders a removal only for a tool it declares. A
+/// tool outside its `tools` (a globally unavailable one, which leaves the
+/// array at a recorded transition) would make the API reject the request
+/// ("tool_addition/tool_removal references unknown tool"); the notice keeps
+/// its text and no tool-change beta is sent.
+#[test]
+fn a_removal_of_a_tool_the_request_does_not_declare_is_not_rendered() {
+    let provider = AnthropicProvider::new();
+    let notice = Message {
+        role: Role::User,
+        content: vec![ContentBlock::OperatorNotice {
+            text: "<system-reminder>\nremoved\n</system-reminder>".to_string(),
+            body: "removed".to_string(),
+            tool_changes: vec![jcode_message_types::ToolSetChange::Removed {
+                name: "retired".to_string(),
+            }],
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let messages = [Message::user("go"), notice];
+    let declared = [ToolDefinition {
+        name: "bash".to_string(),
+        description: "Run a command".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+    }];
+    let request = provider.build_api_request("claude-opus-5-5", &messages, &declared, None, true);
+    let value = serde_json::to_value(&request.messages).unwrap();
+    assert_eq!(value[1]["role"], "system");
+    // Cache breakpoints may sit on the text; only the block kinds matter here.
+    let kinds: Vec<&str> = value[1]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["text"]);
+    assert_eq!(value[1]["content"][0]["text"], "removed");
+    assert_eq!(RequestBetas::of_request(&request).tool_changes, None);
+}
+
 /// INT-01/WP-06 D17: the production request renders an operator notice from
 /// the model's capability data.
 #[test]
@@ -2789,8 +2830,14 @@ fn operator_notices_follow_each_models_capability() {
         tool_duration_ms: None,
     };
     let messages = [Message::user("go"), notice];
+    // The removal names a tool the request declares.
+    let declared = [ToolDefinition {
+        name: "bash".to_string(),
+        description: "Run a command".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+    }];
     let roles = |model: &str| {
-        let request = provider.build_api_request(model, &messages, &[], None, true);
+        let request = provider.build_api_request(model, &messages, &declared, None, true);
         let value = serde_json::to_value(&request.messages).unwrap();
         let roles: Vec<String> = value
             .as_array()

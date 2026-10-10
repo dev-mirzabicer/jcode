@@ -174,7 +174,9 @@ fn anthropic_view(
     strip_cache_control(&mut system);
     strip_cache_control(&mut tools);
     let mut blocks = Vec::new();
-    for message in jcode_provider_anthropic::format_messages_for(&request.messages, caps) {
+    for message in
+        jcode_provider_anthropic::format_messages_for(&request.messages, caps, &request.tools)
+    {
         let mut message = serde_json::to_value(message).unwrap();
         strip_cache_control(&mut message);
         let role = message["role"].clone();
