@@ -673,7 +673,12 @@ fn clone_split_parent_with_grants(
     parent: &Session,
     choice: Option<crate::workspace::GrantCarryChoice>,
 ) -> anyhow::Result<(String, String)> {
-    let child = crate::primary::prepare_split_session(parent, choice)?;
+    let child = crate::primary::prepare_split_session(
+        parent,
+        choice,
+        crate::primary::NewContextOwner::Runtime,
+        &crate::instruction::InstructionRepositoryService::new(),
+    )?;
     Ok((child.id.clone(), child.display_name().to_string()))
 }
 
@@ -704,7 +709,13 @@ fn create_transfer_child_session_with_grants(
         parent.id == parent_session_id,
         "Transfer source identity mismatch"
     );
-    crate::primary::prepare_transfer_session(parent, instruction_repositories, summary, choice)
+    crate::primary::prepare_transfer_session(
+        parent,
+        instruction_repositories,
+        summary,
+        choice,
+        crate::primary::NewContextOwner::Runtime,
+    )
 }
 
 pub(super) async fn handle_split(

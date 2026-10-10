@@ -61,6 +61,7 @@ impl Agent {
                 ));
             }
             self.apply_primary_location_changes().await?;
+            self.reconcile_session_work()?;
             self.require_native_scope_provider()?;
             self.session.require_published_primary()?;
             let tools = self.tool_definitions().await?;

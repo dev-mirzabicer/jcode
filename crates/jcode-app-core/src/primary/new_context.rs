@@ -204,6 +204,14 @@ impl PrimaryHost {
     }
 }
 
+/// Who owns a session created from another one. Only sessions the runtime
+/// hosts take part in session work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NewContextOwner {
+    Runtime,
+    Process,
+}
+
 /// Shared primary transfer preparation for hosted and process-owned clients.
 /// The caller owns summary generation, this owner owns complete new context publication.
 pub fn prepare_transfer_session(
@@ -211,6 +219,7 @@ pub fn prepare_transfer_session(
     instruction_repositories: &InstructionRepositoryService,
     summary: Option<String>,
     choice: Option<GrantCarryChoice>,
+    owner: NewContextOwner,
 ) -> Result<(String, String)> {
     let child = prepare_fresh_context(
         parent,
@@ -218,6 +227,7 @@ pub fn prepare_transfer_session(
         summary,
         choice,
         NewContextKind::Transfer,
+        owner,
     )?;
     Ok((child.id.clone(), child.display_name().to_string()))
 }
@@ -227,7 +237,14 @@ pub fn prepare_local_clear_session(
     repositories: &InstructionRepositoryService,
     choice: Option<GrantCarryChoice>,
 ) -> Result<crate::session::Session> {
-    prepare_fresh_context(parent, repositories, None, choice, NewContextKind::Clear)
+    prepare_fresh_context(
+        parent,
+        repositories,
+        None,
+        choice,
+        NewContextKind::Clear,
+        NewContextOwner::Process,
+    )
 }
 
 fn prepare_fresh_context(
@@ -236,6 +253,7 @@ fn prepare_fresh_context(
     summary: Option<String>,
     choice: Option<GrantCarryChoice>,
     kind: NewContextKind,
+    owner: NewContextOwner,
 ) -> Result<crate::session::Session> {
     use crate::session::Session;
     let _permit =
@@ -335,6 +353,26 @@ fn prepare_fresh_context(
             return Err(error.context("new-context instruction activation failed"));
         }
     }
+    // A hosted transfer copies the source's workflow with provenance; a
+    // cleared session starts without one.
+    if owner == NewContextOwner::Runtime {
+        let work = match kind {
+            NewContextKind::Transfer => {
+                crate::session_work::NewSessionWork::Transfer { source: parent }
+            }
+            _ => crate::session_work::NewSessionWork::Primary,
+        };
+        if let Err(error) =
+            crate::session_work::activate_new_session(&mut child, work, instruction_repositories)
+        {
+            if let Err(cleanup) = crate::session::remove_unpublished_session(&child_id) {
+                anyhow::bail!(
+                    "new-context session work failed ({error}); unpublished child cleanup also failed: {cleanup}"
+                );
+            }
+            return Err(error.context("new-context session work activation failed"));
+        }
+    }
     let transfer_activation = if parent.is_debug {
         crate::agent::StartupContextActivation::Disabled
     } else {
@@ -395,6 +433,8 @@ fn prepare_fresh_context(
 pub fn prepare_split_session(
     parent: &crate::session::Session,
     choice: Option<GrantCarryChoice>,
+    owner: NewContextOwner,
+    instruction_repositories: &InstructionRepositoryService,
 ) -> Result<crate::session::Session> {
     use crate::session::Session;
     let _permit =
@@ -416,12 +456,22 @@ pub fn prepare_split_session(
         )?;
     }
     child.status = crate::session::SessionStatus::Closed;
+    // A hosted split continues its source's session work without the
+    // workflow; its own workflow path joins the fork notice below.
+    let activated = match owner {
+        NewContextOwner::Runtime => crate::session_work::activate_new_session(
+            &mut child,
+            crate::session_work::NewSessionWork::Split { source: parent },
+            instruction_repositories,
+        )
+        .map(|_| ()),
+        NewContextOwner::Process => Ok(()),
+    };
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
-    if let Err(error) = child
-        .append_fork_notice(parent_session_id, parent.display_name())
-        .map(|_| ())
+    if let Err(error) = activated
+        .and_then(|()| child.append_fork_notice(parent_session_id, parent.display_name()))
         .and_then(|()| {
             child.seal_context_scope();
             child.save()

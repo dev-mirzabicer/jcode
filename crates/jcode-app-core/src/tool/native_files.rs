@@ -10,6 +10,8 @@ use jcode_base::location::native_files::{resolve_removal_entry, resolve_target};
 #[cfg(not(target_os = "macos"))]
 #[path = "native_files_legacy.rs"]
 mod legacy;
+#[path = "native_session_work.rs"]
+mod session_work;
 use jcode_tool_core::native_files::{NativeFilePermit, NativeFilePlan, NativeFilePolicy};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,6 +22,8 @@ struct BoundPolicy {
     durable: PathBuf,
     runtime: Option<PathBuf>,
     child: Option<Arc<ChildToolPolicy>>,
+    /// The invocation's identity, for idempotent session-work commits.
+    request: String,
 }
 impl BoundPolicy {
     fn new(ctx: &ToolContext, child: Option<Arc<ChildToolPolicy>>) -> Result<Self> {
@@ -29,6 +33,7 @@ impl BoundPolicy {
             durable: crate::storage::durable_state_dir(),
             runtime: std::env::var_os("JCODE_RUNTIME_DIR").map(PathBuf::from),
             child,
+            request: session_work::request_base(ctx),
         })
     }
     fn load(&self, id: &str) -> Result<Session> {
@@ -40,6 +45,49 @@ impl NativeFilePolicy for BoundPolicy {
         &self.session
     }
     fn acquire(&self, plan: &NativeFilePlan) -> Result<Box<dyn NativeFilePermit>> {
+        // The session-work destination is admitted separately: its files are
+        // written through their store, for the acting Session only.
+        let surface = jcode_base::session_work::SessionWorkSurface::new()?;
+        let mut work = Vec::new();
+        let mut files = Vec::new();
+        let mut removals = Vec::new();
+        for path in plan.paths() {
+            if let Some(place) = session_work::classify(&surface, path)? {
+                work.push((path.clone(), place));
+                continue;
+            }
+            // A move source is both a file to read and an entry to remove.
+            if plan.removals().contains(path) {
+                removals.push(path.clone());
+            }
+            if plan.requires_file(path) || !plan.removals().contains(path) {
+                files.push(path.clone());
+            }
+        }
+        if work.is_empty() {
+            return self.acquire_regular(plan);
+        }
+        let session = self.load(&self.session)?;
+        let session_work = session_work::SessionWorkFiles::admit(
+            surface,
+            &session,
+            self.request.clone(),
+            &work,
+            plan.removals(),
+        )?;
+        let regular = if files.is_empty() && removals.is_empty() {
+            None
+        } else {
+            Some(self.acquire_regular(&NativeFilePlan::new(files, removals))?)
+        };
+        Ok(Box::new(session_work::SplitPermit {
+            session_work,
+            regular,
+        }))
+    }
+}
+impl BoundPolicy {
+    fn acquire_regular(&self, plan: &NativeFilePlan) -> Result<Box<dyn NativeFilePermit>> {
         let paths = plan.paths();
         let removals = plan.removals();
         let session = self.load(&self.session)?;

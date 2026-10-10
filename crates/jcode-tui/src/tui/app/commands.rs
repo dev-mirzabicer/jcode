@@ -498,6 +498,7 @@ pub(super) fn create_transfer_session_with_grants(
         &crate::instruction::InstructionRepositoryService::new(),
         summary,
         choice,
+        crate::primary::NewContextOwner::Process,
     )
 }
 

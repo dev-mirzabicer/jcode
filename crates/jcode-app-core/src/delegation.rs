@@ -223,6 +223,7 @@ impl Host {
         let mut unpublished = UnpublishedChild {
             session_id: child_id.as_str().into(),
             owns_session: false,
+            session_work: false,
             artifact: None,
             published: false,
         };
@@ -279,6 +280,18 @@ impl Host {
                     .into(),
             );
             session.install_system_prompt(activation.state);
+            // Session work is fixed before the child's Session Context is
+            // written; a preset's workflow template becomes revision 1.
+            let preset_selector = format!("{}:{}", preset.resource.scope, preset.resource.id);
+            unpublished.session_work = true;
+            crate::session_work::activate_new_session(
+                &mut session,
+                crate::session_work::NewSessionWork::Child {
+                    preset: &preset_selector,
+                    template: preset.workflow_template.as_deref(),
+                },
+                &self.repositories,
+            )?;
             prepare_startup(&self.startup, &mut session, &request.startup_context, &cwd)?;
             check_stop(ctx)?;
             let artifact_parent = self.root.join("artifacts");
@@ -643,6 +656,8 @@ fn prepare_startup(
 struct UnpublishedChild {
     session_id: String,
     owns_session: bool,
+    /// Session-work state exists before the Session itself is saved.
+    session_work: bool,
     artifact: Option<PathBuf>,
     published: bool,
 }
@@ -658,6 +673,12 @@ impl UnpublishedChild {
             && let Err(error) = crate::session::remove_unpublished_session(&self.session_id)
         {
             failures.push(format!("Session: {error:#}"));
+        }
+        if self.session_work
+            && !self.owns_session
+            && let Err(error) = crate::session_work::remove_unpublished(&self.session_id)
+        {
+            failures.push(format!("Session work: {error:#}"));
         }
         if let Some(path) = &self.artifact
             && let Err(error) = std::fs::remove_dir(path)

@@ -17,7 +17,7 @@ mod placement;
 pub use placement::{place_process_primary, require_process_primary_placed};
 mod shutdown;
 pub use new_context::{
-    prepare_local_clear_session, prepare_split_session, prepare_transfer_session,
+    NewContextOwner, prepare_local_clear_session, prepare_split_session, prepare_transfer_session,
 };
 mod transport;
 pub use transport::{configured_launch, launch_enabled, launch_local_request};

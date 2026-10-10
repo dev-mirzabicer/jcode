@@ -522,7 +522,12 @@ fn clone_session_for_review(
 }
 
 fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
-    let child = crate::primary::prepare_split_session(&app.session, None)?;
+    let child = crate::primary::prepare_split_session(
+        &app.session,
+        None,
+        crate::primary::NewContextOwner::Process,
+        &crate::instruction::InstructionRepositoryService::new(),
+    )?;
     Ok((child.id.clone(), child.display_name().to_string()))
 }
 

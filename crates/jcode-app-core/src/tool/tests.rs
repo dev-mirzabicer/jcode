@@ -22,6 +22,10 @@ mod provider_parity;
 #[path = "native_scope_tests.rs"]
 mod native_scope;
 
+#[cfg(target_os = "macos")]
+#[path = "native_session_work_tests.rs"]
+mod native_session_work;
+
 struct MockProvider;
 
 #[tokio::test]

@@ -15,6 +15,7 @@ mod primary_controls;
 mod prompting;
 mod provider;
 mod response_recovery;
+mod session_work;
 mod startup_context;
 mod status;
 mod streaming;
@@ -674,13 +675,41 @@ impl Agent {
     pub(crate) fn prepare_primary_session(
         provider: Arc<dyn Provider>,
         registry: Registry,
-        session: Session,
+        mut session: Session,
         activation: StartupContextActivation,
         agent_selection: crate::instruction::AgentSelection,
         is_selfdev: bool,
         instruction_repositories: crate::instruction::InstructionRepositoryService,
     ) -> std::result::Result<(Self, StartupContextActivationOutcome), StartupContextActivationError>
     {
+        // Session work is fixed at creation, before the Session Context is
+        // written. Only hosted primary creators reach this with these
+        // callers: the attached TUI's new session and the runtime's Clear.
+        // Harness/SDK, Run/REPL and other creators keep sessions without it.
+        if let StartupContextActivation::Primary { caller, .. } = activation
+            && matches!(
+                caller,
+                StartupContextCaller::InteractiveTui | StartupContextCaller::Clear
+            )
+            && let Err(source) = crate::session_work::activate_new_session(
+                &mut session,
+                crate::session_work::NewSessionWork::Primary,
+                &instruction_repositories,
+            )
+        {
+            let activation_error = format!("{source:#}");
+            if let Err(cleanup) = crate::session::remove_unpublished_session(&session.id) {
+                return Err(StartupContextActivationError::Cleanup {
+                    caller,
+                    activation_error,
+                    source: cleanup,
+                });
+            }
+            return Err(StartupContextActivationError::Ownership {
+                caller,
+                source: source.context("Session work could not be activated"),
+            });
+        }
         let owner = match activation {
             StartupContextActivation::Primary { caller, .. } => Some(Arc::new(
                 crate::primary::PrimaryLease::acquire(&session.id).map_err(|source| {
@@ -1537,3 +1566,7 @@ impl crate::context::RequestPrefixSource for Agent {
         self.context_request_prefix()
     }
 }
+
+#[cfg(test)]
+#[path = "agent/session_work_tests.rs"]
+mod session_work_tests;
