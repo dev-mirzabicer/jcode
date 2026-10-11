@@ -1139,6 +1139,42 @@ fn primary_launch_checks_bridge_and_runtime_capabilities_before_mutation() {
 }
 
 #[test]
+fn the_session_work_launch_opt_in_is_sent_only_to_a_runtime_that_accepts_it() {
+    let request:jcode_harness_api::PrimaryLaunchRequest=serde_json::from_value(serde_json::json!({"request":"12a99e11-e967-4a1e-a47c-000000000009","expected_revision":0,"input":{"placement":{"kind":"standalone","root":"/fixture"},"cwd":{"kind":"existing","path":"/fixture"},"agent":null,"model":null,"selfdev":false,"session_work":true}})).unwrap();
+    assert!(request.input.session_work);
+    let probe = |accepts: bool| {
+        move |frame: &ClientFrame, writer: &mut dyn Write| match &frame.request {
+            ApiRequest::PrimaryLaunchProbe => reply(
+                frame,
+                ApiEvent::PrimaryLaunchCapabilities {
+                    version: 1,
+                    enabled: true,
+                    session_work_opt_in: accepts,
+                },
+                writer,
+            ),
+            ApiRequest::PrimaryLaunch { request } => {
+                assert!(accepts, "an older runtime never receives the opt-in");
+                assert!(request.input.session_work);
+                let response=serde_json::from_value(serde_json::json!({"status":"rejected","request":request.request,"issue":{"code":"needs_cwd","detail":"synthetic"}})).unwrap();
+                reply(frame, ApiEvent::PrimaryLaunch { response }, writer);
+            }
+            _ => panic!("Unexpected launch operation"),
+        }
+    };
+    let older = fake_harness_with_capabilities(vec!["primary_launch_v1".into()], probe(false));
+    assert_eq!(
+        older.launch_primary(request.clone()).unwrap_err().kind,
+        ErrorKind::UnsupportedCapability
+    );
+    let current = fake_harness_with_capabilities(vec!["primary_launch_v1".into()], probe(true));
+    assert_eq!(
+        current.launch_primary(request).unwrap_err().code(),
+        "primary_launch"
+    );
+}
+
+#[test]
 fn durable_primary_controls_negotiate_and_validate_receipt_identity() {
     use jcode_harness_api::{
         PrimaryInputDelivery, PrimaryInputEnvelope, PrimaryInputReceipt, PrimaryInputState,

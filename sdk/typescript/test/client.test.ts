@@ -820,6 +820,28 @@ test("managed launch negotiates runtime readiness and preserves typed rejection"
   } finally {client.close(); await server.close();}
 });
 
+test("the session-work launch opt-in is sent only to a runtime that accepts it", async () => {
+  const request: import("../src/protocol.js").PrimaryLaunchRequest = {request: "12a99e11-e967-4a1e-a47c-000000000009", expected_revision: 0, input: {placement: {kind: "standalone", root: "/fixture"}, cwd: {kind: "existing", path: "/fixture"}, agent: null, model: null, session_work: true}};
+  let accepts = false;
+  let launches = 0;
+  const server = await startMockHarness({capabilities: ["primary_launch_v1"], onRequest(frame, send) {
+    if (frame.req === "primary_launch_probe") send({v: 1, reply_to: frame.id, ev: "primary_launch_capabilities", version: 1, enabled: true, ...(accepts ? {session_work_opt_in: true} : {})});
+    else if (frame.req === "primary_launch") {
+      launches += 1;
+      assert.deepEqual(frame.request, request);
+      send({v: 1, reply_to: frame.id, ev: "primary_launch", response: {status: "rejected", request: request.request, issue: {code: "needs_cwd", detail: "synthetic"}}});
+    } else assert.fail("unexpected launch operation");
+  }});
+  const client = await JcodeClient.connect({socketPath: server.socketPath});
+  try {
+    await assert.rejects(() => client.launchPrimary(request), (error: unknown) => error instanceof HarnessError && error.code === "unsupported_capability");
+    assert.equal(launches, 0, "an older runtime never receives the opt-in");
+    accepts = true;
+    await assert.rejects(() => client.launchPrimary(request), (error: unknown) => error instanceof HarnessError && error.code === "primary_launch");
+    assert.equal(launches, 1);
+  } finally {client.close(); await server.close();}
+});
+
 test("durable primary controls negotiate and preserve original identity", async () => {
   const input: import("../src/protocol.js").PrimaryInputEnvelope = {id:"12a99e11-e967-4a1e-a47c-000000000004",session:"fixture",delivery:"safe_boundary",content:"original Ω",images:[["image/png","ZmFrZQ=="]]};
   const old = await startMockHarness({onRequest(){assert.fail("old runtime must not receive controls");}});
