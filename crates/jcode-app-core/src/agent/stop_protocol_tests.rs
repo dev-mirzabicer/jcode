@@ -25,10 +25,13 @@ enum Reply {
     Interrupt(jcode_tool_types::StopCause, Vec<StreamEvent>),
 }
 
+/// One provider request: its messages and tool definitions.
+type Request = (Vec<Message>, Vec<ToolDefinition>);
+
 #[derive(Clone, Default)]
 struct Script {
     replies: Arc<StdMutex<VecDeque<Reply>>>,
-    requests: Arc<StdMutex<Vec<(Vec<Message>, Vec<ToolDefinition>)>>>,
+    requests: Arc<StdMutex<Vec<Request>>>,
     signal: Arc<StdMutex<Option<jcode_agent_runtime::InterruptSignal>>>,
     /// Render operator deliveries natively, like a runtime with an operator
     /// channel.
