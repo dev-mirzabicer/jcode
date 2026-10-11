@@ -197,7 +197,9 @@ policy, the first time session work sees them; the alias and policy never change
 first other tool call runs and its result carries a warning; later calls are refused with a tool
 result that says so. `batch` is refused outright, so none of its calls run. `declare_stop` always
 runs. Each turn has its own warned call and refused-call counter. When the counter runs out the
-turn ends: the declaration stays and takes effect if it still holds.
+turn ends: the declaration stays and takes effect if it still holds. The gate applies to calls the
+runtime executes; a provider route that executes tools itself (the Claude CLI route) has already run
+them when the runtime sees them, so they are not gated.
 
 **End of a turn.** At the real end of a turn (no tool calls and nothing left to inject):
 
