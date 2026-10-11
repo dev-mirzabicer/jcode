@@ -30,6 +30,9 @@ struct Script {
     replies: Arc<StdMutex<VecDeque<Reply>>>,
     requests: Arc<StdMutex<Vec<(Vec<Message>, Vec<ToolDefinition>)>>>,
     signal: Arc<StdMutex<Option<jcode_agent_runtime::InterruptSignal>>>,
+    /// Render operator deliveries natively, like a runtime with an operator
+    /// channel.
+    operator: bool,
 }
 
 impl Script {
@@ -86,6 +89,9 @@ impl Provider for Script {
     }
     fn name(&self) -> &str {
         "stop-protocol-script"
+    }
+    fn renders_operator_notices(&self) -> bool {
+        self.operator
     }
     fn model(&self) -> String {
         "stop-protocol-model".into()
@@ -774,5 +780,47 @@ async fn sessions_without_session_work_keep_their_tools_and_loops() -> Result<()
     );
     // Nothing of session work was created for it.
     assert!(!SessionWorkStore::new().exists()?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn corrections_reach_an_operator_channel_as_operator_notices() -> Result<()> {
+    let env = Env::new();
+    let session = env.session(crate::session_work::NewSessionWork::Primary);
+    env.workflow(&session.id, "- [>] a: A\n");
+    let mut script = Script::new(vec![say("one"), say("two"), say("three")]);
+    script.operator = true;
+    let mut agent = agent(&script, session).await;
+    turn(&mut agent, Loop::Streaming, "go").await?;
+    let expected = rendered(Notification::SessionWorkCorrectionMissing {
+        modules: "a (active)",
+    });
+    let notices: Vec<String> = script
+        .messages(2)
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter_map(|block| match block {
+            ContentBlock::OperatorNotice { body, .. } => Some(body),
+            _ => None,
+        })
+        .filter(|body| body.trim() == expected.trim())
+        .collect();
+    assert_eq!(notices.len(), 2, "both corrections are operator notices");
+    drop(agent);
+    drop(env);
+    // A runtime without an operator channel gets the stored text.
+    let env = Env::new();
+    let session = env.session(crate::session_work::NewSessionWork::Primary);
+    env.workflow(&session.id, "- [>] a: A\n");
+    let script = Script::new(vec![say("one"), say("two"), say("three")]);
+    let mut agent = self::agent(&script, session).await;
+    turn(&mut agent, Loop::Streaming, "go").await?;
+    assert!(
+        script
+            .messages(2)
+            .iter()
+            .flat_map(|message| &message.content)
+            .all(|block| !matches!(block, ContentBlock::OperatorNotice { .. }))
+    );
     Ok(())
 }
