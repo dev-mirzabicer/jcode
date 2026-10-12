@@ -506,21 +506,10 @@ def stop_daemon():
 
 try:
     copied = prepare_copied_store() if REAL_STORE.exists() else None
-    start_daemon(); admin = connect()
-    seed = connect()
-    assert rpc(seed, 'subscribe', until={'done', 'error'}, working_dir=str(root), selfdev=False)['type'] == 'done'
-    close(seed)
-    wait(lambda: (f.home / 'instructions' / 'agents').is_dir(), 'seeded instruction store')
-    ws('initialize', request=str(uuid.uuid4()))
-    review = ws('review', expected_revision=ws('status')['revision'], change={
-        'action': 'register_location', 'name': 'work', 'path': str(root), 'registration': {'kind': 'standalone'}})
-    ws('apply', request=str(uuid.uuid4()), review=review['id'])
-    capability = rpc(admin, 'primary_control_probe')
-    assert capability.get('arrival_version') == 1, capability
-
     # 1. Undeliverable on a copied store.
     if copied is not None:
         assert copied['version'] == 21, copied
+        start_daemon(); admin = connect()
         def settled():
             rows = execution_rows('SELECT run_id, notify, wake, notify_state, wake_state, issue FROM background_deliveries')
             by_id = {r[0]: r for r in rows}
@@ -538,10 +527,13 @@ try:
             if 'delivered' in (notify_state, wake_state):
                 assert (notify_state != 'delivered' or row[3] == 'delivered') and \
                        (wake_state != 'delivered' or row[4] == 'delivered'), (run_id, row)
-        log_before = (f.ROOT / 'server.log').read_text(errors='replace').count('Completion recipient location is unavailable')
+        def retries():
+            text = ''.join(p.read_text(errors='replace') for p in (f.home / 'logs').glob('*.log'))
+            return sum(text.count(marker) for marker in (
+                'Completion recipient location is unavailable', 'is undeliverable', 'remains pending'))
+        log_before = retries()
         time.sleep(12)
-        log_after = (f.ROOT / 'server.log').read_text(errors='replace').count('Completion recipient location is unavailable')
-        assert log_after == log_before, 'no retry loop after settling'
+        assert retries() == log_before, 'no retry loop after settling'
         result['undeliverable'] = {'rows': copied['rows'], 'settled': len(copied['pending'])}
         # The copied store holds a real runtime's whole history, whose global
         # task listing is slow; the remaining legs run on a fresh one. The
@@ -549,9 +541,21 @@ try:
         stop_daemon()
         wait(lambda: not daemon_ready(), 'daemon stopped', 60)
         (f.home / 'execution').rename(f.ROOT / 'copied-execution')
-        start_daemon(); admin = connect()
     else:
         result['undeliverable'] = 'not run: JCODE_ARRIVALS_STORE_COPY is not set'
+
+    start_daemon(); admin = connect()
+    seed = connect()
+    assert rpc(seed, 'subscribe', until={'done', 'error'}, working_dir=str(root), selfdev=False)['type'] == 'done'
+    close(seed)
+    wait(lambda: (f.home / 'instructions' / 'agents').is_dir(), 'seeded instruction store')
+    ws('initialize', request=str(uuid.uuid4()))
+    review = ws('review', expected_revision=ws('status')['revision'], change={
+        'action': 'register_location', 'name': 'work', 'path': str(root), 'registration': {'kind': 'standalone'}})
+    ws('apply', request=str(uuid.uuid4()), review=review['id'])
+    capability = rpc(admin, 'primary_control_probe')
+    assert capability.get('arrival_version') == 1, capability
+
 
     # 2. Busy: an aside joins the running turn.
     busy, busy_channel = new_placed_session()
