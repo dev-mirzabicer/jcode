@@ -263,6 +263,26 @@ impl BackgroundTaskManager {
         .await?
     }
 
+    /// The managed tasks of one session, without projecting any other
+    /// session's deliveries.
+    pub(super) async fn session_managed_statuses(
+        &self,
+        session: &str,
+    ) -> Result<Vec<TaskStatusFile>> {
+        let session = session.to_string();
+        tokio::task::spawn_blocking(move || {
+            let store = store()?;
+            let mut statuses = Vec::new();
+            for id in store.session_background_delivery_ids(&session)? {
+                if let Some(status) = projected(&store, &id)? {
+                    statuses.push(status);
+                }
+            }
+            Ok(statuses)
+        })
+        .await?
+    }
+
     pub async fn publish_managed_completion(&self, id: &str) -> Result<()> {
         let root = crate::storage::jcode_dir()?;
         let store = tokio::task::spawn_blocking(move || ExecutionStore::open(&root)).await??;

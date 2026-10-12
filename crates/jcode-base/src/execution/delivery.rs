@@ -227,6 +227,16 @@ impl ExecutionStore {
         transaction.commit()?;
         Ok(changed > 0)
     }
+    /// The background deliveries of one session's runs, newest first.
+    pub fn session_background_delivery_ids(&self, session: &str) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut query = connection.prepare(
+            "SELECT d.run_id FROM background_deliveries d JOIN runs r ON r.id=d.run_id WHERE r.session_id=?1 ORDER BY d.started_at DESC,d.run_id",
+        )?;
+        Ok(query
+            .query_map([session], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?)
+    }
     pub fn background_delivery_ids(&self) -> Result<Vec<String>> {
         let connection = self.connection()?;
         let mut query = connection
@@ -590,6 +600,37 @@ mod tests {
             store.background_delivery(&record.id)?.unwrap().wake_state,
             DeliveryState::Delivered
         );
+        Ok(())
+    }
+    #[test]
+    fn a_session_lists_only_its_own_deliveries() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let mine = completed(&store)?;
+        let input = Invocation {
+            session_id: "someone-else".into(),
+            message_id: "message".into(),
+            call_path: vec!["call".into()],
+            tool: "fixture".into(),
+            input: serde_json::json!({}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let PreparedInvocation::New(other) = store.prepare(&input, "owner")? else {
+            panic!()
+        };
+        store.start(&other.id, "owner")?;
+        store.promote(&other.id, "owner")?;
+        store.register_background_delivery(&other.id, true, false)?;
+        assert_eq!(
+            store.session_background_delivery_ids("delivery")?,
+            vec![mine]
+        );
+        assert_eq!(
+            store.session_background_delivery_ids("someone-else")?,
+            vec![other.id]
+        );
+        assert_eq!(store.background_delivery_ids()?.len(), 2);
         Ok(())
     }
 }

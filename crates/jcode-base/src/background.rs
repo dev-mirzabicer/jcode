@@ -1086,6 +1086,36 @@ impl BackgroundTaskManager {
         results
     }
 
+    /// The background tasks of one session. Unlike `list`, it never projects
+    /// other sessions' managed deliveries, so its cost follows the session's
+    /// own work rather than the store's whole history.
+    pub async fn list_for_session(&self, session: &str) -> Vec<TaskStatusFile> {
+        let mut results = Vec::new();
+        if let Ok(mut entries) = fs::read_dir(&self.output_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false)
+                    && let Some(status) = self.read_status_file(&path).await
+                    && status.session_id == session
+                {
+                    let reconciled = self.finalize_detached_status_if_needed(status, &path).await;
+                    let reconciled = self
+                        .finalize_orphaned_status_if_needed(reconciled, &path)
+                        .await;
+                    results.push(reconciled);
+                }
+            }
+        }
+        match self.session_managed_statuses(session).await {
+            Ok(managed) => results.extend(managed),
+            Err(error) => crate::logging::warn(&format!(
+                "Execution background metadata unavailable: {error}"
+            )),
+        }
+        results.sort_by(|a, b| b.task_id.cmp(&a.task_id));
+        results
+    }
+
     /// Get status of a specific task
     pub async fn status(&self, task_id: &str) -> Option<TaskStatusFile> {
         if task_id.starts_with("run-") {

@@ -176,10 +176,9 @@ fn parse_input(input: &Value) -> Result<DeclareInput> {
 /// The background work a session owns, from the background task registry.
 pub(crate) async fn background_work(session: &str) -> Vec<stop::BackgroundWork> {
     crate::background::global()
-        .list()
+        .list_for_session(session)
         .await
         .into_iter()
-        .filter(|task| task.session_id == session)
         .map(|task| stop::BackgroundWork {
             kind: if task.tool_name == "subagent" {
                 ItemKind::Child
