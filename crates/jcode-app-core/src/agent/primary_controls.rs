@@ -301,6 +301,12 @@ impl Agent {
         if !crate::session_work::arrivals::deliverable(&recorded) {
             return Ok(false);
         }
+        // The turn belongs to the waking input, as its start event says; the
+        // released held input committed ahead of it must not take over the
+        // turn's identity.
+        if let Some(presentation) = &self.primary_presentation {
+            presentation.bind_input(waking.id);
+        }
         let store = crate::primary_input::PrimaryInputStore::current();
         let pending: Vec<_> = store
             .pending(self.session_id())?

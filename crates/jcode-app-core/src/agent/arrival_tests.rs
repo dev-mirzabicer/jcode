@@ -361,8 +361,13 @@ async fn held_arrivals_wait_through_a_stop_and_arrive_first_when_an_awaited_item
     let ended = submit_idle(&awaited);
     assert_eq!(ended.route, ArrivalRoute::EndsStop { stop: 1 });
     script.push(vec![say("Back to work.")]);
+    // A hosted turn is presented as its waking input's turn, though held
+    // input is committed ahead of it.
+    let presentation = Arc::new(crate::primary::presentation::Presentation::new(&id));
+    agent.primary_presentation = Some(presentation.clone());
     let woke = wake(&mut agent).await?.expect("the awaited arrival wakes");
     assert_eq!(woke.id, awaited.id);
+    assert_eq!(presentation.cursor().input, Some(awaited.id));
 
     // Held input first, oldest first, each with its note; then the waking
     // input with the end of the stop.
