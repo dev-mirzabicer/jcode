@@ -282,9 +282,16 @@ def new_placed_session():
     proposal = location({'action': 'propose_placement', 'session': session})
     assert proposal['status'] == 'proposal', proposal
     p = proposal['proposal']
-    placed = location({'action': 'place', 'request': {
-        'request': str(uuid.uuid4()), 'session': session, 'working_dir': p['working_dir'],
-        'expected_catalog_revision': p['catalog_revision'], 'placement': p['candidates'][p['default']]['placement']}})
+    request = {'request': str(uuid.uuid4()), 'session': session, 'working_dir': p['working_dir'],
+               'expected_catalog_revision': p['catalog_revision'], 'placement': p['candidates'][p['default']]['placement']}
+    # A typed busy rejection means another control commit holds the
+    # session's control lease; the same request is retried.
+    def place():
+        placed = location({'action': 'place', 'request': request})
+        if placed['status'] == 'rejected' and placed['issue']['code'] == 'busy':
+            return None
+        return placed
+    placed = wait(place, 'placement', 60)
     assert placed['status'] == 'state' and placed['record']['state'] == 'complete', placed
     return session, channel
 
