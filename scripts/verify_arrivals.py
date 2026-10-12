@@ -10,17 +10,18 @@ scripts/run_isolated_test.py. With features.session_work on:
      exist settle as terminal and visible, and their retry stops.
   2. Busy. Mirza's message to a working session joins the running turn at
      its next safe point; no new turn starts.
-  3. Completed, hold. A background task started with wake false gets its
-     alias in its receipt; its result after completion is held, starts no
-     turn, carries a held diagnostic, and arrives first, with its note, when
-     Mirza's next message starts a turn.
+  3. Completed, hold, runtime restart. A background task started with wake
+     false gets its alias in its receipt; its result after completion is
+     held, starts no turn and carries a held diagnostic; it stays held across
+     a runtime restart, and arrives first, with its note, when Mirza's next
+     message starts a turn.
   4. Waiting and detached. With no client attached, a wait on t1 holds t2
      and a queued message; t1's result ends the stop, and one turn receives
      the held arrivals oldest first with their notes, then the end of the
      stop.
   5. Dispositions over the native protocol. Send-and-keep delivers under
-     the stop with its prefix; a queued message stays held across a runtime
-     restart and is then sent with revoke-and-send, which withdraws the stop.
+     the stop with its prefix; a queued message stays held until it is sent
+     with primary_input_dispose revoke-and-send, which withdraws the stop.
   6. Failure. A declaration survives the provider failure that ends its
      turn; the awaited result then ends the stop and wakes the session.
   7. Stopped. After Mirza's Stop a background result is held; his next
@@ -146,8 +147,8 @@ def script(request):
         return {'content': 'Answered A.'}
     if tag == 'B-WAIT':
         return steps([lambda: call('write', {'file_path': path, 'content': UNFINISHED}),
-                      lambda: bash_bg(8, True, 'long job'),
-                      lambda: bash_bg(1, True, 'short job'),
+                      lambda: bash_bg(10, True, 'long job'),
+                      lambda: bash_bg(3, True, 'short job'),
                       lambda: call('declare_stop', {'action': 'wait', 'condition': 't1', 'summary': 'Waiting on t1'})],
                      {'content': 'Waiting on t1.'})
     if tag == 'B-NOTE':
@@ -442,7 +443,11 @@ def prepare_copied_store():
 def stop_daemon():
     for channel_ in list(channels):
         close(channel_)
-    f.reader.close(); f.client.close(); f.proc.terminate(); f.proc.wait(timeout=60)
+    f.reader.close(); f.client.close()
+    listening = subprocess.run(['lsof', '-t', str(f.sockpath)], capture_output=True, text=True).stdout.split()
+    for pid in {int(pid) for pid in listening} - {f.proc.pid}:
+        os.kill(pid, signal.SIGTERM)
+    f.proc.terminate(); f.proc.wait(timeout=60)
 
 
 try:
@@ -515,12 +520,20 @@ try:
     time.sleep(3)
     assert len(captured) == requests_before, 'a held result starts no turn'
     assert inspect(quiet, held['input'])['issue'] == "Held until the session's next turn.", inspect(quiet, held['input'])
+    restarted = subprocess.run(prefix + ['server', 'reload', '--force', '--json'], env=f.env, cwd=root,
+                               capture_output=True, text=True, timeout=180)
+    (f.ROOT / 'reload.txt').write_text(restarted.stdout + restarted.stderr)
+    time.sleep(2)
+    reconnect_admin()
+    time.sleep(3)
+    assert inspect(quiet, held['input'])['state'] == 'accepted', 'held across the restart'
+    assert len(captured) == requests_before, 'the restart delivered nothing'
     nxt, _ = submit(quiet, 'TAG:A-NEXT')
     wait(lambda: committed(quiet, nxt), 'A-NEXT committed')
     wake_request = requests_with('TAG:A-NEXT')[0]
     assert ordered(wake_request['messages'], ['TAG:A-HOLD', lead('session-work-held-item-stopped'), 't1 (quiet job)', 'TAG:A-NEXT'])
     assert committed(quiet, held['input'])
-    result['completed_hold'] = True
+    result['completed_hold_restart'] = {'reload_exit': restarted.returncode}
 
     # 4. Waiting and detached.
     waiting, waiting_channel = new_placed_session()
@@ -554,22 +567,15 @@ try:
     assert current_stop(disposed)['number'] == 1, stops(disposed)
     queued, queued_receipt = submit(disposed, 'TAG:C-QUEUED')
     assert queued_receipt['issue'] == 'Held: the session is waiting on t1.', queued_receipt
-    restarted = subprocess.run(prefix + ['server', 'reload', '--force', '--json'], env=f.env, cwd=root,
-                               capture_output=True, text=True, timeout=180)
-    (f.ROOT / 'reload.txt').write_text(restarted.stdout + restarted.stderr)
-    time.sleep(2)
-    reconnect_admin()
-    assert inspect(disposed, queued)['state'] == 'accepted', 'held across the restart'
-    assert current_stop(disposed)['number'] == 1
-    time.sleep(2)
-    assert not requests_with('TAG:C-QUEUED'), 'nothing delivered it'
+    time.sleep(3)
+    assert inspect(disposed, queued)['state'] == 'accepted' and not requests_with('TAG:C-QUEUED'), 'held'
     disposed_event = rpc(admin, 'primary_input_dispose', session=disposed, input=queued, disposition='revoke_and_send')
     assert disposed_event['type'] == 'primary_input_receipt', disposed_event
     wait(lambda: committed(disposed, queued), 'revoked message delivered')
     queued_request = requests_with('TAG:C-QUEUED')[0]
     assert ordered(queued_request['messages'], [resource('notifications/session-work-message-revoked-stop.md'), 'TAG:C-QUEUED'])
     assert stops(disposed)[0]['state'] == {'state': 'withdrawn', 'cause': 'revoked'}, stops(disposed)
-    result['dispositions'] = {'reload_exit': restarted.returncode}
+    result['dispositions'] = True
 
     # 6. A declaration survives a failure; the awaited result wakes.
     failing, _ = new_placed_session()
@@ -606,7 +612,16 @@ try:
     wait(lambda: (f.ROOT / 'holding-crash').exists(), 'G holding')
     for channel_ in list(channels):
         close(channel_)
-    f.proc.send_signal(signal.SIGKILL); f.proc.wait(timeout=30)
+    # Identify the daemon by its listening socket: a reload may have replaced
+    # the process the fixture started.
+    listening = subprocess.run(['lsof', '-t', str(f.sockpath)], capture_output=True, text=True).stdout.split()
+    pids = {int(pid) for pid in listening}
+    assert pids, 'no process listens on the fixture socket'
+    for pid in pids:
+        os.kill(pid, signal.SIGKILL)
+    wait(lambda: not daemon_ready(), 'daemon gone', 30)
+    if f.proc.poll() is None and f.proc.pid in pids:
+        f.proc.wait(timeout=30)
     (f.ROOT / 'release-crash').write_text('release')
     f.start(); admin = connect()
     items = wait(lambda: [i for i in unresolved_recoveries() if i['session'] == crashed], 'recovery item', 60)
