@@ -140,7 +140,7 @@ def script(request):
         return {'content': 'Noted the aside.'}
     if tag == 'A-HOLD':
         return steps([lambda: call('write', {'file_path': path, 'content': DONE}),
-                      lambda: bash_bg(2, False, 'quiet job'),
+                      lambda: bash_bg(6, False, 'quiet job'),
                       lambda: call('declare_stop', {'action': 'complete', 'summary': 'Done', 'leave_running': ['t1']})],
                      {'content': 'Done for now.'})
     if tag == 'A-NEXT':
