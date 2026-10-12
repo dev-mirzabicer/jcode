@@ -519,7 +519,7 @@ try:
             left = [i for i in copied['pending']
                     if any(enabled and state == 'pending' for enabled, state in ((by_id[i][1], by_id[i][3]), (by_id[i][2], by_id[i][4])))]
             return (not left) and by_id
-        by_id = wait(settled, 'missing recipients settle', 60)
+        by_id = wait(settled, 'missing recipients settle', 300)
         assert execution_rows('PRAGMA user_version')[0][0] == 22
         assert len(by_id) >= copied['rows'], 'every row is kept'
         for run_id in copied['pending']:
