@@ -511,7 +511,10 @@ try:
         assert copied['version'] == 21, copied
         start_daemon(); admin = connect()
         def settled():
-            rows = execution_rows('SELECT run_id, notify, wake, notify_state, wake_state, issue FROM background_deliveries')
+            try:
+                rows = execution_rows('SELECT run_id, notify, wake, notify_state, wake_state, issue FROM background_deliveries')
+            except sqlite3.OperationalError:
+                return False  # not migrated yet
             by_id = {r[0]: r for r in rows}
             left = [i for i in copied['pending']
                     if any(enabled and state == 'pending' for enabled, state in ((by_id[i][1], by_id[i][3]), (by_id[i][2], by_id[i][4])))]
