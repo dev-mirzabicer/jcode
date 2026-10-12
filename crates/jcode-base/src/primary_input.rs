@@ -674,6 +674,7 @@ mod tests {
             activate_skill: None,
             observe_startup_context: None,
             client_request_digest: None,
+            arrival: None,
         };
         let accepted = store.accept(input.clone())?;
         assert_eq!(accepted.state, PrimaryInputState::Accepted);

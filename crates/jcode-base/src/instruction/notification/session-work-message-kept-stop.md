@@ -1,0 +1,1 @@
+Mirza sent this message while your stop is declared. Your stop is still in place. Answer in text, or withdraw the stop and continue if that's more appropriate.

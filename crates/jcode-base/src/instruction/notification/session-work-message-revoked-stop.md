@@ -1,0 +1,1 @@
+Mirza sent this message while your stop is declared, and withdrew this stop declaration. You are working again; declare a new stop when you pause.

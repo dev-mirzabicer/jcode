@@ -1,0 +1,1 @@
+Your stop ended: {{alias}} {{event}}. You are working again; declare a new stop when you pause.

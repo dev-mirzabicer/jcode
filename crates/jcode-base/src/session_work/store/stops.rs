@@ -186,6 +186,21 @@ impl SessionWorkStore {
             }
             return Ok((existing, None));
         }
+        // An awaited item can arrive between validation and this commit.
+        // Checked here, in the transaction arrivals also use, a wait never
+        // commits on a condition already met: its arrivals have gone.
+        if let Declaration::Wait { condition, .. } = declaration {
+            let finished = super::arrivals::finished_aliases(&transaction, session)?;
+            if condition.is_met(&|alias| finished.contains(&alias)) {
+                return Err(SessionWorkError::AwaitedFinished(
+                    condition
+                        .aliases()
+                        .into_iter()
+                        .filter(|alias| finished.contains(alias))
+                        .collect(),
+                ));
+            }
+        }
         let replaced = match current_stop(&transaction, session)? {
             Some(mut current) => {
                 current.state = DeclarationState::Withdrawn {
@@ -451,7 +466,7 @@ impl SessionWorkStore {
     }
 }
 
-fn open_turn(
+pub(super) fn open_turn(
     connection: &Connection,
     session: &str,
 ) -> Result<Option<(u32, TurnCounters)>, SessionWorkError> {
@@ -496,7 +511,10 @@ fn write_counters(
     Ok(())
 }
 
-fn stops(connection: &Connection, session: &str) -> Result<Vec<StopRecord>, SessionWorkError> {
+pub(super) fn stops(
+    connection: &Connection,
+    session: &str,
+) -> Result<Vec<StopRecord>, SessionWorkError> {
     let mut statement = connection
         .prepare("SELECT body FROM stops WHERE session=?1 ORDER BY number")
         .map_err(SessionWorkError::corrupt)?;
@@ -507,7 +525,7 @@ fn stops(connection: &Connection, session: &str) -> Result<Vec<StopRecord>, Sess
         .collect()
 }
 
-fn current_stop(
+pub(super) fn current_stop(
     connection: &Connection,
     session: &str,
 ) -> Result<Option<StopRecord>, SessionWorkError> {
@@ -541,7 +559,7 @@ fn read_stop(
         .transpose()
 }
 
-fn write_stop(
+pub(super) fn write_stop(
     connection: &Connection,
     session: &str,
     record: &StopRecord,

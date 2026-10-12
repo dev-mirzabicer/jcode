@@ -28,8 +28,6 @@ pub struct ObservedItem {
     pub running: bool,
 }
 
-const BACKGROUND_REQUEST: &str = "background:";
-
 /// Give every running piece of background work an alias, and report all of
 /// the session's items with their running state. A task's alias and policy
 /// are fixed when it is first seen.
@@ -42,7 +40,7 @@ pub fn observe_items(
     for task in work.iter().filter(|task| task.running) {
         store.observe_item(
             session,
-            &format!("{BACKGROUND_REQUEST}{}", task.task_id),
+            &super::background::request(&task.task_id),
             task.kind,
             &task.label,
             if task.wake {
@@ -57,9 +55,9 @@ pub fn observe_items(
         .items_with_requests(session)?
         .into_iter()
         .map(|(item, request)| {
-            let running = request
-                .strip_prefix(BACKGROUND_REQUEST)
-                .is_some_and(|task| work.iter().any(|w| w.task_id == task && w.running));
+            let running = work
+                .iter()
+                .any(|w| w.running && super::background::request(&w.task_id) == request);
             ObservedItem { item, running }
         })
         .collect())
@@ -213,29 +211,20 @@ pub fn validate(
                     ))));
                 }
             }
+            // An item is finished once its arrival is recorded; until then
+            // the arrival is still to come and will end the wait.
             let finished = |alias: ItemAlias| {
-                items
-                    .iter()
-                    .any(|observed| observed.item.alias == alias && !observed.running)
+                items.iter().any(|observed| {
+                    observed.item.alias == alias && observed.item.finished_at.is_some()
+                })
             };
             if condition.is_met(&finished) {
-                let done: Vec<String> = condition
+                let done: Vec<ItemAlias> = condition
                     .aliases()
                     .into_iter()
                     .filter(|alias| finished(*alias))
-                    .map(|alias| alias.to_string())
                     .collect();
-                return Ok(Err(invalid(if done.len() == 1 {
-                    format!(
-                        "{} already finished, and its result is in your conversation.",
-                        done[0]
-                    )
-                } else {
-                    format!(
-                        "{} already finished, and their results are in your conversation.",
-                        join_and(&done)
-                    )
-                })));
+                return Ok(Err(already_finished(&done)));
             }
             Ok(Ok(()))
         }
@@ -277,6 +266,22 @@ pub fn validate(
     }
 }
 
+/// The refusal of a wait on items whose results already arrived.
+fn already_finished(done: &[ItemAlias]) -> Refusal {
+    let done: Vec<String> = done.iter().map(ToString::to_string).collect();
+    invalid(if done.len() == 1 {
+        format!(
+            "{} already finished, and its result is in your conversation.",
+            done[0]
+        )
+    } else {
+        format!(
+            "{} already finished, and their results are in your conversation.",
+            join_and(&done)
+        )
+    })
+}
+
 /// Handle one `declare_stop` call. `request` is the invocation identity, so
 /// a replayed call converges on its original record.
 #[allow(clippy::too_many_arguments)]
@@ -304,7 +309,13 @@ pub fn declare(
         return Ok(DeclareOutcome::Refused(refusal));
     }
     let (turn, _) = store.begin_turn(session, now)?;
-    let (record, _) = store.declare(session, request, turn, &declaration, now)?;
+    let record = match store.declare(session, request, turn, &declaration, now) {
+        Ok((record, _)) => record,
+        Err(SessionWorkError::AwaitedFinished(done)) => {
+            return Ok(DeclareOutcome::Refused(already_finished(&done)));
+        }
+        Err(error) => return Err(error),
+    };
     let also_running = match &record.declaration {
         Declaration::Wait { condition, .. } => {
             let named = condition.aliases();

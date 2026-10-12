@@ -29,6 +29,26 @@ fn workflow(store: &SessionWorkStore, request: &str, text: &str) {
         .unwrap();
 }
 
+/// Record the arrival of background task `id`'s result.
+fn arrive_task(store: &SessionWorkStore, id: &str, now: DateTime<Utc>) {
+    store
+        .arrive(
+            "s",
+            &format!("arrival-{id}"),
+            &jcode_session_work_types::ArrivalClass::ItemFinished {
+                item: crate::session_work::background::source(
+                    id,
+                    "bash",
+                    &format!("label-{id}"),
+                    true,
+                ),
+            },
+            crate::session_work::arrivals::Activity::Working,
+            now,
+        )
+        .unwrap();
+}
+
 fn input(action: &str) -> DeclareInput {
     DeclareInput {
         action: action.into(),
@@ -192,7 +212,10 @@ fn wait_declarations_validate_aliases_conditions_and_summaries() {
     );
     assert_eq!(store.current_stop("s").unwrap().unwrap().number, 2);
 
-    // A condition already met by finished work is refused.
+    // A condition already met by work whose result arrived is refused.
+    // An item finishes when its arrival is recorded, not when its process
+    // stops: until then its arrival is still to come and ends the wait.
+    arrive_task(&store, "a", at(4));
     let finished = observe_items(
         &store,
         "s",
@@ -609,8 +632,10 @@ fn failures_keep_a_valid_declaration_and_stop_revokes_one_made_in_the_turn() {
             cause: jcode_session_work_types::WithdrawCause::Revoked
         }
     );
-    // A declaration that no longer holds does not survive a failure.
+    // An awaited result that arrives during the declaring turn ends the
+    // declaration, so nothing survives the failure that follows.
     declare_ok(&store, "d3", &wait("t1"), &items);
+    arrive_task(&store, "x", at(5));
     let finished = observe_items(
         &store,
         "s",
@@ -620,10 +645,12 @@ fn failures_keep_a_valid_declaration_and_stop_revokes_one_made_in_the_turn() {
     .unwrap();
     survive_failure(&store, "s", &finished, at(6)).unwrap();
     assert!(store.current_stop("s").unwrap().is_none());
-    assert!(matches!(
+    assert_eq!(
         store.stops("s").unwrap()[2].state,
-        DeclarationState::Invalidated { .. }
-    ));
+        DeclarationState::Withdrawn {
+            cause: jcode_session_work_types::WithdrawCause::AwaitedArrival
+        }
+    );
 }
 
 #[test]
@@ -640,6 +667,9 @@ fn refused_call_exhaustion_keeps_a_valid_declaration() {
         store.current_stop("s").unwrap().unwrap().state,
         DeclarationState::Effective
     );
+    // The awaited result arrives and ends the stop; a later turn whose
+    // refusals run out has no declaration left.
+    arrive_task(&store, "x", at(3));
     let finished = observe_items(
         &store,
         "s",

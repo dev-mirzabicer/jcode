@@ -7,6 +7,9 @@
 use std::path::PathBuf;
 
 pub mod activation;
+pub mod arrivals;
+pub mod background;
+pub mod delivery;
 pub mod module_types;
 pub mod stop;
 pub mod store;
@@ -45,6 +48,8 @@ pub enum SessionWorkError {
     InvalidWorkflow(WorkflowErrors),
     /// The operation is not allowed.
     Invalid(String),
+    /// A wait was declared on items that already arrived.
+    AwaitedFinished(Vec<jcode_session_work_types::ItemAlias>),
 }
 
 impl SessionWorkError {
@@ -79,6 +84,15 @@ impl std::fmt::Display for SessionWorkError {
             Self::Conflict(detail) => write!(f, "Session-work request conflict: {detail}"),
             Self::InvalidWorkflow(errors) => errors.fmt(f),
             Self::Invalid(detail) => f.write_str(detail),
+            Self::AwaitedFinished(aliases) => write!(
+                f,
+                "the wait condition is already met by {}",
+                aliases
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }

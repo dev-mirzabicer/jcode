@@ -11,9 +11,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The schema this build reads and writes. Version 1 stores are upgraded in
-/// place; any other version fails closed.
-pub const SCHEMA_VERSION: u32 = 2;
+/// The schema this build reads and writes. Version 1 and 2 stores are
+/// upgraded in place; any other version fails closed.
+pub const SCHEMA_VERSION: u32 = 3;
 const FILE_NAME: &str = "store.sqlite3";
 const TABLES: &[&str] = &[
     "activation",
@@ -26,6 +26,7 @@ const TABLES: &[&str] = &[
     "stops",
     "turn_counters",
     "turn_outcomes",
+    "arrivals",
 ];
 
 const SCHEMA: &str = "
@@ -111,6 +112,18 @@ CREATE TABLE turn_outcomes(
     at TEXT NOT NULL,
     body TEXT NOT NULL,
     UNIQUE(session, request)
+) STRICT;
+";
+
+/// Version 3: every arrival's recorded route, in arrival order.
+const SCHEMA_V3: &str = "
+CREATE TABLE arrivals(
+    session TEXT NOT NULL REFERENCES activation(session),
+    input TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    body TEXT NOT NULL,
+    PRIMARY KEY(session, input),
+    UNIQUE(session, sequence)
 ) STRICT;
 ";
 
@@ -213,6 +226,9 @@ impl SessionWorkStore {
                     .map_err(SessionWorkError::io)?;
                 transaction
                     .execute_batch(SCHEMA_V2)
+                    .map_err(SessionWorkError::io)?;
+                transaction
+                    .execute_batch(SCHEMA_V3)
                     .map_err(SessionWorkError::io)?;
                 transaction
                     .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -473,59 +489,24 @@ impl SessionWorkStore {
         policy: FinishPolicy,
         now: DateTime<Utc>,
     ) -> Result<SessionItem, SessionWorkError> {
-        if !kind.allocates_numbers() {
-            return Err(SessionWorkError::Invalid(format!(
-                "{kind:?} items are named by their proposal and are not allocated"
-            )));
-        }
         let mut connection = self.open()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(SessionWorkError::io)?;
         require_activation(&transaction, session)?;
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT body FROM items WHERE session=?1 AND request=?2",
-                params![session, request],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(SessionWorkError::corrupt)?;
-        if let Some(body) = existing {
-            let item: SessionItem = decode(&body)?;
-            if item.alias.kind() != kind || item.label != label || item.policy != policy {
-                return Err(SessionWorkError::Conflict(format!(
-                    "request {request} already allocated {} differently",
-                    item.alias
-                )));
-            }
-            return Ok(item);
-        }
-        let kind_key = encode_plain(&kind)?;
-        let number: u32 = transaction
-            .query_row(
-                "SELECT coalesce(max(number), 0) + 1 FROM items WHERE session=?1 AND kind=?2",
-                params![session, kind_key],
-                |row| row.get(0),
-            )
-            .map_err(SessionWorkError::corrupt)?;
-        let item = SessionItem {
-            alias: ItemAlias::new(kind, number)
-                .map_err(|error| SessionWorkError::Corrupt(error.to_string()))?,
-            id: uuid::Uuid::new_v4(),
-            label: label.to_string(),
-            policy,
-            created_at: now,
-            finished_at: None,
-        };
-        transaction
-            .execute(
-                "INSERT INTO items(session, kind, number, request, body) VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![session, kind_key, number, request, encode(&item)?],
-            )
-            .map_err(SessionWorkError::io)?;
+        let item = allocate_in(&transaction, session, request, kind, label, policy, now)?;
         transaction.commit().map_err(SessionWorkError::io)?;
         Ok(item)
+    }
+
+    /// The item a request allocated, if any.
+    pub fn item_for_request(
+        &self,
+        session: &str,
+        request: &str,
+    ) -> Result<Option<SessionItem>, SessionWorkError> {
+        let connection = self.open()?;
+        item_by_request(&connection, session, request)
     }
 
     pub fn item(
@@ -617,6 +598,7 @@ impl SessionWorkStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(SessionWorkError::io)?;
         for table in [
+            "arrivals",
             "stops",
             "turn_counters",
             "turn_outcomes",
@@ -638,6 +620,76 @@ impl Default for SessionWorkStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Allocate an item inside an open transaction. The same request returns its
+/// original item; the same request with another kind, label or policy is a
+/// conflict.
+fn allocate_in(
+    connection: &Connection,
+    session: &str,
+    request: &str,
+    kind: ItemKind,
+    label: &str,
+    policy: FinishPolicy,
+    now: DateTime<Utc>,
+) -> Result<SessionItem, SessionWorkError> {
+    if !kind.allocates_numbers() {
+        return Err(SessionWorkError::Invalid(format!(
+            "{kind:?} items are named by their proposal and are not allocated"
+        )));
+    }
+    if let Some(item) = item_by_request(connection, session, request)? {
+        if item.alias.kind() != kind || item.label != label || item.policy != policy {
+            return Err(SessionWorkError::Conflict(format!(
+                "request {request} already allocated {} differently",
+                item.alias
+            )));
+        }
+        return Ok(item);
+    }
+    let kind_key = encode_plain(&kind)?;
+    let number: u32 = connection
+        .query_row(
+            "SELECT coalesce(max(number), 0) + 1 FROM items WHERE session=?1 AND kind=?2",
+            params![session, kind_key],
+            |row| row.get(0),
+        )
+        .map_err(SessionWorkError::corrupt)?;
+    let item = SessionItem {
+        alias: ItemAlias::new(kind, number)
+            .map_err(|error| SessionWorkError::Corrupt(error.to_string()))?,
+        id: uuid::Uuid::new_v4(),
+        label: label.to_string(),
+        policy,
+        created_at: now,
+        finished_at: None,
+    };
+    connection
+        .execute(
+            "INSERT INTO items(session, kind, number, request, body) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![session, kind_key, number, request, encode(&item)?],
+        )
+        .map_err(SessionWorkError::io)?;
+    Ok(item)
+}
+
+/// The item a request allocated, if any.
+fn item_by_request(
+    connection: &Connection,
+    session: &str,
+    request: &str,
+) -> Result<Option<SessionItem>, SessionWorkError> {
+    connection
+        .query_row(
+            "SELECT body FROM items WHERE session=?1 AND request=?2",
+            params![session, request],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(SessionWorkError::corrupt)?
+        .map(|body| decode(&body))
+        .transpose()
 }
 
 fn require_activation(connection: &Connection, session: &str) -> Result<(), SessionWorkError> {
@@ -800,7 +852,7 @@ fn upgrade(mut connection: Connection) -> Result<Connection, SessionWorkError> {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(SessionWorkError::corrupt)?;
-    if version != 1 {
+    if !matches!(version, 1 | 2) {
         return Ok(connection);
     }
     let transaction = connection
@@ -812,6 +864,11 @@ fn upgrade(mut connection: Connection) -> Result<Connection, SessionWorkError> {
     if version == 1 {
         transaction
             .execute_batch(SCHEMA_V2)
+            .map_err(SessionWorkError::io)?;
+    }
+    if matches!(version, 1 | 2) {
+        transaction
+            .execute_batch(SCHEMA_V3)
             .map_err(SessionWorkError::io)?;
         transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -944,6 +1001,7 @@ fn parse_status(text: &str) -> Result<ModuleStatus, SessionWorkError> {
         .map_err(SessionWorkError::corrupt)
 }
 
+mod arrivals;
 mod stops;
 pub use stops::{GateRecord, TurnCounters};
 

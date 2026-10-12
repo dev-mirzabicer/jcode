@@ -47,6 +47,25 @@ pub(super) fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskS
         RunState::Failed => Some("Execution failed; inspect the retained output".to_string()),
         _ => None,
     };
+    // In a session with session work the result always reaches the agent;
+    // whether it wakes the session is its item's policy.
+    let wake = match crate::session_work::background::item(&record.session_id, id) {
+        Ok(Some(item)) => item.policy == jcode_session_work_types::FinishPolicy::Wake,
+        _ => delivery.wake,
+    };
+    let undeliverable = [delivery.notify_state, delivery.wake_state]
+        .contains(&crate::execution::DeliveryState::Undeliverable)
+        .then(|| BackgroundTaskEventRecord {
+            kind: BackgroundTaskEventKind::DeliveryUpdated,
+            timestamp: completed_at.clone().unwrap_or_else(|| started_at.clone()),
+            message: Some(format!(
+                "Undeliverable: {}",
+                delivery.issue.as_deref().unwrap_or("the recipient is gone")
+            )),
+            status: None,
+            exit_code: None,
+            progress: None,
+        });
     Ok(Some(TaskStatusFile {
         task_id: id.into(),
         tool_name: record.tool,
@@ -68,28 +87,29 @@ pub(super) fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskS
         owner_instance: Some(record.owner),
         detached: false,
         notify: delivery.notify,
-        wake: delivery.wake,
+        wake,
         progress: record
             .progress
             .as_ref()
             .map(|progress| progress.value.clone()),
         event_history: record
             .progress
-            .map(|progress| {
-                vec![BackgroundTaskEventRecord {
-                    kind: if progress.checkpoint {
-                        BackgroundTaskEventKind::Checkpoint
-                    } else {
-                        BackgroundTaskEventKind::Progress
-                    },
-                    timestamp: progress.value.updated_at.clone(),
-                    message: progress.value.message.clone(),
-                    status: None,
-                    exit_code: None,
-                    progress: Some(progress.value),
-                }]
+            .map(|progress| BackgroundTaskEventRecord {
+                kind: if progress.checkpoint {
+                    BackgroundTaskEventKind::Checkpoint
+                } else {
+                    BackgroundTaskEventKind::Progress
+                },
+                timestamp: progress.value.updated_at.clone(),
+                message: progress.value.message.clone(),
+                status: None,
+                exit_code: None,
+                progress: Some(progress.value),
             })
-            .unwrap_or_default(),
+            .into_iter()
+            // A terminal undeliverable result stays visible on its task.
+            .chain(undeliverable)
+            .collect(),
     }))
 }
 
@@ -148,8 +168,22 @@ impl BackgroundTaskManager {
                 record.tool == scope.0 && record.session_id == scope.1,
                 "Controlled task does not match its invocation"
             );
-            let (_, created) =
-                store.register_background_delivery(&saved, delivery.0, delivery.1)?;
+            // In a session with session work the result always reaches the
+            // agent; its item, allocated now, keeps the requested wake or
+            // hold policy for the arrival rule.
+            let session_work = crate::session_work::background::start(
+                &record.session_id,
+                &saved,
+                &record.tool,
+                &background_label(&store, &saved, &record.tool),
+                delivery.1,
+            )?
+            .is_some();
+            let (_, created) = store.register_background_delivery(
+                &saved,
+                delivery.0,
+                delivery.1 || session_work,
+            )?;
             let directory = store.root().join("background");
             crate::storage::ensure_dir(&directory)?;
             ensure!(
@@ -409,6 +443,23 @@ impl BackgroundTaskManager {
             ),
         }
     }
+}
+
+/// A background item's label: the invocation's stated intent, else its tool.
+fn background_label(store: &ExecutionStore, id: &str, tool: &str) -> String {
+    store
+        .invocation_input(id)
+        .ok()
+        .and_then(|invocation| {
+            invocation
+                .input
+                .get("intent")
+                .and_then(serde_json::Value::as_str)
+                .map(|intent| intent.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .filter(|intent| !intent.is_empty())
+        .map(|intent| crate::util::truncate_str(&intent, 80).to_string())
+        .unwrap_or_else(|| tool.to_string())
 }
 
 fn persist_projection(store: &ExecutionStore, status: &TaskStatusFile) -> Result<()> {

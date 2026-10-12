@@ -52,10 +52,14 @@ impl ExecutionStore {
             "Receipt directory changed type"
         );
         let path = directory.join(format!("{id}.accepted.json"));
-        let body = format!(
+        let mut body = format!(
             "Background execution accepted. Run: {id}\nUse bg status, wait, output or cancel with task_id=\"{id}\". Completion is a separate outcome.\nReceipt: {}",
             path.display()
         );
+        // A session with session work names the item its result arrives as.
+        if let Some(item) = crate::session_work::background::item(&record.session_id, id)? {
+            body.push_str(&format!("\nAlias: {}", item.alias));
+        }
         let mut output=ToolOutput::new(body).with_metadata(serde_json::json!({"background":true,"task_id":id,"run_id":id,"output_file":record.output_path}));
         if let Some(child) = child {
             let registered: Option<String> = transaction
