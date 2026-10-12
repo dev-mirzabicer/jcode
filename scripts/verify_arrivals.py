@@ -375,6 +375,12 @@ def requests_with(marker):
     return [r for r in captured if any(marker in text_of(m) for m in r['messages'])]
 
 
+def first_request_with(marker):
+    """The first provider request carrying `marker`. An input is committed
+    before the request that carries it is sent, so wait for it."""
+    return wait(lambda: (requests_with(marker) or [None])[0], f'request with {marker}', 60)
+
+
 def tool_text(request, needle):
     return next((text_of(m) for m in request['messages'] if m.get('role') == 'tool' and needle in text_of(m)), '')
 
@@ -440,19 +446,47 @@ def prepare_copied_store():
             'delivered': sorted((r[0], r[5], r[6]) for r in rows)}
 
 
+def start_daemon(seconds=180):
+    """Start the fixture daemon. The first launch of a freshly copied binary
+    can take far longer than the shared helper's 30 s (executable scanning,
+    machine load), so this waits longer and records how long it took."""
+    started = time.monotonic()
+    f.proc = subprocess.Popen(f.args, env=f.env, stdout=f.log, stderr=f.log)
+    deadline = started + seconds
+    while True:
+        if f.proc.poll() is not None:
+            raise RuntimeError('daemon exited: ' + (f.ROOT / 'server.log').read_text(errors='replace')[-3000:])
+        client = socket.socket(socket.AF_UNIX)
+        client.settimeout(30)
+        try:
+            client.connect(str(f.sockpath))
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            client.close()
+            if time.monotonic() > deadline:
+                f.proc.kill()
+                raise
+            time.sleep(0.1)
+    f.client, f.reader = client, client.makefile('rb')
+    result.setdefault('startup_seconds', []).append(round(time.monotonic() - started, 1))
+
+
 def stop_daemon():
     for channel_ in list(channels):
         close(channel_)
-    f.reader.close(); f.client.close()
+    if f.reader is not None:
+        f.reader.close(); f.client.close()
+        f.reader = f.client = None
     listening = subprocess.run(['lsof', '-t', str(f.sockpath)], capture_output=True, text=True).stdout.split()
-    for pid in {int(pid) for pid in listening} - {f.proc.pid}:
+    for pid in {int(pid) for pid in listening} - {f.proc.pid if f.proc else None}:
         os.kill(pid, signal.SIGTERM)
-    f.proc.terminate(); f.proc.wait(timeout=60)
+    if f.proc is not None and f.proc.poll() is None:
+        f.proc.terminate(); f.proc.wait(timeout=60)
 
 
 try:
     copied = prepare_copied_store() if REAL_STORE.exists() else None
-    f.start(); admin = connect()
+    start_daemon(); admin = connect()
     seed = connect()
     assert rpc(seed, 'subscribe', until={'done', 'error'}, working_dir=str(root), selfdev=False)['type'] == 'done'
     close(seed)
@@ -530,10 +564,16 @@ try:
     assert len(captured) == requests_before, 'the restart delivered nothing'
     nxt, _ = submit(quiet, 'TAG:A-NEXT')
     wait(lambda: committed(quiet, nxt), 'A-NEXT committed')
-    wake_request = requests_with('TAG:A-NEXT')[0]
+    wake_request = first_request_with('TAG:A-NEXT')
     assert ordered(wake_request['messages'], ['TAG:A-HOLD', lead('session-work-held-item-stopped'), 't1 (quiet job)', 'TAG:A-NEXT'])
     assert committed(quiet, held['input'])
     result['completed_hold_restart'] = {'reload_exit': restarted.returncode}
+    # A reloaded fixture daemon keeps existing sessions' routes but not the
+    # fixture's command-line provider profile for new sessions; start it again
+    # with its arguments.
+    stop_daemon()
+    wait(lambda: not daemon_ready(), 'daemon stopped', 60)
+    start_daemon(); admin = connect()
 
     # 4. Waiting and detached.
     waiting, waiting_channel = new_placed_session()
@@ -548,7 +588,7 @@ try:
     t1 = wait(lambda: arrival_of_item(waiting, 't1'), 't1 arrives', 60)
     assert t1['route'] == {'route': 'ends_stop', 'stop': 1}, t1
     wait(lambda: committed(waiting, note), 'B note delivered')
-    wake_request = requests_with('TAG:B-NOTE')[0]
+    wake_request = first_request_with('TAG:B-NOTE')
     assert ordered(wake_request['messages'], [
         lead('session-work-held-item-waiting'), 't2 (short job)', lead('session-work-held-message-waiting'),
         'TAG:B-NOTE', lead('session-work-stop-ended'), 't1 '])
@@ -562,17 +602,19 @@ try:
     wait(lambda: outcomes(disposed) and outcomes(disposed)[-1]['outcome'] == 'waiting', 'C waiting')
     keep, _ = submit(disposed, 'TAG:C-KEEP', arrival={'class': 'human', 'disposition': 'send_keep_stop'})
     wait(lambda: committed(disposed, keep), 'kept message delivered')
-    keep_request = requests_with('TAG:C-KEEP')[0]
+    keep_request = first_request_with('TAG:C-KEEP')
     assert ordered(keep_request['messages'], [resource('notifications/session-work-message-kept-stop.md'), 'TAG:C-KEEP'])
     assert current_stop(disposed)['number'] == 1, stops(disposed)
     queued, queued_receipt = submit(disposed, 'TAG:C-QUEUED')
-    assert queued_receipt['issue'] == 'Held: the session is waiting on t1.', queued_receipt
+    # A next-turn message sent while the kept-stop turn is still running is
+    # decided when that turn ends.
+    wait(lambda: inspect(disposed, queued)['issue'] == 'Held: the session is waiting on t1.', 'C-QUEUED held')
     time.sleep(3)
     assert inspect(disposed, queued)['state'] == 'accepted' and not requests_with('TAG:C-QUEUED'), 'held'
     disposed_event = rpc(admin, 'primary_input_dispose', session=disposed, input=queued, disposition='revoke_and_send')
     assert disposed_event['type'] == 'primary_input_receipt', disposed_event
     wait(lambda: committed(disposed, queued), 'revoked message delivered')
-    queued_request = requests_with('TAG:C-QUEUED')[0]
+    queued_request = first_request_with('TAG:C-QUEUED')
     assert ordered(queued_request['messages'], [resource('notifications/session-work-message-revoked-stop.md'), 'TAG:C-QUEUED'])
     assert stops(disposed)[0]['state'] == {'state': 'withdrawn', 'cause': 'revoked'}, stops(disposed)
     result['dispositions'] = True
@@ -602,7 +644,7 @@ try:
     assert len(captured) == requests_before
     after_id, _ = submit(stopped, 'TAG:E-AFTER')
     wait(lambda: committed(stopped, after_id), 'E-AFTER delivered')
-    assert ordered(requests_with('TAG:E-AFTER')[0]['messages'],
+    assert ordered(first_request_with('TAG:E-AFTER')['messages'],
                    [lead('session-work-held-item-stopped'), 't1 (stopped job)', 'TAG:E-AFTER'])
     result['stopped'] = True
 
@@ -623,7 +665,7 @@ try:
     if f.proc.poll() is None and f.proc.pid in pids:
         f.proc.wait(timeout=30)
     (f.ROOT / 'release-crash').write_text('release')
-    f.start(); admin = connect()
+    start_daemon(); admin = connect()
     items = wait(lambda: [i for i in unresolved_recoveries() if i['session'] == crashed], 'recovery item', 60)
     notice, _ = submit(crashed, 'TAG:G-NOTICE', delivery='safe_boundary', origin=None)
     requests_before = len(captured)
@@ -633,7 +675,7 @@ try:
         'request': 'question:fixture', 'kind': 'question', 'label': 'fixture question', 'policy': 'wake'}})
     wait(lambda: committed(crashed, answer), 'the answer passes the recovery gate')
     assert not [i for i in unresolved_recoveries() if i['session'] == crashed], 'the answer resolved recovery'
-    assert ordered(requests_with('TAG:G-ANSWER')[0]['messages'],
+    assert ordered(first_request_with('TAG:G-ANSWER')['messages'],
                    [lead('session-work-held-notice-stopped'), 'TAG:G-NOTICE', 'TAG:G-ANSWER'])
     result['crash'] = {'recovery_items': len(items)}
 
