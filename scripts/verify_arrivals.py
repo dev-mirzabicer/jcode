@@ -157,7 +157,7 @@ def script(request):
                      {'content': 'B finished.'})
     if tag == 'C-WAIT':
         return steps([lambda: call('write', {'file_path': path, 'content': UNFINISHED}),
-                      lambda: bash_bg(600, True, 'very long job'),
+                      lambda: bash_bg(120, True, 'very long job'),
                       lambda: call('declare_stop', {'action': 'wait', 'condition': 't1', 'summary': 'Waiting on C'})],
                      {'content': 'Waiting on C.'})
     if tag == 'C-KEEP':
@@ -508,6 +508,16 @@ def stop_daemon():
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    # Native command workers outlive their daemon by design; the fixture's own
+    # (the candidate binary, working in this fixture) are stopped too.
+    for pid in subprocess.run(['pgrep', '-f', f.BIN + ' __jcode-command-worker'],
+                              capture_output=True, text=True).stdout.split():
+        cwd = subprocess.run(['lsof', '-a', '-p', pid, '-d', 'cwd', '-Fn'], capture_output=True, text=True).stdout
+        if str(f.ROOT) in cwd:
+            try:
+                os.killpg(int(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                os.kill(int(pid), signal.SIGKILL)
 
 
 try:
