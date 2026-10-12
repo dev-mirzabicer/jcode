@@ -298,6 +298,9 @@ def turn(session, text, expected_requests=None, outcomes_after=None):
     wait(lambda: settled(session, input_id), f'{text}: input settled')
     expected = recorded + 1 if outcomes_after is None else outcomes_after
     wait(lambda: len(outcomes(session)) >= expected, f'{text}: outcome recorded')
+    # An input is committed before the request that carries it is sent.
+    if expected_requests is not None:
+        wait(lambda: len(captured) >= before + expected_requests, f'{text}: provider requests')
     time.sleep(1.0)
     if expected_requests is not None:
         assert len(captured) == before + expected_requests, (text, len(captured) - before)
