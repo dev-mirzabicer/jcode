@@ -15,6 +15,7 @@ jcode-plan = { path = "../jcode-plan" }
 jcode-provider-core = { path = "../jcode-provider-core" }
 jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-session-types = { path = "../jcode-session-types" }
+jcode-session-work-types = { path = "../jcode-session-work-types" }
 jcode-task-types = { path = "../jcode-task-types" }
 jcode-side-panel-types = { path = "../jcode-side-panel-types" }
 chrono = { version = "0.4", features = ["serde"] }

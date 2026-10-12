@@ -1,5 +1,5 @@
-//! Public session-work types: item aliases, the workflow model, session
-//! activation records and the contract versions clients negotiate.
+//! Public session-work types: item aliases, the workflow model, arrivals,
+//! session activation records and the contract versions clients negotiate.
 //!
 //! The authority for every fact lives in `jcode-base::session_work`. These
 //! types describe that state to the runtime, its clients and later adapters;
@@ -7,12 +7,14 @@
 use serde::{Deserialize, Serialize};
 
 mod activation;
+mod arrivals;
 mod correlation;
 mod items;
 mod stop;
 mod workflow;
 
 pub use activation::*;
+pub use arrivals::*;
 pub use correlation::*;
 pub use items::*;
 pub use stop::*;

@@ -315,6 +315,7 @@ fn scheduled_live_delivery_uses_notify_without_a_provisional_subscription() -> R
                             context_scope_version: None,
                             session_inspection_version: None,
                             session_placement_version: None,
+                            arrival_version: None,
                         },
                     )
                     .as_bytes(),
@@ -355,6 +356,7 @@ fn scheduled_live_delivery_uses_notify_without_a_provisional_subscription() -> R
         });
         AmbientRunnerHandle::notify_live_session(
             "fixture-schedule",
+            "synthetic label",
             "detached-synthetic",
             "scheduled adapter fixture",
             None,

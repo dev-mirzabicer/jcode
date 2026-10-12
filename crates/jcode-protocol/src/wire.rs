@@ -77,6 +77,15 @@ pub enum Request {
         session: String,
         input: jcode_workspace_types::RequestId,
     },
+    /// Mirza chose how to send a message the session-work arrival rule
+    /// held during a declared stop. Replies with its receipt.
+    #[serde(rename = "primary_input_dispose")]
+    PrimaryInputDispose {
+        id: u64,
+        session: String,
+        input: jcode_workspace_types::RequestId,
+        disposition: jcode_session_work_types::HumanDisposition,
+    },
     #[serde(rename = "primary_location")]
     PrimaryLocation {
         id: u64,
@@ -1234,6 +1243,9 @@ pub enum ServerEvent {
         /// `propose_placement` and `place` for an unplaced Session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_placement_version: Option<u32>,
+        /// Arrival classes and human dispositions on primary input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arrival_version: Option<u32>,
     },
     #[serde(rename = "scoped_context_created")]
     ScopedContextCreated {

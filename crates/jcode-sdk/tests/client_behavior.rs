@@ -1204,7 +1204,7 @@ fn durable_primary_controls_negotiate_and_validate_receipt_identity() {
                 issue: None,
             };
             let event=match &frame.request {
-            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false,legacy_adoption_version:None,context_scope_version:None,session_inspection_version:None,session_placement_version:None},
+            ApiRequest::PrimaryControlProbe=>ApiEvent::PrimaryControlCapabilities{input_version:1,location_version:1,location_enabled:false,legacy_adoption_version:None,context_scope_version:None,session_inspection_version:None,session_placement_version:None,arrival_version:None},
             ApiRequest::PrimaryInput{input}=>{assert_eq!(**input,original);ApiEvent::PrimaryInputReceipt{receipt}},
             ApiRequest::PrimaryInputInspect{..}=>ApiEvent::PrimaryInputReceipt{receipt},
             ApiRequest::PrimaryInputRead{..}=>ApiEvent::PrimaryInputDetail{receipt,input:Box::new(original.clone())},
@@ -1265,6 +1265,7 @@ fn legacy_adoption_requires_negotiation_and_correlates_the_exact_session() {
                         context_scope_version: None,
                         session_inspection_version: None,
                         session_placement_version: None,
+                        arrival_version: None,
                     },
                     ApiRequest::PrimaryLocation { command } => {
                         assert_eq!(version, Some(1), "Unsupported adoption must not be sent");
@@ -1311,6 +1312,7 @@ fn scoped_contexts_negotiate_review_and_validate_destination() {
                         context_scope_version: version,
                         session_inspection_version: None,
                         session_placement_version: None,
+                        arrival_version: None,
                     },
                     ApiRequest::GrantCarryReview { session } => {
                         assert_eq!(version, Some(1));
@@ -1660,6 +1662,7 @@ fn session_location_inspection_requires_its_negotiated_version() {
                         context_scope_version: None,
                         session_inspection_version: version,
                         session_placement_version: None,
+                        arrival_version: None,
                     },
                     writer,
                 ),
@@ -1713,6 +1716,7 @@ fn placement_review_requires_its_negotiated_version_and_exact_session() {
                         context_scope_version: None,
                         session_inspection_version: None,
                         session_placement_version: version,
+                        arrival_version: None,
                     },
                     writer,
                 ),

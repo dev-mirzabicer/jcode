@@ -3847,6 +3847,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-selfdev-types",
  "jcode-session-types",
+ "jcode-session-work-types",
  "jcode-side-panel-types",
  "jcode-task-types",
  "jcode-tool-types",
@@ -4254,6 +4255,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "jcode-message-types",
+ "jcode-session-work-types",
  "jcode-workspace-types",
  "memchr",
  "serde",

@@ -44,6 +44,9 @@ pub enum ApiEvent {
         /// `propose_placement` and `place` for an unplaced Session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_placement_version: Option<u32>,
+        /// Arrival classes and human dispositions on primary input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arrival_version: Option<u32>,
     },
     GrantCarryReview {
         review: crate::GrantCarryReview,

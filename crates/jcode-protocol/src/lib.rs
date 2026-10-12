@@ -635,6 +635,7 @@ impl Request {
             Request::PrimaryStreamSubscribe { id }
             | Request::PrimaryInput { id, .. }
             | Request::PrimaryInputInspect { id, .. }
+            | Request::PrimaryInputDispose { id, .. }
             | Request::PrimaryLocation { id, .. }
             | Request::PrimaryControlProbe { id }
             | Request::PrimaryInputRead { id, .. }
