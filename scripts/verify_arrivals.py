@@ -28,6 +28,8 @@ scripts/run_isolated_test.py. With features.session_work on:
      message wakes the session with the held result first.
   8. Crashed. After an unexpected exit an automatic notice waits and an
      answer passes the recovery gate as human input.
+  9. Sub-agent. A background sub-agent run gets its c alias; its result ends
+     a wait on it and wakes the parent.
 
 Prose is never asserted: texts are located through the seeded resources.
 Run: python3 scripts/run_isolated_test.py python3 scripts/verify_arrivals.py --binary <candidate>
@@ -126,10 +128,17 @@ def script(request):
     tools = {tool['function']['name'] for tool in request.get('tools', [])}
     if not tools:
         return {'content': 'Synthetic summary.'}
+    path = workflow_path(messages)
+    if 'subagent' not in tools and any('CHILD-TASK' in text_of(m) for m in messages if m.get('role') == 'user'):
+        done = sum(1 for m in messages if m.get('role') == 'tool')
+        if done == 0:
+            time.sleep(4)  # the parent declares its wait before the child finishes
+        child = [lambda: call('write', {'file_path': path, 'content': DONE}),
+                 lambda: call('declare_stop', {'action': 'complete', 'summary': 'Child done'})]
+        return child[done]() if done < len(child) else {'content': 'CHILD DONE'}
     index, tag = anchor(messages)
     if index is None:
         return {'content': 'Synthetic answer'}
-    path = workflow_path(messages)
     ended = after(messages, index, lead('session-work-stop-ended'))
     done = tool_results_after(messages, index if ended is None else ended)
     def steps(sequence, final):
@@ -180,6 +189,17 @@ def script(request):
         return {'content': 'E after.'}
     if tag == 'G-CRASH':
         return ('hold', 'crash', {'content': 'late'})
+    if tag == 'K-CHILD':
+        if ended is None:
+            return steps([lambda: call('write', {'file_path': path, 'content': UNFINISHED}),
+                          lambda: call('subagent', {'agent': 'fixture', 'model_alias': 'fixture', 'permission': 'read_only',
+                                                    'preset': 'fixture', 'prompt': 'CHILD-TASK', 'disable_startup_context': True,
+                                                    'run_in_background': True, 'wake': True, 'intent': 'child job'}),
+                          lambda: call('declare_stop', {'action': 'wait', 'condition': 'c1', 'summary': 'Waiting on the child'})],
+                         {'content': 'Waiting on the child.'})
+        return steps([lambda: call('write', {'file_path': path, 'content': DONE}),
+                      lambda: call('declare_stop', {'action': 'complete', 'summary': 'K done'})],
+                     {'content': 'K finished.'})
     if tag in ('G-ANSWER', 'G-NOTICE'):
         return {'content': 'G answered.'}
     return {'content': 'Synthetic answer'}
@@ -568,6 +588,11 @@ try:
     assert rpc(seed, 'subscribe', until={'done', 'error'}, working_dir=str(root), selfdev=False)['type'] == 'done'
     close(seed)
     wait(lambda: (f.home / 'instructions' / 'agents').is_dir(), 'seeded instruction store')
+    instructions = f.home / 'instructions'
+    (instructions / 'agents/fixture.md').write_text('---\nid: fixture\nkind: agent\nname: Fixture\ndescription: Synthetic native fixture\navailability: both\n---\nSYNTHETIC PROFILE')
+    (instructions / 'model-roster.toml').write_text('[aliases.fixture]\ndescription="Synthetic local alias"\nmodels=["wp09-fixture:fixture"]\n')
+    (instructions / 'notifications/task-preset.fixture.md').write_text(
+        '---\nid: task-preset.fixture\nkind: notification\nname: Fixture\ndescription: Synthetic preset\n---\nSYNTHETIC PRESET')
     ws('initialize', request=str(uuid.uuid4()))
     review = ws('review', expected_revision=ws('status')['revision'], change={
         'action': 'register_location', 'name': 'work', 'path': str(root), 'registration': {'kind': 'standalone'}})
@@ -728,6 +753,22 @@ try:
     assert ordered(first_request_with('TAG:G-ANSWER')['messages'],
                    [lead('session-work-held-notice-stopped'), 'TAG:G-NOTICE', 'TAG:G-ANSWER'])
     result['crash'] = {'recovery_items': len(items)}
+
+    # 9. A background sub-agent run ends a wait on it.
+    parent, _ = new_placed_session()
+    submit(parent, 'TAG:K-CHILD')
+    wait(lambda: outcomes(parent) and outcomes(parent)[-1]['outcome'] in ('waiting', 'completed'), 'K waiting', 180)
+    spawned = first_request_with('TAG:K-CHILD')
+    child_receipt = next((text_of(m) for r in requests_with('TAG:K-CHILD') for m in r['messages']
+                          if m.get('role') == 'tool' and 'Alias: c1' in text_of(m)), '')
+    assert child_receipt, 'the background child receipt names c1'
+    ended = wait(lambda: arrival_of_item(parent, 'c1'), 'child result arrives', 180)
+    assert ended['route'] in ({'route': 'ends_stop', 'stop': 1}, {'route': 'deliver'}), ended
+    wait(lambda: outcomes(parent)[-1] == {'outcome': 'completed', 'declared': True}, 'K completes', 180)
+    if ended['route'] == {'route': 'ends_stop', 'stop': 1}:
+        assert any(lead('session-work-stop-ended') in text_of(m) and 'c1' in text_of(m)
+                   for r in requests_with('TAG:K-CHILD') for m in r['messages'])
+    result['subagent'] = ended['route']
 
     assert not failures, failures
     result['status'] = 'passed'

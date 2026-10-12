@@ -147,4 +147,31 @@ mod tests {
             None => crate::env::remove_var("JCODE_HOME"),
         }
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_snapshot_that_cannot_be_checked_is_not_reported_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("test home");
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let sessions = home.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        std::fs::write(sessions.join("present.json"), b"{}").expect("snapshot");
+        assert!(session_snapshot_exists("present").unwrap());
+        assert!(!session_snapshot_exists("absent").unwrap());
+        // An unreadable directory is a temporary failure, never absence: a
+        // delivery to it is retried rather than settled as undeliverable.
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000))
+            .expect("lock sessions dir");
+        let checked = session_snapshot_exists("present");
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock sessions dir");
+        assert!(checked.is_err(), "{checked:?}");
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
 }
