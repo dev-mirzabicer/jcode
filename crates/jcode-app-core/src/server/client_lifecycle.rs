@@ -606,6 +606,29 @@ pub(super) async fn handle_client_with_instruction_repositories(
                     write_direct_event(&writer, &event).await?;
                     continue;
                 }
+                if let Request::PrimaryInputDispose {
+                    id,
+                    session,
+                    input,
+                    disposition,
+                } = &request
+                {
+                    let event = match super::live_turn::dispose_primary_input(
+                        &sessions,
+                        session,
+                        *input,
+                        *disposition,
+                    ) {
+                        Ok(receipt) => ServerEvent::PrimaryInputReceipt { id: *id, receipt },
+                        Err(error) => ServerEvent::Error {
+                            id: *id,
+                            message: format!("{error:#}"),
+                            retry_after_secs: None,
+                        },
+                    };
+                    write_direct_event(&writer, &event).await?;
+                    continue;
+                }
                 if let Request::PrimaryClientInputsCancel {
                     id,
                     session,
@@ -3742,6 +3765,13 @@ pub(super) async fn handle_client_with_instruction_repositories(
                 };
                 let _ = client_event_tx.send(event);
             }
+            Request::PrimaryInputDispose { id, session, input, disposition } => {
+                let event = match super::live_turn::dispose_primary_input(&sessions, &session, input, disposition) {
+                    Ok(receipt) => ServerEvent::PrimaryInputReceipt { id, receipt },
+                    Err(error) => ServerEvent::Error { id, message: format!("{error:#}"), retry_after_secs: None },
+                };
+                let _ = client_event_tx.send(event);
+            }
             Request::PrimaryInputInspect { id, session, input } => {
                 let event = match crate::primary_input::PrimaryInputStore::current().inspect(&session, input) {
                     Ok(receipt) => ServerEvent::PrimaryInputReceipt { id, receipt },
@@ -4863,6 +4893,7 @@ fn primary_control_read(request: &Request) -> Option<ServerEvent> {
             context_scope_version: Some(1),
             session_inspection_version: Some(1),
             session_placement_version: Some(1),
+            arrival_version: Some(jcode_session_work_types::ARRIVAL_VERSION),
         }),
         Request::PrimaryInputRead { id, session, input } => {
             let result = (|| -> Result<_> {
@@ -5053,6 +5084,41 @@ async fn start_processing_message(
         Some(client_event_tx.clone()),
     );
     let tx = output.tx.clone();
+    // A session with session work decides the message's arrival before any
+    // effect: a message the arrival rule holds stays durable for the
+    // session's next wake and starts no turn.
+    if admission.agent.has_session_work() {
+        let held = accept_processing_input(&admission.agent, &message).and_then(|()| {
+            let input = crate::primary_input::PrimaryInputStore::current()
+                .original(client_session_id, message.input_id)?
+                .context("Accepted primary input disappeared")?;
+            let record = crate::session_work::delivery::arrive(
+                client_session_id,
+                &input,
+                crate::session_work::arrivals::Activity::Idle,
+            )?;
+            Ok(!crate::session_work::arrivals::deliverable(&record))
+        });
+        match held {
+            Ok(false) => {}
+            Ok(true) => {
+                // Held: accepted and durable, with its held diagnostic on
+                // the receipt; the session's next wake delivers it.
+                drop(admission);
+                let _ = client_event_tx.send(ServerEvent::Ack { id });
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+                return;
+            }
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("{error:#}"),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        }
+    }
     if let Some(skill) = message.activate_skill.as_deref() {
         match admission.agent.activate_skill(skill) {
             Ok(activation) => {

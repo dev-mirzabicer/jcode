@@ -341,6 +341,9 @@ pub struct Agent {
     pub(crate) primary_owner: Option<Arc<crate::primary::PrimaryLease>>,
     pub(crate) primary_presentation: Option<Arc<crate::primary::presentation::Presentation>>,
     pub(crate) pending_primary_input: Option<jcode_session_types::PrimaryInputEnvelope>,
+    /// The session-work arrival note committed just before the pending
+    /// primary input: a held note, the end of a stop, or a kept-stop prefix.
+    pub(crate) pending_arrival_lead: Option<String>,
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
@@ -442,6 +445,7 @@ impl Agent {
             primary_owner: None,
             primary_presentation: None,
             pending_primary_input: None,
+            pending_arrival_lead: None,
             provider,
             registry,
             skills,
@@ -1008,6 +1012,7 @@ impl Agent {
 
     fn reset_runtime_state_for_session_change(&mut self) {
         self.pending_primary_input = None;
+        self.pending_arrival_lead = None;
         self.last_upstream_provider = None;
         self.last_connection_type = None;
         self.last_status_detail = None;
@@ -1171,6 +1176,11 @@ impl Agent {
         self.tool_call_ids.clear();
         self.tool_result_ids.clear();
         self.tool_output_scan_index = 0;
+    }
+
+    /// Whether this session was created with session work.
+    pub(crate) fn has_session_work(&self) -> bool {
+        self.session.session_work.is_some()
     }
 
     pub fn session_id(&self) -> &str {
@@ -1573,6 +1583,9 @@ impl crate::context::RequestPrefixSource for Agent {
     }
 }
 
+#[cfg(test)]
+#[path = "agent/arrival_tests.rs"]
+mod arrival_tests;
 #[cfg(test)]
 #[path = "agent/session_work_tests.rs"]
 mod session_work_tests;

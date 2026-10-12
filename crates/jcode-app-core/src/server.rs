@@ -42,7 +42,7 @@ mod headless;
 mod jade_relay;
 mod lifecycle;
 mod live_turn;
-pub(crate) use live_turn::{LiveTurnSwarmContext, ensure_primary_input_delivery};
+pub(crate) use live_turn::{LiveTurnSwarmContext, ensure_primary_input_delivery, idle_deliverable};
 mod notification;
 mod primary_output;
 pub(crate) mod primary_stdin;

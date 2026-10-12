@@ -211,7 +211,16 @@ impl Agent {
                     .filter(|input| {
                         input.delivery == jcode_session_types::PrimaryInputDelivery::SafeBoundary
                     })
-                    .any(|input| input.urgent)
+                    .filter(|input| input.urgent)
+                    // Held input does not interrupt: the arrival rule keeps it.
+                    .any(|input| {
+                        self.session.session_work.is_none()
+                            || crate::session_work::delivery::any_deliverable(
+                                self.session_id(),
+                                std::slice::from_ref(input),
+                            )
+                            .unwrap_or(false)
+                    })
             })
             || self
                 .soft_interrupt_queue

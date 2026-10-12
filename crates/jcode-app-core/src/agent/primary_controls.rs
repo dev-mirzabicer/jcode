@@ -24,6 +24,16 @@ impl Agent {
         );
         self.apply_primary_location_changes().await?;
         self.session.require_published_primary()?;
+        match self.begin_arrival_turn(&input, None) {
+            Ok(true) => {}
+            // Held by the arrival rule: it stays durable for the next wake.
+            Ok(false) => return Ok(String::new()),
+            Err(error) => {
+                self.pending_arrival_lead = None;
+                store.fail(self.session_id(), input.id, format!("{error:#}"))?;
+                return Err(error);
+            }
+        }
         self.pending_primary_input = Some(input.clone());
         let result = self
             .run_capture_context(
@@ -34,6 +44,7 @@ impl Agent {
             )
             .await;
         self.pending_primary_input = None;
+        self.pending_arrival_lead = None;
         if let Err(error) = &result {
             store.fail(self.session_id(), input.id, format!("{error:#}"))?;
         }
@@ -93,6 +104,18 @@ impl Agent {
                 source: activation.source.kind.to_string(),
             });
         }
+        if input.delivery != jcode_session_types::PrimaryInputDelivery::ContextOnly {
+            match self.begin_arrival_turn(&input, Some(&event_tx)) {
+                Ok(true) => {}
+                // Held by the arrival rule: it stays durable for the next wake.
+                Ok(false) => return Ok(()),
+                Err(error) => {
+                    self.pending_arrival_lead = None;
+                    store.fail(self.session_id(), input.id, format!("{error:#}"))?;
+                    return Err(error);
+                }
+            }
+        }
         self.pending_primary_input = Some(input.clone());
         let result = if input.delivery == jcode_session_types::PrimaryInputDelivery::ContextOnly {
             self.append_user_context_blocks_with_origin(
@@ -117,6 +140,7 @@ impl Agent {
             .await
         };
         self.pending_primary_input = None;
+        self.pending_arrival_lead = None;
         if let Err(error) = &result {
             store.fail(self.session_id(), input.id, format!("{error:#}"))?;
         }
@@ -146,32 +170,39 @@ impl Agent {
             return Ok(Vec::new());
         }
         let store = crate::primary_input::PrimaryInputStore::current();
-        // One boundary injects the leading safe-boundary inputs that share an
-        // unattended scope and a system reminder. The shared reminder is one
-        // occurrence: it is delivered once, committed with the group's last
-        // input, after all of the group's content.
-        let mut group = Vec::new();
-        for input in store.pending(self.session_id())? {
-            if input.delivery != jcode_session_types::PrimaryInputDelivery::SafeBoundary {
+        let deliveries = self.route_pending_inputs(
+            store.pending(self.session_id())?,
+            crate::session_work::arrivals::Activity::Working,
+        )?;
+        // One boundary injects the leading inputs that share an unattended
+        // scope and a system reminder: safe-boundary input, and held input
+        // the arrival rule released whatever its delivery. The shared reminder
+        // is one occurrence: it is delivered once, committed with the group's
+        // last input, after all of the group's content.
+        let mut group: Vec<crate::session_work::delivery::Delivery> = Vec::new();
+        for delivery in deliveries {
+            let input = &delivery.input;
+            if !delivery.released
+                && input.delivery != jcode_session_types::PrimaryInputDelivery::SafeBoundary
+            {
                 continue;
             }
-            if group
-                .first()
-                .is_some_and(|first: &jcode_session_types::PrimaryInputEnvelope| {
-                    first.unattended_context != input.unattended_context
-                        || first.system_reminder != input.system_reminder
-                })
-            {
+            if group.first().is_some_and(|first| {
+                first.input.unattended_context != input.unattended_context
+                    || first.input.system_reminder != input.system_reminder
+            }) {
                 break;
             }
-            group.push(input);
+            group.push(delivery);
         }
         let mut injected = Vec::new();
         let group_len = group.len();
-        for (index, input) in group.into_iter().enumerate() {
+        for (index, delivery) in group.into_iter().enumerate() {
+            let input = delivery.input;
             let reminder = (index + 1 == group_len)
                 .then_some(input.system_reminder.as_deref())
                 .flatten();
+            self.pending_arrival_lead = self.render_arrival_lead(delivery.lead.as_ref())?;
             self.pending_primary_input = Some(input.clone());
             self.append_user_context_blocks_with_origin(
                 Self::user_context_blocks(&input.content, input.images.clone()),
@@ -202,6 +233,118 @@ impl Agent {
             });
         }
         Ok(injected)
+    }
+
+    /// The pending inputs this session may receive now, in delivery order.
+    /// Sessions with session work route them through the arrival rule;
+    /// others receive them all, as before.
+    pub(crate) fn route_pending_inputs(
+        &self,
+        pending: Vec<jcode_session_types::PrimaryInputEnvelope>,
+        activity: crate::session_work::arrivals::Activity,
+    ) -> Result<Vec<crate::session_work::delivery::Delivery>> {
+        if self.session.session_work.is_none() {
+            return Ok(pending
+                .into_iter()
+                .map(|input| crate::session_work::delivery::Delivery {
+                    input,
+                    lead: None,
+                    released: false,
+                    position: None,
+                })
+                .collect());
+        }
+        crate::session_work::delivery::route_pending(self.session_id(), pending, activity)
+            .context("Session work is unavailable for this session")
+    }
+
+    fn render_arrival_lead(
+        &self,
+        lead: Option<&crate::session_work::arrivals::Lead>,
+    ) -> Result<Option<String>> {
+        lead.map(|lead| {
+            crate::session_work::delivery::render_lead(
+                lead,
+                self.session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::Path::new),
+            )
+        })
+        .transpose()
+    }
+
+    /// Before a turn starts with `waking`: decide its arrival if no one has,
+    /// and keep it if the rule holds it (`false`). Otherwise deliver the held
+    /// input the rule now releases, oldest first, each with its note, before
+    /// the waking input, which carries its own note. Under a kept stop
+    /// nothing is released.
+    fn begin_arrival_turn(
+        &mut self,
+        waking: &jcode_session_types::PrimaryInputEnvelope,
+        event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
+    ) -> Result<bool> {
+        if self.session.session_work.is_none() {
+            return Ok(true);
+        }
+        let recorded = match crate::session_work::delivery::recorded(self.session_id(), waking)
+            .context("Session work is unavailable for this session")?
+        {
+            Some(record) => record,
+            None => crate::session_work::delivery::arrive(
+                self.session_id(),
+                waking,
+                crate::session_work::arrivals::Activity::Idle,
+            )
+            .context("Session work is unavailable for this session")?,
+        };
+        if !crate::session_work::arrivals::deliverable(&recorded) {
+            return Ok(false);
+        }
+        let store = crate::primary_input::PrimaryInputStore::current();
+        let pending: Vec<_> = store
+            .pending(self.session_id())?
+            .into_iter()
+            .filter(|input| input.id != waking.id)
+            .collect();
+        // Held input that arrived before the waking input comes first; any
+        // that arrived after it follows at the turn's next safe point.
+        let waking_position = crate::session_work::SessionWorkStore::new()
+            .arrivals(self.session_id())
+            .context("Session work is unavailable for this session")?
+            .iter()
+            .position(|record| record.input == waking.id.to_string());
+        let released: Vec<_> = self
+            .route_pending_inputs(pending, crate::session_work::arrivals::Activity::Working)?
+            .into_iter()
+            .filter(|delivery| {
+                delivery.released
+                    && waking_position
+                        .is_none_or(|waking| delivery.position.is_some_and(|at| at < waking))
+            })
+            .collect();
+        for delivery in released {
+            let input = delivery.input;
+            self.pending_arrival_lead = self.render_arrival_lead(delivery.lead.as_ref())?;
+            self.pending_primary_input = Some(input.clone());
+            self.append_user_context_blocks_with_origin(
+                Self::user_context_blocks(&input.content, input.images.clone()),
+                input.display_role,
+                input.origin.clone(),
+                input.system_reminder.as_deref(),
+            )?;
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(ServerEvent::PrimaryInputFinished {
+                    receipt: store.inspect(self.session_id(), input.id)?,
+                    delivery: Some(input.delivery),
+                });
+            }
+        }
+        // The input that starts the turn carries its own note, such as the
+        // end of the stop it was awaited by.
+        let lead = crate::session_work::arrivals::lead(&recorded);
+        self.pending_arrival_lead = self.render_arrival_lead(lead.as_ref())?;
+        Ok(true)
     }
 
     /// Only called with the Agent's exclusive owner guard, at idle or after a

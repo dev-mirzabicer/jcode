@@ -118,6 +118,7 @@ pub(crate) async fn deliver_planned_continuations(
             &format!("{}:{}", record.reload_id, record.session_id),
         );
         input.system_reminder = Some(record.directive.continuation_message.clone());
+        input.arrival = Some(jcode_session_work_types::ArrivalClass::Continuation);
         match super::live_turn::submit_primary_input(host, input, swarm.clone()).await {
             Ok(_) => {
                 delivered += 1;
@@ -156,6 +157,7 @@ fn recovery_input(
     );
     envelope.id = input;
     envelope.system_reminder = Some(SELECTED_RECOVERY_CONTINUATION.into());
+    envelope.arrival = Some(jcode_session_work_types::ArrivalClass::Continuation);
     envelope
 }
 

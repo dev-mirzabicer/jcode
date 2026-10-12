@@ -963,6 +963,11 @@ impl ScheduleTool {
 
         let target = parse_schedule_target(params.target.as_deref(), &ctx.session_id)?;
         let target_summary = format_schedule_target(&target);
+        // A resume this session schedules for itself is one of its items.
+        let own_resume = matches!(
+            &target,
+            ScheduleTarget::Session { session_id } if *session_id == ctx.session_id
+        );
         let context_emergency_policy =
             parse_schedule_emergency_policy(params.context_emergency_policy, &ctx.session_id)?;
         crate::context::validate_emergency_policy(&context_emergency_policy)?;
@@ -1011,6 +1016,15 @@ impl ScheduleTool {
         };
 
         let mut summary = format!("Scheduled task '{}' for {} (id: {})", task, when, id);
+        if own_resume {
+            // The task exists; a failed item allocation is reported, not
+            // turned into a failed schedule.
+            match crate::session_work::background::schedule_resume(&ctx.session_id, &id, &task) {
+                Ok(Some(item)) => summary.push_str(&format!("\nAlias: {}", item.alias)),
+                Ok(None) => {}
+                Err(error) => summary.push_str(&format!("\nAlias unavailable: {error}")),
+            }
+        }
         if let Some(ref wd) = working_dir {
             summary.push_str(&format!("\nWorking directory: {}", wd));
         }

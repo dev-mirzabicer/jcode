@@ -448,6 +448,7 @@ impl Agent {
             ));
         }
 
+        let lead = self.pending_arrival_lead.take();
         if let Some(input) = self.pending_primary_input.take() {
             let mut lease =
                 crate::primary_input::PrimaryInputStore::current().lock(self.session_id())?;
@@ -456,6 +457,13 @@ impl Agent {
             let before = self.session.clone();
             let start = self.message_count();
             let result = (|| {
+                // The arrival note is committed with its input, never alone.
+                if let Some(lead) = &lead {
+                    self.add_context_delivery(
+                        jcode_session_types::ContextDeliveryChannel::SessionWork,
+                        lead,
+                    );
+                }
                 self.append_turn_content(blocks, display_role, origin, reminder)?;
                 self.session.record_primary_input(&input, start)?;
                 self.session.save()

@@ -20,6 +20,7 @@ use super::{
 use crate::agent::Agent;
 use crate::instruction::notification::Notification;
 use crate::protocol::ServerEvent;
+use anyhow::Context as _;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -307,12 +308,16 @@ pub(super) async fn submit_primary_input(
     swarm: LiveTurnSwarmContext,
 ) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
     sessions.configure_input_delivery(swarm.clone());
-    let receipt = crate::runtime_lifecycle::admission::control(|| {
-        validate_input_recipient(sessions, &input.session)?;
+    let (receipt, stored) = crate::runtime_lifecycle::admission::control(|| {
+        let stored = validate_input_recipient(sessions, &input.session)?;
         let store = crate::primary_input::PrimaryInputStore::current();
         let receipt = store.accept(input)?;
-        store.confirm_delivery(&receipt.session, receipt.id)
+        anyhow::Ok((
+            store.confirm_delivery(&receipt.session, receipt.id)?,
+            stored,
+        ))
     })??;
+    let receipt = record_arrival(sessions, &stored, receipt);
     if receipt.state == jcode_session_types::PrimaryInputState::Accepted && sessions.accepts_input()
     {
         ensure_primary_input_delivery(sessions, &receipt.session, swarm);
@@ -327,47 +332,158 @@ pub(super) async fn submit_client_input(
 ) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
     use sha2::{Digest, Sha256};
     sessions.configure_input_delivery(swarm.clone());
-    let receipt = crate::runtime_lifecycle::admission::control(|| -> anyhow::Result<_> {
-        let stored = validate_input_recipient(sessions, &request.input.session)?;
-        // A human message to an unplaced primary is refused before it is
-        // accepted, so the client keeps it for resending after placement.
-        anyhow::ensure!(
-            !stored.requires_placement(),
-            "{}",
-            crate::workspace::placement_required_for_input()
-        );
-        anyhow::ensure!(
-            request.input.client_request_digest.is_none(),
-            "Client cannot supply a prepared input digest"
-        );
-        anyhow::ensure!(
-            request.input.activate_skill.is_none()
-                || request.input.delivery == jcode_session_types::PrimaryInputDelivery::NextTurn,
-            "Skill activation requires a new primary turn"
-        );
-        let source = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
-        let store = crate::primary_input::PrimaryInputStore::current();
-        let input =
-            store.accept_prepared(&request.input.session, request.input.id, &source, || {
-                let mut input = request.input.clone();
-                if let Some(entries) = &request.queued_messages {
-                    let session = crate::session::Session::load_startup_stub(&input.session)?;
-                    let (content, origin) = crate::todo::render_queued_messages(
-                        entries,
-                        session.working_dir.as_deref().map(std::path::Path::new),
-                    )?;
-                    input.content = content;
-                    input.origin = Some(origin);
-                }
-                Ok(input)
-            })?;
-        store.confirm_delivery(&input.session, input.id)
-    })??;
+    let (receipt, stored) =
+        crate::runtime_lifecycle::admission::control(|| -> anyhow::Result<_> {
+            let stored = validate_input_recipient(sessions, &request.input.session)?;
+            // A human message to an unplaced primary is refused before it is
+            // accepted, so the client keeps it for resending after placement.
+            anyhow::ensure!(
+                !stored.requires_placement(),
+                "{}",
+                crate::workspace::placement_required_for_input()
+            );
+            anyhow::ensure!(
+                request.input.client_request_digest.is_none(),
+                "Client cannot supply a prepared input digest"
+            );
+            anyhow::ensure!(
+                request.input.activate_skill.is_none()
+                    || request.input.delivery
+                        == jcode_session_types::PrimaryInputDelivery::NextTurn,
+                "Skill activation requires a new primary turn"
+            );
+            let source = format!("{:x}", Sha256::digest(serde_json::to_vec(&request)?));
+            let store = crate::primary_input::PrimaryInputStore::current();
+            let input =
+                store.accept_prepared(&request.input.session, request.input.id, &source, || {
+                    let mut input = request.input.clone();
+                    if let Some(entries) = &request.queued_messages {
+                        let session = crate::session::Session::load_startup_stub(&input.session)?;
+                        let (content, origin) = crate::todo::render_queued_messages(
+                            entries,
+                            session.working_dir.as_deref().map(std::path::Path::new),
+                        )?;
+                        input.content = content;
+                        input.origin = Some(origin);
+                    }
+                    Ok(input)
+                })?;
+            Ok((store.confirm_delivery(&input.session, input.id)?, stored))
+        })??;
+    let receipt = record_arrival(sessions, &stored, receipt);
     if receipt.state == jcode_session_types::PrimaryInputState::Accepted && sessions.accepts_input()
     {
         ensure_primary_input_delivery(sessions, &receipt.session, swarm);
     }
     Ok(receipt)
+}
+
+/// Decide an accepted input's arrival for a session with session work, and
+/// return its receipt as it stands: a held input shows why it waits. A
+/// failure leaves the input accepted; its arrival is decided when delivery
+/// next routes it, and a session whose store is unreadable delivers nothing.
+fn record_arrival(
+    sessions: &SessionAgents,
+    stored: &crate::session::Session,
+    receipt: jcode_session_types::PrimaryInputReceipt,
+) -> jcode_session_types::PrimaryInputReceipt {
+    if stored.session_work.is_none()
+        || receipt.state != jcode_session_types::PrimaryInputState::Accepted
+    {
+        return receipt;
+    }
+    let store = crate::primary_input::PrimaryInputStore::current();
+    let activity = if sessions.processing(&receipt.session).is_some() {
+        crate::session_work::arrivals::Activity::Working
+    } else {
+        crate::session_work::arrivals::Activity::Idle
+    };
+    let decided = store
+        .original(&receipt.session, receipt.id)
+        .and_then(|input| input.context("Accepted primary input disappeared"))
+        .and_then(|input| {
+            if !crate::session_work::delivery::decided_now(&input, activity) {
+                return Ok(());
+            }
+            crate::session_work::delivery::arrive(&receipt.session, &input, activity)
+                .map(drop)
+                .map_err(anyhow::Error::from)
+        });
+    if let Err(error) = decided {
+        crate::logging::warn(&format!(
+            "Session work: the arrival of input {} for {} is decided at delivery: {error:#}",
+            receipt.id, receipt.session
+        ));
+    }
+    store
+        .inspect(&receipt.session, receipt.id)
+        .unwrap_or(receipt)
+}
+
+/// Apply Mirza's disposition to a message the arrival rule held, then let
+/// delivery pick it up. Only a trusted client sends this.
+pub(crate) fn dispose_primary_input(
+    sessions: &SessionAgents,
+    session: &str,
+    input: crate::workspace::RequestId,
+    disposition: jcode_session_work_types::HumanDisposition,
+) -> anyhow::Result<jcode_session_types::PrimaryInputReceipt> {
+    let stored = crate::session::Session::load_startup_stub(session)?;
+    anyhow::ensure!(
+        stored.session_work.is_some(),
+        "Session {session} does not use session work; its input is never held"
+    );
+    let store = crate::primary_input::PrimaryInputStore::current();
+    let receipt = store.inspect(session, input)?;
+    anyhow::ensure!(
+        receipt.state == jcode_session_types::PrimaryInputState::Accepted,
+        "Input {input} of {session} is no longer pending"
+    );
+    let record = crate::session_work::SessionWorkStore::new().redispose(
+        session,
+        &input.to_string(),
+        disposition,
+        chrono::Utc::now(),
+    )?;
+    if crate::session_work::arrivals::deliverable(&record) {
+        store.defer(session, input, None)?;
+        if sessions.accepts_input()
+            && let Ok(context) = sessions.input_delivery_context()
+        {
+            ensure_primary_input_delivery(sessions, session, context);
+        }
+    }
+    store.inspect(session, input)
+}
+
+/// The pending inputs the idle delivery worker may start a turn with. For
+/// a session with session work these are the arrival rule's deliverable
+/// inputs, released held input first; held input stays durable and visible.
+pub(crate) fn idle_deliverable(
+    session: &str,
+    pending: Vec<jcode_session_types::PrimaryInputEnvelope>,
+) -> anyhow::Result<Vec<jcode_session_types::PrimaryInputEnvelope>> {
+    if pending.is_empty() {
+        return Ok(pending);
+    }
+    let stored = crate::session::Session::load_startup_stub(session)?;
+    if stored.session_work.is_none() {
+        return Ok(pending);
+    }
+    // The input that starts the turn is a newly delivered one; held input
+    // the rule released is delivered before it, oldest first, by the turn.
+    let (released, waking): (Vec<_>, Vec<_>) = crate::session_work::delivery::route_pending(
+        session,
+        pending,
+        crate::session_work::arrivals::Activity::Idle,
+    )?
+    .into_iter()
+    .partition(|delivery| delivery.released);
+    Ok(waking
+        .into_iter()
+        .chain(released)
+        .map(|delivery| delivery.input)
+        .collect())
 }
 
 pub(super) fn cancel_client_inputs(
@@ -445,7 +561,10 @@ pub(crate) fn ensure_primary_input_delivery(
                 }
             };
             let store = crate::primary_input::PrimaryInputStore::current();
-            let pending = match store.pending(&session) {
+            let pending = match store
+                .pending(&session)
+                .and_then(|pending| idle_deliverable(&session, pending))
+            {
                 Ok(pending) => pending,
                 Err(error) => {
                     crate::logging::warn(&format!(
@@ -474,9 +593,10 @@ pub(crate) fn ensure_primary_input_delivery(
             let next = if unresolved.is_empty() {
                 pending.into_iter().next()
             } else {
-                let human = pending.into_iter().find(|input| {
-                    input.origin == Some(jcode_session_types::StoredMessageOrigin::Human)
-                });
+                // Mirza's messages and his answers carry human authority.
+                let human = pending
+                    .into_iter()
+                    .find(|input| input.arrival_class().is_human());
                 match human {
                     Some(input) => {
                         if let Some(journals) = host.runtime_journals()

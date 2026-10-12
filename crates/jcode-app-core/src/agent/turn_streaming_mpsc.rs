@@ -1778,6 +1778,11 @@ impl Agent {
                          or action 'status'/'output' to inspect it.",
                         tc.name, bg_info.task_id
                     );
+                    if let Ok(Some(item)) =
+                        crate::session_work::background::item(&self.session.id, &bg_info.task_id)
+                    {
+                        bg_msg.push_str(&format!("\nAlias: {}", item.alias));
+                    }
                     if let Some(warning) = &warning {
                         bg_msg = format!("{bg_msg}\n\n{warning}");
                     }

@@ -426,6 +426,7 @@ impl AmbientRunnerHandle {
 
     pub(crate) async fn notify_live_session(
         delivery_id: &str,
+        label: &str,
         session_id: &str,
         message: &str,
         unattended_context: Option<jcode_session_types::StoredUnattendedContextAuthorization>,
@@ -439,6 +440,12 @@ impl AmbientRunnerHandle {
         input.id = crate::primary_input::correlated_input_id("scheduled-item", delivery_id);
         input.display_role = Some(crate::session::StoredDisplayRole::System);
         input.unattended_context = unattended_context;
+        input.arrival = Some(jcode_session_work_types::ArrivalClass::ScheduledResume {
+            item: Some(crate::session_work::background::resume_source(
+                delivery_id,
+                label,
+            )),
+        });
         let input_id = input.id;
         let request_id = client.submit_primary_input(input).await?;
         loop {
@@ -496,6 +503,12 @@ impl AmbientRunnerHandle {
         input.id = crate::primary_input::correlated_input_id("scheduled-item", &item.id);
         input.display_role = Some(crate::session::StoredDisplayRole::System);
         input.unattended_context = unattended_context;
+        input.arrival = Some(jcode_session_work_types::ArrivalClass::ScheduledResume {
+            item: Some(crate::session_work::background::resume_source(
+                &item.id,
+                &item.context,
+            )),
+        });
         let turn_result = agent.run_primary_input_capture(input).await;
         Self::log_scheduled_emergency_outcome(item, &agent);
         agent.mark_closed();
@@ -636,6 +649,7 @@ impl AmbientRunnerHandle {
                 let reminder = ambient::format_scheduled_session_message(item)?;
                 match Self::notify_live_session(
                     &item.id,
+                    &item.context,
                     session_id,
                     &reminder,
                     Self::scheduled_unattended_context(item),

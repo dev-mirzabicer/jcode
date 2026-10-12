@@ -750,6 +750,16 @@ impl PrimaryHost {
             host.turns.lock().expect("primary turns").remove(&session);
             control.finished.send_replace(true);
             host.revision.send_modify(|r| *r = r.wrapping_add(1));
+            // A turn's end can make held input deliverable (its stop was
+            // revoked or invalidated) or leave input that arrived during it.
+            if host.accepts_input()
+                && crate::primary_input::PrimaryInputStore::current()
+                    .pending(&session)
+                    .is_ok_and(|pending| !pending.is_empty())
+                && let Ok(context) = host.input_delivery_context()
+            {
+                crate::server::ensure_primary_input_delivery(&host, &session, context);
+            }
         });
     }
 
@@ -834,6 +844,24 @@ impl PrimaryHost {
     }
 }
 
+/// Whether pending input remains that delivery may start a turn with. Input
+/// the session-work arrival rule holds stays durable and does not keep the
+/// delivery worker alive; the arrival or turn end that releases it starts a
+/// new worker.
+fn deliverable_pending(session: &str) -> Result<bool> {
+    let pending = crate::primary_input::PrimaryInputStore::current().pending(session)?;
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    if crate::session::Session::load_startup_stub(session)?
+        .session_work
+        .is_none()
+    {
+        return Ok(true);
+    }
+    crate::session_work::delivery::any_deliverable(session, &pending)
+}
+
 pub(crate) struct PrimaryInputDrain {
     host: std::sync::Weak<PrimaryHost>,
     session: String,
@@ -852,10 +880,7 @@ impl PrimaryInputDrain {
             return Ok(true);
         };
         let mut drains = host.input_drains.lock().expect("primary input drains");
-        if !crate::primary_input::PrimaryInputStore::current()
-            .pending(&self.session)?
-            .is_empty()
-        {
+        if deliverable_pending(&self.session)? {
             return Ok(false);
         }
         drains.remove(&self.session);
