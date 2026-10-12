@@ -304,6 +304,16 @@ failed spawn and deadline rejection. Computer/search helper families, execution
 store tests, integrated execution tests and strict affected lint pass on macOS.
 This does not claim adversarial process containment or native Windows parity.
 
+## Undeliverable background results
+
+`background_deliveries` (schema 22) has a terminal `undeliverable` state and an
+`issue`. When a completion's recipient Session snapshot does not exist, every
+enabled channel still pending or uncertain settles as undeliverable with the
+reason, the retry loop stops, and the task's status shows it as a delivery
+event. A failure to read an existing recipient is not absence and is retried.
+Version 21 stores are rebuilt in place with every row kept. An older build
+cannot open a version 22 store.
+
 ## Self-development build and test jobs
 
 Build-producing, test and attached-watcher requests use the common execution owner

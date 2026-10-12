@@ -44,8 +44,8 @@ removed before publication and fails.
 `withdraw`; an activated child gets it with `complete` only. Sessions without session work never
 see it. In activated sessions the `wake` parameter of `bash`, `bg` and `subagent`, the `timeout`
 of `bash`, and `max_wait_seconds` and `task_id` of `bg` carry session-work wording (until the
-arrival and timer stages land, the behavior those words describe is not complete, which is one
-reason the flag stays off). All of this text is managed (seed 33) and frozen into the session at
+timer stage lands, the time limits those words describe are not complete, which is one reason the
+flag stays off). All of this text is managed (seed 33) and frozen into the session at
 its first successful request, like the other managed tool guidance: a session keeps the text it
 started with, and new sessions take later edits.
 
@@ -53,15 +53,15 @@ started with, and new sessions take later edits.
 
 - **Store:** `<durable state>/session-work/store.sqlite3` (`$JCODE_RUNTIME_DIR/durable-state` when
   set, else `~/.jcode/state`). Owner-only file and directory, WAL, `synchronous=FULL`, schema
-  version 2 (a version 1 store is upgraded in place when opened). It is the authority for
-  workflows and stops. An unreadable, damaged or unknown-schema store is
+  version 3 (version 1 and 2 stores are upgraded in place when opened). It is the authority for
+  workflows, stops and arrivals. An unreadable, damaged or unknown-schema store is
   never treated as empty: an activated session's turn stops with a visible error before its next
   provider request, and its session-work files cannot be written, until the store is repaired.
   Sessions without session work are unaffected.
 - **Tables:** activation (role, origin, frozen module types), items and aliases, workflow
   revisions, workflow state (head and the revision last written to the file), module times, stop
-  declarations, per-turn counters, turn outcomes, and the permanent `events` and `journal`
-  records. Every mutation is keyed by a request ID derived
+  declarations, per-turn counters, turn outcomes, arrivals (each input's recorded route), and the
+  permanent `events` and `journal` records. Every mutation is keyed by a request ID derived
   from the tool invocation, so a replay converges on its original result.
 - **Files:** `~/.jcode/session-work/<session>/` (owner-only) holds `workflow.md`, `summary.md`,
   `history/rNN.md` and `module-types.md`. `module-types.md` (read-only, 0400) lists the module
@@ -180,7 +180,10 @@ workflow is completed only by a declaration; all modules done is not enough.
 
 - `wait` names a condition over the session's item aliases (`q1`, `any(q1, t3)`, `all(t3, t4)`,
   nested), a one-line `summary` and an optional `timeout` (`45m`, `2h`, `none`). Every alias must
-  belong to the session, and a condition that finished items already satisfy is refused. Without a
+  belong to the session, and a condition already met is refused. An item is finished when its
+  arrival is recorded (below), not when its process exits: until then its result is still to come
+  and ends the wait. The check is repeated inside the declaration's commit, so a result that
+  arrives between validation and commit refuses the wait instead of being missed. Without a
   timeout, the default is composed through the condition from `[session_work.timeouts]`: `any`
   takes the shortest, `all` the longest. The timer itself arrives with a later stage.
 - `complete` needs every workflow module done or skipped, and no running background work except
@@ -190,8 +193,10 @@ workflow is completed only by a declaration; all modules done is not enough.
 - Declaring again replaces the current declaration. A repeated invocation converges on its
   original record.
 
-Running background tasks and sub-agent runs get their task or child alias, and their wake/hold
-policy, the first time session work sees them; the alias and policy never change afterwards.
+Background tasks and sub-agent runs get their task or child alias, and their wake/hold policy,
+when they start; the background receipt names it (`Alias: t3`). A resume the session schedules for
+itself gets an `r` alias in the `schedule` result. An alias and its policy never change; a `bg`
+delivery update keeps the result going to the agent and leaves the policy as it was.
 
 **Tool gate.** While a declaration governs the turn (one made in it, or a wait in effect), the
 first other tool call runs and its result carries a warning; later calls are refused with a tool
@@ -224,12 +229,65 @@ not), waiting, interrupted by the user, interrupted by reload, provider refusal,
 (provider, preflight or other) or stopped without a declaration. A failure keeps a declaration
 made in its turn (it takes effect if it still holds). The user's Stop revokes a declaration made in
 the stopped turn; a wait already in effect stays. A reload leaves the turn open for its
-continuation. How later arrivals wake or hold a waiting session belongs to the next stage; until
-then any new input starts a turn in which an effective wait still gates tool calls.
+continuation. What happens to input that arrives afterwards is decided by the
+[arrival rule](#arrivals).
 
 **Cost.** A declared stop costs one more provider request (the final message after the
 declaration's result). Tool definitions and guidance stay frozen; corrections and notices are
 appended, so the earlier prefix stays cached.
+
+## Arrivals
+
+Everything that reaches an activated session from outside its own turn goes through one rule:
+Mirza's messages, finished background tasks and sub-agent runs, answers and decisions, wait
+timers, scheduled resumes, continuations and other notices. Each producer classifies its input on
+the durable primary input (`arrival`, [Primary input](PRIMARY_INPUT_LOCATION.md#durable-input));
+unclassified input with human origin is Mirza's message and anything else is a notice. The
+decision is made once, when the input arrives, recorded with its effect on the stop in one
+transaction, and a repeated delivery converges on it.
+
+| Session \ arrival | Mirza's message | An awaited item | Answer or decision, not awaited | Background result, not awaited | Its timer | Scheduled resume |
+|---|---|---|---|---|---|---|
+| Working | next safe point | n/a | next safe point | next safe point | n/a | next safe point |
+| Stop declared (pending or in effect) | per disposition, queue by default | condition met: the stop ends and the session wakes; else held | held | held | stop ends, wakes | wakes, the stop stays |
+| Completed (implicitly or declared) | wakes | n/a | wakes, unless its policy is hold | wakes if its policy is wake, else held | n/a | wakes |
+| Stopped by Mirza, failed, refused, truncated, out of corrections, or crashed | wakes | n/a | wakes, unless its policy is hold | held | n/a | wakes |
+
+Other notices (for example `notify_session`) are held while a stop is declared and after an
+interruption, and delivered otherwise; continuations are always delivered. A declaration that
+survives a failure keeps the session in the declared row, timer included. A completion being
+declared holds what a wait would hold, as "stopped".
+
+**Held input** stays accepted in the inbox and is never dropped or summarized. Its receipt shows
+`Held: the session is waiting on <condition>.` or `Held until the session's next turn.`. When a
+turn starts, every held input the session's new state delivers comes first, oldest first, each
+after an appended `[Held] ...` note naming what it was, when it arrived and what the session was
+doing; the input that starts the turn follows with its own note (`Your stop ended: ...` when it was
+awaited). A turn under a kept stop releases nothing. Held input that arrived after the waking input
+joins at the turn's next safe point. Notes are operator-authority deliveries on the `SessionWork`
+channel ([Notifications](NOTIFICATIONS.md)), committed with their input and never alone.
+
+**Mirza's messages during a stop** carry a disposition: queue (default), send now and keep the
+stop, or revoke the stop and send. Clients send it on the envelope's arrival class only when it is
+not queue, or apply it later to a held message with the native `primary_input_dispose` operation;
+the delivered message comes after the matching approved note. Only trusted clients choose a
+disposition.
+
+**Background work.** In an activated session a background task's or sub-agent run's result always
+reaches the agent; `wake: false` means hold, never dropped. The completion carries the item it
+finishes, and the rule decides.
+
+**Delivery kinds.** Context-only input never starts a turn and is outside the rule. Next-turn input
+is decided when the turn it waits for has ended, against the session's state then, so a message
+sent while the agent is still working is held if that turn ends with a stop.
+
+**Crash recovery.** After an unexpected exit, automatic input still waits for Mirza's recovery
+decision; his messages and his answers (the `answer` arrival class) proceed and resolve it.
+
+**Undeliverable.** A background result whose recipient Session does not exist settles as
+`undeliverable`, terminal and visible on its task, instead of being retried forever; a recipient
+that cannot be read for another reason is retried. Existing rows settle through the same rule the
+first time the runtime retries them ([Execution storage](dev/EXECUTION_STORAGE.md#undeliverable-background-results)).
 
 ## The session-work skill
 
@@ -249,5 +307,5 @@ line and read it by path or name; a person can still invoke it with `/session-wo
 
 ## Not yet implemented
 
-Arrival rules and holding, wait timers and time checks, questions, session proposals, timing
-reports, closeout and the attention stream build on this foundation.
+Wait timers and time checks, questions, session proposals, timing reports, closeout and the
+attention stream build on this foundation. Their producers plug into the arrival rule.

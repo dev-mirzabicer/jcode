@@ -46,6 +46,17 @@ Delivery choices:
   Deferred entries do not block eligible safe-boundary input for that active turn.
 - `context_only`: append input without requesting inference.
 
+An optional `arrival` field classifies the input for sessions with
+[session work](SESSION_WORK.md#arrivals): Mirza's message with a disposition,
+an item finished, an answer, a timer, a scheduled resume, a continuation or a
+notice. Producers set it; human clients set it only for a disposition other than
+queue. Without it the class is derived from the input's origin, so older clients
+and stored records are unchanged. `primary_control_probe` advertises
+`arrival_version=1`. `primary_input_dispose` applies Mirza's disposition to a
+held message and returns its receipt. Sessions without session work ignore the
+field. For a session with session work, a held input stays `accepted` with a
+`Held: ...` receipt issue until the rule releases it.
+
 The receipt distinguishes `accepted`, `committed`, `failed` and `cancelled`.
 `committed` means that the input identity and appended message IDs reached one
 Session checkpoint. It does not mean the provider executed exactly once or
