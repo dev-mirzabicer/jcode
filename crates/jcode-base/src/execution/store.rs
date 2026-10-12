@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SCHEMA: i64 = 21;
+const SCHEMA: i64 = 22;
 
 pub use jcode_tool_types::RunState;
 
@@ -307,6 +307,29 @@ impl ExecutionStore {
                 "CREATE INDEX runs_parent_page ON runs(parent_id,state,created,id);
                  CREATE INDEX runs_session_state_page ON runs(session_id,state,created,id);
                  PRAGMA user_version=21;",
+            )?;
+        }
+        if version < 22 {
+            // A delivery whose recipient Session does not exist is settled as
+            // terminal and visible instead of being retried forever. SQLite
+            // cannot alter a CHECK constraint, so the table is rebuilt with
+            // every row and column kept.
+            transaction.execute_batch(
+                "CREATE TABLE background_deliveries_v22 (
+                run_id TEXT PRIMARY KEY REFERENCES runs(id), notify INTEGER NOT NULL,
+                wake INTEGER NOT NULL, started_at TEXT NOT NULL,
+                notify_state TEXT NOT NULL DEFAULT 'pending', wake_state TEXT NOT NULL DEFAULT 'pending',
+                notify_attempt TEXT, wake_attempt TEXT, issue TEXT,
+                CHECK(notify_state IN ('pending','in_flight','delivered','uncertain','undeliverable')),
+                CHECK(wake_state IN ('pending','in_flight','delivered','uncertain','undeliverable'))
+            );
+            INSERT INTO background_deliveries_v22
+                (run_id,notify,wake,started_at,notify_state,wake_state,notify_attempt,wake_attempt)
+                SELECT run_id,notify,wake,started_at,notify_state,wake_state,notify_attempt,wake_attempt
+                FROM background_deliveries;
+            DROP TABLE background_deliveries;
+            ALTER TABLE background_deliveries_v22 RENAME TO background_deliveries;
+            PRAGMA user_version=22;",
             )?;
         }
         let broken: i64 =

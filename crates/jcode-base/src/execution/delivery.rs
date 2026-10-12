@@ -10,6 +10,8 @@ pub enum DeliveryState {
     InFlight,
     Delivered,
     Uncertain,
+    /// Terminal: the recipient Session does not exist.
+    Undeliverable,
 }
 impl DeliveryState {
     fn parse(value: &str) -> Result<Self> {
@@ -18,6 +20,7 @@ impl DeliveryState {
             "in_flight" => Ok(Self::InFlight),
             "delivered" => Ok(Self::Delivered),
             "uncertain" => Ok(Self::Uncertain),
+            "undeliverable" => Ok(Self::Undeliverable),
             _ => anyhow::bail!("Invalid delivery state"),
         }
     }
@@ -30,6 +33,9 @@ pub struct BackgroundDelivery {
     pub started_at: String,
     pub notify_state: DeliveryState,
     pub wake_state: DeliveryState,
+    /// Why the delivery is undeliverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
 }
 #[derive(Clone, Copy)]
 pub enum DeliveryChannel {
@@ -136,8 +142,25 @@ impl ExecutionStore {
         ))
     }
     pub fn background_delivery(&self, id: &str) -> Result<Option<BackgroundDelivery>> {
-        let row:Option<(bool,bool,String,String,String)>=self.connection()?.query_row("SELECT notify,wake,started_at,notify_state,wake_state FROM background_deliveries WHERE run_id=?1",[id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
-        row.map(|(notify, wake, started_at, n, w)| {
+        type Row = (bool, bool, String, String, String, Option<String>);
+        let row: Option<Row> = self
+            .connection()?
+            .query_row(
+                "SELECT notify,wake,started_at,notify_state,wake_state,issue FROM background_deliveries WHERE run_id=?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(notify, wake, started_at, n, w, issue)| {
             Ok(BackgroundDelivery {
                 run_id: id.into(),
                 notify,
@@ -145,9 +168,28 @@ impl ExecutionStore {
                 started_at,
                 notify_state: DeliveryState::parse(&n)?,
                 wake_state: DeliveryState::parse(&w)?,
+                issue,
             })
         })
         .transpose()
+    }
+    /// Settle every enabled channel still pending or uncertain as terminal
+    /// and undeliverable, with the reason. Channels already delivered or in
+    /// flight keep their state. Returns whether anything changed.
+    pub fn settle_undeliverable(&self, id: &str, issue: &str) -> Result<bool> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut changed = 0;
+        for (flag, state) in [("notify", "notify_state"), ("wake", "wake_state")] {
+            changed += transaction.execute(
+                &format!(
+                    "UPDATE background_deliveries SET {state}='undeliverable',issue=?2 WHERE run_id=?1 AND {flag}=1 AND {state} IN ('pending','uncertain')"
+                ),
+                params![id, issue],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(changed > 0)
     }
     pub fn background_delivery_ids(&self) -> Result<Vec<String>> {
         let connection = self.connection()?;
@@ -377,6 +419,98 @@ mod tests {
         assert!(!created);
         assert!(!record.notify && !record.wake);
         assert!(store.pending_background_deliveries()?.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn a_missing_recipient_settles_terminal_and_visible_without_touching_delivered_channels()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let id = completed(&store)?;
+        // The notify channel was already delivered; only the pending one
+        // settles.
+        store
+            .begin_delivery(&id, DeliveryChannel::Notify)?
+            .unwrap()
+            .finish(true)?;
+        assert!(store.settle_undeliverable(&id, "recipient session gone does not exist")?);
+        let record = store.background_delivery(&id)?.unwrap();
+        assert_eq!(record.notify_state, DeliveryState::Delivered);
+        assert_eq!(record.wake_state, DeliveryState::Undeliverable);
+        assert_eq!(
+            record.issue.as_deref(),
+            Some("recipient session gone does not exist")
+        );
+        // Terminal: nothing is pending, nothing can be claimed, and settling
+        // again changes nothing.
+        assert!(store.pending_background_deliveries()?.is_empty());
+        assert!(store.begin_delivery(&id, DeliveryChannel::Wake)?.is_none());
+        assert!(!store.settle_undeliverable(&id, "again")?);
+        // The task shows it.
+        let status = crate::background::managed_projection(&store, &id)?.unwrap();
+        assert!(status.event_history.iter().any(|event| {
+            event
+                .message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Undeliverable: recipient session gone"))
+        }));
+        Ok(())
+    }
+    #[test]
+    fn an_uncertain_channel_also_settles_when_its_recipient_is_gone() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let id = completed(&store)?;
+        let mut attempt = store.begin_delivery(&id, DeliveryChannel::Wake)?.unwrap();
+        attempt.finished = true;
+        drop(attempt);
+        store.reconcile_delivery_attempts()?;
+        assert!(store.settle_undeliverable(&id, "gone")?);
+        let record = store.background_delivery(&id)?.unwrap();
+        assert_eq!(record.wake_state, DeliveryState::Undeliverable);
+        assert_eq!(record.notify_state, DeliveryState::Undeliverable);
+        Ok(())
+    }
+    #[test]
+    fn version_21_deliveries_survive_the_rebuild_that_adds_undeliverable() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let id = completed(&store)?;
+        store
+            .begin_delivery(&id, DeliveryChannel::Notify)?
+            .unwrap()
+            .finish(true)?;
+        // Put the table back in its exact version-8 shape, as a version-21
+        // store holds it.
+        let connection =
+            rusqlite::Connection::open(directory.path().join("execution/index.sqlite"))?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+            CREATE TABLE old_deliveries (
+                run_id TEXT PRIMARY KEY REFERENCES runs(id), notify INTEGER NOT NULL,
+                wake INTEGER NOT NULL, started_at TEXT NOT NULL,
+                notify_state TEXT NOT NULL DEFAULT 'pending', wake_state TEXT NOT NULL DEFAULT 'pending',
+                notify_attempt TEXT, wake_attempt TEXT,
+                CHECK(notify_state IN ('pending','in_flight','delivered','uncertain')),
+                CHECK(wake_state IN ('pending','in_flight','delivered','uncertain'))
+            );
+            INSERT INTO old_deliveries SELECT run_id,notify,wake,started_at,notify_state,wake_state,notify_attempt,wake_attempt FROM background_deliveries;
+            DROP TABLE background_deliveries;
+            ALTER TABLE old_deliveries RENAME TO background_deliveries;
+            PRAGMA user_version=21;",
+        )?;
+        drop(connection);
+        let store = ExecutionStore::open(directory.path())?;
+        let record = store.background_delivery(&id)?.unwrap();
+        assert_eq!(record.notify_state, DeliveryState::Delivered);
+        assert_eq!(record.wake_state, DeliveryState::Pending);
+        assert_eq!(record.issue, None);
+        assert_eq!(store.pending_background_deliveries()?, vec![id.clone()]);
+        assert!(store.settle_undeliverable(&id, "gone")?);
+        let version: i64 =
+            rusqlite::Connection::open(directory.path().join("execution/index.sqlite"))?
+                .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version, 22);
         Ok(())
     }
 }
