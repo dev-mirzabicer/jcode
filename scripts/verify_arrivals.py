@@ -477,11 +477,24 @@ def stop_daemon():
     if f.reader is not None:
         f.reader.close(); f.client.close()
         f.reader = f.client = None
+    # Never leave a fixture daemon behind: a quiescing daemon gets 60 s, then
+    # it is killed, including any process a reload put on the socket.
     listening = subprocess.run(['lsof', '-t', str(f.sockpath)], capture_output=True, text=True).stdout.split()
-    for pid in {int(pid) for pid in listening} - {f.proc.pid if f.proc else None}:
+    others = {int(pid) for pid in listening} - {f.proc.pid if f.proc else None}
+    for pid in others:
         os.kill(pid, signal.SIGTERM)
     if f.proc is not None and f.proc.poll() is None:
-        f.proc.terminate(); f.proc.wait(timeout=60)
+        f.proc.terminate()
+        try:
+            f.proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            result.setdefault('killed_after_sigterm', []).append(f.proc.pid)
+            f.proc.kill(); f.proc.wait(timeout=30)
+    for pid in others:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 try:
@@ -523,6 +536,13 @@ try:
         log_after = (f.ROOT / 'server.log').read_text(errors='replace').count('Completion recipient location is unavailable')
         assert log_after == log_before, 'no retry loop after settling'
         result['undeliverable'] = {'rows': copied['rows'], 'settled': len(copied['pending'])}
+        # The copied store holds a real runtime's whole history, whose global
+        # task listing is slow; the remaining legs run on a fresh one. The
+        # copy stays in the artifacts.
+        stop_daemon()
+        wait(lambda: not daemon_ready(), 'daemon stopped', 60)
+        (f.home / 'execution').rename(f.ROOT / 'copied-execution')
+        start_daemon(); admin = connect()
     else:
         result['undeliverable'] = 'not run: JCODE_ARRIVALS_STORE_COPY is not set'
 
