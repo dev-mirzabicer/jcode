@@ -217,8 +217,11 @@ def new_placed_session():
 def turn(session, text, expected_requests):
     before = len(captured)
     input_id = str(uuid.uuid4())
+    # The fixture stands in for Mirza: his input carries human origin, so the
+    # arrival rule delivers it after a stop that ran out of corrections.
     receipt = rpc(admin, 'primary_input', input={'id': input_id, 'session': session,
-                                                 'delivery': 'safe_boundary', 'content': text, 'images': []})
+                                                 'delivery': 'safe_boundary', 'content': text, 'images': [],
+                                                 'origin': {'kind': 'human'}})
     assert receipt['type'] == 'primary_input_receipt', receipt
     wait(lambda: len(captured) >= before + expected_requests, f'{text}: provider requests')
     def settled():
