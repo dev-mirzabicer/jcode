@@ -311,8 +311,12 @@ This does not claim adversarial process containment or native Windows parity.
 enabled channel still pending or uncertain settles as undeliverable with the
 reason, the retry loop stops, and the task's status shows it as a delivery
 event. A failure to read an existing recipient is not absence and is retried.
-Version 21 stores are rebuilt in place with every row kept. An older build
-cannot open a version 22 store.
+The same version adds `agent`: a result from a session with
+[session work](../SESSION_WORK.md#arrivals) always goes to the agent, its
+`wake` is the item's wake or hold policy (fixed when the work started; a later
+delivery update changes only `notify`), and the arrival rule decides. Version
+21 stores are rebuilt in place with every row kept. An older build cannot open
+a version 22 store.
 
 ## Self-development build and test jobs
 

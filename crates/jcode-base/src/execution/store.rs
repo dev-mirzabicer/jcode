@@ -311,7 +311,8 @@ impl ExecutionStore {
         }
         if version < 22 {
             // A delivery whose recipient Session does not exist is settled as
-            // terminal and visible instead of being retried forever. SQLite
+            // terminal and visible instead of being retried forever, and a
+            // session-work result always goes to the agent (`agent`). SQLite
             // cannot alter a CHECK constraint, so the table is rebuilt with
             // every row and column kept.
             transaction.execute_batch(
@@ -319,7 +320,7 @@ impl ExecutionStore {
                 run_id TEXT PRIMARY KEY REFERENCES runs(id), notify INTEGER NOT NULL,
                 wake INTEGER NOT NULL, started_at TEXT NOT NULL,
                 notify_state TEXT NOT NULL DEFAULT 'pending', wake_state TEXT NOT NULL DEFAULT 'pending',
-                notify_attempt TEXT, wake_attempt TEXT, issue TEXT,
+                notify_attempt TEXT, wake_attempt TEXT, issue TEXT, agent INTEGER NOT NULL DEFAULT 0,
                 CHECK(notify_state IN ('pending','in_flight','delivered','uncertain','undeliverable')),
                 CHECK(wake_state IN ('pending','in_flight','delivered','uncertain','undeliverable'))
             );

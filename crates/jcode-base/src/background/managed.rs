@@ -47,12 +47,7 @@ pub(super) fn projected(store: &ExecutionStore, id: &str) -> Result<Option<TaskS
         RunState::Failed => Some("Execution failed; inspect the retained output".to_string()),
         _ => None,
     };
-    // In a session with session work the result always reaches the agent;
-    // whether it wakes the session is its item's policy.
-    let wake = match crate::session_work::background::item(&record.session_id, id) {
-        Ok(Some(item)) => item.policy == jcode_session_work_types::FinishPolicy::Wake,
-        _ => delivery.wake,
-    };
+    let wake = delivery.wake;
     let undeliverable = [delivery.notify_state, delivery.wake_state]
         .contains(&crate::execution::DeliveryState::Undeliverable)
         .then(|| BackgroundTaskEventRecord {
@@ -179,11 +174,11 @@ impl BackgroundTaskManager {
                 delivery.1,
             )?
             .is_some();
-            let (_, created) = store.register_background_delivery(
-                &saved,
-                delivery.0,
-                delivery.1 || session_work,
-            )?;
+            let (_, created) = if session_work {
+                store.register_agent_delivery(&saved, delivery.0, delivery.1)?
+            } else {
+                store.register_background_delivery(&saved, delivery.0, delivery.1)?
+            };
             let directory = store.root().join("background");
             crate::storage::ensure_dir(&directory)?;
             ensure!(
@@ -292,8 +287,11 @@ impl BackgroundTaskManager {
             }
             persist_projection(&store, &status)?;
             let notify = delivery.notify && delivery.notify_state == DeliveryState::Pending;
-            let wake = delivery.wake && delivery.wake_state == DeliveryState::Pending;
-            if !notify && !wake {
+            // An agent delivery always goes to the agent; its `wake` is the
+            // item's policy, which the event carries.
+            let wake_pending = delivery.wake_state == DeliveryState::Pending;
+            let wake = delivery.wake && wake_pending;
+            if !notify && !wake && !(delivery.agent && wake_pending) {
                 return Ok(None);
             }
             let record = store

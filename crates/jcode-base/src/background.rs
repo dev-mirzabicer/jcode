@@ -1359,16 +1359,8 @@ impl BackgroundTaskManager {
             let id = task_id.to_string();
             let root = crate::storage::jcode_dir()?;
             tokio::task::spawn_blocking(move || {
-                let store = crate::execution::ExecutionStore::open(&root)?;
-                // A session-work item's result always reaches the agent and
-                // its wake or hold policy was fixed when it started.
-                let fixed = match store.inspect(&id)? {
-                    Some(record) => {
-                        crate::session_work::background::item(&record.session_id, &id)?.is_some()
-                    }
-                    None => false,
-                };
-                store.update_background_delivery(&id, notify, wake || fixed)
+                crate::execution::ExecutionStore::open(&root)?
+                    .update_background_delivery(&id, notify, wake)
             })
             .await??;
             return self.managed_status(task_id).await;

@@ -33,10 +33,22 @@ pub struct BackgroundDelivery {
     pub started_at: String,
     pub notify_state: DeliveryState,
     pub wake_state: DeliveryState,
+    /// The result always goes to the agent, whatever `wake` says: its
+    /// session has session work, where `wake` is the item's wake or hold
+    /// policy and the arrival rule decides.
+    #[serde(default)]
+    pub agent: bool,
     /// Why the delivery is undeliverable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<String>,
 }
+/// The notify channel is enabled.
+const NOTIFY_ENABLED: &str = "notify=1";
+/// The wake channel is enabled: the result wakes its session, or it always
+/// goes to the agent (a session with session work) and the session-work
+/// arrival rule decides whether it wakes.
+const WAKE_ENABLED: &str = "(wake=1 OR agent=1)";
+
 #[derive(Clone, Copy)]
 pub enum DeliveryChannel {
     Notify,
@@ -114,7 +126,7 @@ impl ExecutionStore {
     }
     pub fn pending_background_deliveries(&self) -> Result<Vec<String>> {
         let connection = self.connection()?;
-        let mut query=connection.prepare("SELECT d.run_id FROM background_deliveries d JOIN runs r ON r.id=d.run_id WHERE r.state IN ('completed','failed','cancelled','interrupted') AND ((d.notify=1 AND d.notify_state='pending') OR (d.wake=1 AND d.wake_state='pending'))")?;
+        let mut query=connection.prepare("SELECT d.run_id FROM background_deliveries d JOIN runs r ON r.id=d.run_id WHERE r.state IN ('completed','failed','cancelled','interrupted') AND ((d.notify=1 AND d.notify_state='pending') OR ((d.wake=1 OR d.agent=1) AND d.wake_state='pending'))")?;
         Ok(query
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?)
@@ -125,6 +137,25 @@ impl ExecutionStore {
         notify: bool,
         wake: bool,
     ) -> Result<(BackgroundDelivery, bool)> {
+        self.register_delivery(id, notify, wake, false)
+    }
+    /// Register a delivery whose result always goes to the agent: `wake` is
+    /// the item's policy, which the session-work arrival rule applies.
+    pub fn register_agent_delivery(
+        &self,
+        id: &str,
+        notify: bool,
+        wake: bool,
+    ) -> Result<(BackgroundDelivery, bool)> {
+        self.register_delivery(id, notify, wake, true)
+    }
+    fn register_delivery(
+        &self,
+        id: &str,
+        notify: bool,
+        wake: bool,
+        agent: bool,
+    ) -> Result<(BackgroundDelivery, bool)> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists: bool = transaction.query_row(
@@ -133,7 +164,7 @@ impl ExecutionStore {
             |row| row.get(0),
         )?;
         ensure!(exists, "Background delivery requires a durable invocation");
-        let created=transaction.execute("INSERT OR IGNORE INTO background_deliveries (run_id,notify,wake,started_at) VALUES (?1,?2,?3,?4)",params![id,notify||wake,wake,chrono::Utc::now().to_rfc3339()])?==1;
+        let created=transaction.execute("INSERT OR IGNORE INTO background_deliveries (run_id,notify,wake,started_at,agent) VALUES (?1,?2,?3,?4,?5)",params![id,notify||wake,wake,chrono::Utc::now().to_rfc3339(),agent])?==1;
         transaction.commit()?;
         Ok((
             self.background_delivery(id)?
@@ -142,11 +173,11 @@ impl ExecutionStore {
         ))
     }
     pub fn background_delivery(&self, id: &str) -> Result<Option<BackgroundDelivery>> {
-        type Row = (bool, bool, String, String, String, Option<String>);
+        type Row = (bool, bool, String, String, String, Option<String>, bool);
         let row: Option<Row> = self
             .connection()?
             .query_row(
-                "SELECT notify,wake,started_at,notify_state,wake_state,issue FROM background_deliveries WHERE run_id=?1",
+                "SELECT notify,wake,started_at,notify_state,wake_state,issue,agent FROM background_deliveries WHERE run_id=?1",
                 [id],
                 |row| {
                     Ok((
@@ -156,11 +187,12 @@ impl ExecutionStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
             .optional()?;
-        row.map(|(notify, wake, started_at, n, w, issue)| {
+        row.map(|(notify, wake, started_at, n, w, issue, agent)| {
             Ok(BackgroundDelivery {
                 run_id: id.into(),
                 notify,
@@ -168,6 +200,7 @@ impl ExecutionStore {
                 started_at,
                 notify_state: DeliveryState::parse(&n)?,
                 wake_state: DeliveryState::parse(&w)?,
+                agent,
                 issue,
             })
         })
@@ -180,10 +213,13 @@ impl ExecutionStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut changed = 0;
-        for (flag, state) in [("notify", "notify_state"), ("wake", "wake_state")] {
+        for (enabled, state) in [
+            (NOTIFY_ENABLED, "notify_state"),
+            (WAKE_ENABLED, "wake_state"),
+        ] {
             changed += transaction.execute(
                 &format!(
-                    "UPDATE background_deliveries SET {state}='undeliverable',issue=?2 WHERE run_id=?1 AND {flag}=1 AND {state} IN ('pending','uncertain')"
+                    "UPDATE background_deliveries SET {state}='undeliverable',issue=?2 WHERE run_id=?1 AND {enabled} AND {state} IN ('pending','uncertain')"
                 ),
                 params![id, issue],
             )?;
@@ -199,10 +235,12 @@ impl ExecutionStore {
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?)
     }
+    /// Change a delivery's flags. An agent delivery's `wake` is its item's
+    /// policy, fixed when the work started, so only its notify flag changes.
     pub fn update_background_delivery(&self, id: &str, notify: bool, wake: bool) -> Result<()> {
         ensure!(
             self.connection()?.execute(
-                "UPDATE background_deliveries SET notify=?2,wake=?3 WHERE run_id=?1",
+                "UPDATE background_deliveries SET notify=?2,wake=CASE WHEN agent=1 THEN wake ELSE ?3 END WHERE run_id=?1",
                 params![id, notify || wake, wake]
             )? == 1,
             "Unknown background delivery"
@@ -214,9 +252,9 @@ impl ExecutionStore {
         id: &str,
         channel: DeliveryChannel,
     ) -> Result<Option<DeliveryAttempt>> {
-        let (flag, state, attempt) = match channel {
-            DeliveryChannel::Notify => ("notify", "notify_state", "notify_attempt"),
-            DeliveryChannel::Wake => ("wake", "wake_state", "wake_attempt"),
+        let (enabled, state, attempt) = match channel {
+            DeliveryChannel::Notify => (NOTIFY_ENABLED, "notify_state", "notify_attempt"),
+            DeliveryChannel::Wake => (WAKE_ENABLED, "wake_state", "wake_attempt"),
         };
         let token = uuid::Uuid::new_v4().simple().to_string();
         let directory = self.root().join("delivery-attempts");
@@ -238,7 +276,7 @@ impl ExecutionStore {
         lease.sync_all()?;
         #[cfg(unix)]
         std::fs::File::open(&directory)?.sync_all()?;
-        let changed=self.connection()?.execute(&format!("UPDATE background_deliveries SET {state}='in_flight',{attempt}=?2 WHERE run_id=?1 AND {flag}=1 AND {state}='pending' AND EXISTS(SELECT 1 FROM runs WHERE id=?1 AND state IN ('completed','failed','cancelled','interrupted'))"),params![id,token])?;
+        let changed=self.connection()?.execute(&format!("UPDATE background_deliveries SET {state}='in_flight',{attempt}=?2 WHERE run_id=?1 AND {enabled} AND {state}='pending' AND EXISTS(SELECT 1 FROM runs WHERE id=?1 AND state IN ('completed','failed','cancelled','interrupted'))"),params![id,token])?;
         if changed == 1 {
             Ok(Some(DeliveryAttempt {
                 store: self.clone(),
@@ -511,6 +549,47 @@ mod tests {
             rusqlite::Connection::open(directory.path().join("execution/index.sqlite"))?
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
         assert_eq!(version, 22);
+        Ok(())
+    }
+    #[test]
+    fn an_agent_delivery_goes_to_the_agent_whatever_its_wake_policy() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ExecutionStore::open(directory.path())?;
+        let input = Invocation {
+            session_id: "agent".into(),
+            message_id: "message".into(),
+            call_path: vec!["call".into()],
+            tool: "fixture".into(),
+            input: serde_json::json!({}),
+            working_dir: None,
+            received_result_digest: None,
+        };
+        let PreparedInvocation::New(mut record) = store.prepare(&input, "owner")? else {
+            panic!()
+        };
+        store.start(&record.id, "owner")?;
+        store.promote(&record.id, "owner")?;
+        // A hold item that does not notify still reaches the agent.
+        let (delivery, created) = store.register_agent_delivery(&record.id, false, false)?;
+        assert!(created && delivery.agent && !delivery.wake && !delivery.notify);
+        // Its policy is fixed: a later update changes only notify.
+        store.update_background_delivery(&record.id, true, true)?;
+        let delivery = store.background_delivery(&record.id)?.unwrap();
+        assert!(delivery.notify && !delivery.wake && delivery.agent);
+        record.state = RunState::Completed;
+        store.finish(&record)?;
+        assert_eq!(
+            store.pending_background_deliveries()?,
+            vec![record.id.clone()]
+        );
+        let attempt = store
+            .begin_delivery(&record.id, DeliveryChannel::Wake)?
+            .expect("the agent channel is enabled");
+        attempt.finish(true)?;
+        assert_eq!(
+            store.background_delivery(&record.id)?.unwrap().wake_state,
+            DeliveryState::Delivered
+        );
         Ok(())
     }
 }
