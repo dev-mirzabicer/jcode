@@ -292,6 +292,12 @@ def new_placed_session():
             return None
         return placed
     placed = wait(place, 'placement', 60)
+    # A placement that meets a busy control commit completes at the session's
+    # next safe boundary.
+    if placed['status'] == 'state' and placed['record']['state'] == 'pending':
+        operation = placed['record']['operation']
+        placed = wait(lambda: (lambda r: r if r['status'] == 'state' and r['record']['state'] != 'pending' else None)(
+            location({'action': 'inspect', 'operation': operation})), 'pending placement', 60)
     assert placed['status'] == 'state' and placed['record']['state'] == 'complete', placed
     return session, channel
 
