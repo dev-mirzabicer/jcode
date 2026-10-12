@@ -51,6 +51,14 @@ fn managed_completion_keeps_its_registration_store_when_current_home_changes() -
         };
         let mut records = Vec::new();
         for root in [first.path(), second.path()] {
+            // The recipient exists, so the result is published rather than
+            // settled as undeliverable.
+            std::fs::create_dir_all(root.join("sessions"))?;
+            std::fs::write(
+                root.join("sessions")
+                    .join(format!("{}.json", invocation.session_id)),
+                "{}",
+            )?;
             let store = ExecutionStore::open(root)?;
             let PreparedInvocation::New(record) = store.prepare(&invocation, "owner")? else {
                 panic!()

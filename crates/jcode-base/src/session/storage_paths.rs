@@ -48,6 +48,17 @@ pub fn session_exists(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a Session's snapshot exists, for decisions that must not treat a
+/// read failure as absence: a missing snapshot means the Session was never
+/// published or was removed; any other filesystem failure is an error.
+pub fn session_snapshot_exists(session_id: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(session_path(session_id)?) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Remove the private artifacts of a session that failed before publication.
 ///
 /// Ordinary user deletion is intentionally not exposed through this function.

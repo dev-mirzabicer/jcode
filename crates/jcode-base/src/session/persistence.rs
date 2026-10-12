@@ -444,17 +444,6 @@ impl Session {
         Self::load_from_path(&path)
     }
 
-    /// Whether a Session's snapshot exists. A missing snapshot means the
-    /// Session was never published or was removed; any other filesystem
-    /// failure is an error, not absence.
-    pub fn exists(session_id: &str) -> Result<bool> {
-        match std::fs::symlink_metadata(session_path(session_id)?) {
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     /// Load only the metadata needed for remote-client startup.
     ///
     /// This intentionally skips heavyweight transcript vectors so the remote

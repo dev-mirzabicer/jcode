@@ -1254,12 +1254,55 @@ async fn native_command_progress_and_checkpoint_keep_raw_bytes_and_wake_only_wai
     Ok(())
 }
 
+#[tokio::test]
+async fn a_result_for_a_missing_session_settles_undeliverable_and_is_not_retried()
+-> anyhow::Result<()> {
+    let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
+    let ctx = context();
+    let invocation = crate::execution::invocation(&ctx, "fixture", serde_json::json!({}));
+    let crate::execution::PreparedInvocation::New(mut record) =
+        store.prepare(&invocation, "owner")?
+    else {
+        panic!()
+    };
+    store.start(&record.id, "owner")?;
+    store.promote(&record.id, "owner")?;
+    store.register_background_delivery(&record.id, true, true)?;
+    record.state = crate::execution::RunState::Completed;
+    store.finish(&record)?;
+    let mut events = crate::bus::Bus::global().subscribe();
+    crate::background::global().retry_managed_delivery().await?;
+    let delivery = store.background_delivery(&record.id)?.unwrap();
+    assert_eq!(
+        (delivery.notify_state, delivery.wake_state),
+        (
+            crate::execution::DeliveryState::Undeliverable,
+            crate::execution::DeliveryState::Undeliverable
+        )
+    );
+    assert!(delivery.issue.unwrap().contains(&ctx.session_id));
+    assert!(!store.pending_background_deliveries()?.contains(&record.id));
+    crate::background::global().retry_managed_delivery().await?;
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event, crate::bus::BusEvent::BackgroundTaskCompleted(event) if event.task_id == record.id),
+            "an undeliverable result is never published"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn background_owner_loss_recovery_delivers_a_real_receipt_to_the_original_session()
 -> anyhow::Result<()> {
     let store = crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?;
     let ctx = context();
+    // The original session exists, so its result is delivered rather than
+    // settled as undeliverable.
+    let snapshot = crate::session::session_path(&ctx.session_id)?;
+    std::fs::create_dir_all(snapshot.parent().unwrap())?;
+    std::fs::write(&snapshot, "{}")?;
     let invocation = crate::execution::invocation(&ctx, "fixture", serde_json::json!({}));
     let lease = store
         .root()

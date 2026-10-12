@@ -96,14 +96,17 @@ pub(super) async fn dispatch_background_task_completion(
     event_counter: &Arc<AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
-    // A recipient Session that does not exist can never receive this
-    // result: settle the delivery as terminal and visible instead of
-    // retrying it forever. Any other failure to read it is temporary and
-    // retried.
-    match crate::session::Session::exists(&task.session_id) {
+    // The managed delivery owner settles a result whose recipient Session
+    // does not exist before publishing it; a legacy in-process task with a
+    // missing recipient has nothing durable to settle. Any other failure to
+    // read the recipient is temporary and retried.
+    match crate::session::session_snapshot_exists(&task.session_id) {
         Ok(true) => {}
         Ok(false) => {
-            settle_undeliverable(task).await;
+            crate::logging::warn(&format!(
+                "Background result {} has no recipient: session {} does not exist",
+                task.task_id, task.session_id
+            ));
             return;
         }
         Err(error) => {
@@ -211,36 +214,6 @@ pub(super) async fn dispatch_background_task_completion(
             }
         };
         finish_completion(permit, delivered).await;
-    }
-}
-
-/// Settle a completion whose recipient Session does not exist. Legacy
-/// in-process tasks have no durable delivery record to settle.
-async fn settle_undeliverable(task: &crate::bus::BackgroundTaskCompleted) {
-    if !task.task_id.starts_with("run-") {
-        return;
-    }
-    let id = task.task_id.clone();
-    let issue = format!("recipient session {} does not exist", task.session_id);
-    let settled = tokio::task::spawn_blocking(move || {
-        crate::execution::ExecutionStore::open(&crate::storage::jcode_dir()?)?
-            .settle_undeliverable(&id, &issue)
-    })
-    .await;
-    match settled {
-        Ok(Ok(true)) => crate::logging::warn(&format!(
-            "Background result {} is undeliverable: recipient session {} does not exist",
-            task.task_id, task.session_id
-        )),
-        Ok(Ok(false)) => {}
-        Ok(Err(error)) => crate::logging::warn(&format!(
-            "Background result {} could not be settled as undeliverable: {error:#}",
-            task.task_id
-        )),
-        Err(error) => crate::logging::warn(&format!(
-            "Background result {} could not be settled as undeliverable: {error}",
-            task.task_id
-        )),
     }
 }
 

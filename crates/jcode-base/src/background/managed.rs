@@ -299,6 +299,21 @@ impl BackgroundTaskManager {
             let record = store
                 .inspect(&id)?
                 .context("Unknown completed invocation")?;
+            // A recipient Session that does not exist can never receive this
+            // result: settle it as terminal and visible before reading its
+            // output, instead of retrying it forever. Failing to check an
+            // existing recipient is not absence; that stays retried.
+            if !crate::session::session_snapshot_exists(&record.session_id)? {
+                let issue = format!("recipient session {} does not exist", record.session_id);
+                if store.settle_undeliverable(&id, &issue)? {
+                    crate::logging::warn(&format!(
+                        "Background result {id} is undeliverable: {issue}"
+                    ));
+                    let status = projected(&store, &id)?.context("Missing managed status")?;
+                    persist_projection(&store, &status)?;
+                }
+                return Ok(None);
+            }
             let captured = record.output_path.is_some();
             let path = if record.state == RunState::Interrupted && record.result_path.is_none() {
                 let result = store.result(&record, std::num::NonZeroUsize::new(500).unwrap())?;
@@ -364,8 +379,14 @@ impl BackgroundTaskManager {
             store.pending_background_deliveries()
         })
         .await??;
+        // One delivery that cannot be published must not keep every later
+        // one from its retry.
         for id in ids {
-            self.publish_managed_completion(&id).await?;
+            if let Err(error) = self.publish_managed_completion(&id).await {
+                crate::logging::warn(&format!(
+                    "Background result {id} remains pending: {error:#}"
+                ));
+            }
         }
         Ok(())
     }
