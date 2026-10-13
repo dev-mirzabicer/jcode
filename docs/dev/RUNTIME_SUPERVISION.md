@@ -97,6 +97,27 @@ Native foreground commands are handed to the background by their proxy on
 daemon lock never tries the lock while another live process has a `Starting`
 reload marker, so an in-place reload is not mistaken for an exit.
 
+### Candidate probes run in a private home
+
+Every check that runs a candidate binary before it replaces the daemon runs it
+in a disposable home (`jcode-build-support`, `probe_state`): the publish step's
+`version --json`, the reload's version smoke test and the self-dev reload's
+server smoke test (`serve`, ping, subscribe). `HOME`, `JCODE_HOME`,
+`JCODE_RUNTIME_DIR`, the XDG directories and `TMPDIR` point into a temporary
+root that is removed afterwards; no other Jcode variable (sockets, sessions,
+supervision markers) is inherited; telemetry is off; the server smoke boots with
+deferred authentication and `--no-update`, as a fresh install does.
+
+A probe therefore cannot migrate a real store, upgrade the instruction seed,
+create a session or act on a real delivery. Migrations happen only when the
+replacement daemon starts after the exec, so a failed reload leaves real state
+exactly as the running daemon left it. (Before this, the server smoke used the
+real home: a reload that then failed could leave the running daemon unable to
+open a store the candidate had migrated, and every build left an empty crashed
+session behind.) The server smoke allows 60 s to start listening and 30 s per
+reply, because a fresh home initializes its stores on first start; a timeout
+fails the reload without side effects.
+
 ## Restart
 
 `ShutdownOptions.destination = restart` (requires `runtime_supervision_v1`) runs

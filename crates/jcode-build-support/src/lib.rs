@@ -1,5 +1,6 @@
 mod paths;
 mod platform_support;
+mod probe_state;
 mod source_state;
 mod storage_helpers;
 
@@ -253,11 +254,11 @@ pub fn write_current_dev_binary_source_metadata(
     write_dev_binary_source_metadata(&binary, source)
 }
 
+/// Run `version --json` in a private home: even reporting its version must not
+/// let a candidate touch real state.
 fn read_binary_version_report(binary: &Path) -> Result<BinaryVersionReport> {
-    let output = Command::new(binary)
-        .args(["version", "--json"])
-        .env("JCODE_NON_INTERACTIVE", "1")
-        .output()?;
+    let state = probe_state::ProbeState::new()?;
+    let output = state.command(binary).args(["version", "--json"]).output()?;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -455,6 +456,15 @@ enum SmokeTestReplyKind {
     Pong,
 }
 
+/// How long a smoke-test server may take to listen. Since the server runs in a
+/// fresh private home, a slow start or reply fails the reload without
+/// touching real state, so these bound a hang rather than measure latency.
+#[cfg(unix)]
+const SMOKE_START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a smoke-test request may wait for its reply.
+#[cfg(unix)]
+const SMOKE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[cfg(unix)]
 fn smoke_test_server_request(
     stream: &mut BufReader<std::os::unix::net::UnixStream>,
@@ -466,7 +476,7 @@ fn smoke_test_server_request(
     stream.get_mut().write_all(payload.as_bytes())?;
     stream.get_mut().flush()?;
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + SMOKE_REPLY_TIMEOUT;
     loop {
         let mut line = String::new();
         let bytes = stream.read_line(&mut line)?;
@@ -504,8 +514,8 @@ fn smoke_test_server_connect(
     path: &Path,
 ) -> std::io::Result<BufReader<std::os::unix::net::UnixStream>> {
     let stream = std::os::unix::net::UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(SMOKE_REPLY_TIMEOUT))?;
+    stream.set_write_timeout(Some(SMOKE_REPLY_TIMEOUT))?;
     Ok(BufReader::new(stream))
 }
 
@@ -549,19 +559,24 @@ pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
 
     smoke_test_binary(binary)?;
 
-    let temp = tempfile::tempdir()?;
-    let runtime_dir = temp.path().join("runtime");
-    storage::ensure_dir(&runtime_dir)?;
-    let socket_path = temp.path().join("jcode-smoke.sock");
-    let stderr_path = temp.path().join("jcode-smoke.stderr.log");
+    // The candidate serves from a disposable home (see `probe_state`): a
+    // failed reload must leave every real store as the running daemon left
+    // it, and the smoke subscribe must not create a real session.
+    let state = probe_state::ProbeState::new()?;
+    let socket_path = state.path("runtime").join("smoke.sock");
+    let stderr_path = state.path("smoke.stderr.log");
     let stderr = File::create(&stderr_path)?;
 
-    let mut child = Command::new(binary)
+    // The private home has no credentials, so the server boots as a fresh
+    // install does, with deferred authentication; it neither updates itself
+    // nor checks for updates.
+    let mut child = state
+        .command(binary)
+        .arg("--no-update")
         .arg("serve")
         .arg("--socket")
         .arg(&socket_path)
-        .env("JCODE_NON_INTERACTIVE", "1")
-        .env("JCODE_RUNTIME_DIR", &runtime_dir)
+        .env("JCODE_DEFERRED_AUTH_BOOTSTRAP", "1")
         .env("JCODE_GATEWAY_ENABLED", "0")
         .env("JCODE_TEMP_SERVER", "1")
         .env("JCODE_SERVER_OWNER_PID", std::process::id().to_string())
@@ -572,7 +587,9 @@ pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
         .spawn()?;
 
     let result = (|| -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // A fresh home initializes its stores on first start; under machine
+        // load that takes longer than a warm start.
+        let deadline = Instant::now() + SMOKE_START_TIMEOUT;
         loop {
             if let Some(status) = child.try_wait()? {
                 let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
@@ -585,7 +602,8 @@ pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
 
             match smoke_test_server_connect(&socket_path) {
                 Ok(_) => {
-                    smoke_test_server_protocol(&socket_path, env!("CARGO_MANIFEST_DIR"))?;
+                    let work_dir = state.work_dir();
+                    smoke_test_server_protocol(&socket_path, &work_dir.to_string_lossy())?;
                     return Ok(());
                 }
                 Err(err)

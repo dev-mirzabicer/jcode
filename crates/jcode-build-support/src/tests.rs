@@ -853,3 +853,133 @@ fn repair_never_downgrades_when_stable_is_older() {
         );
     });
 }
+
+#[cfg(unix)]
+fn write_executable(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).expect("write script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_probe_sees_only_its_private_state_and_no_inherited_endpoint() {
+    let _guard = test_env_lock();
+    let previous: Vec<_> = [
+        "JCODE_SOCKET",
+        "JCODE_RUNTIME_SUPERVISED",
+        "JCODE_SESSION_ID",
+    ]
+    .iter()
+    .map(|key| (*key, std::env::var_os(key)))
+    .collect();
+    for (key, _) in &previous {
+        jcode_core::env::set_var(key, "/caller/state");
+    }
+    let state = probe_state::ProbeState::new().expect("probe state");
+    let command = state.command(Path::new("/usr/bin/env"));
+    assert!(probe_state::confined(&command, &state));
+    let output = state
+        .command(Path::new("/usr/bin/env"))
+        .output()
+        .expect("run env");
+    for (key, value) in previous {
+        match value {
+            Some(value) => jcode_core::env::set_var(key, value),
+            None => jcode_core::env::remove_var(key),
+        }
+    }
+    let seen = String::from_utf8(output.stdout).expect("utf8");
+    let vars: std::collections::HashMap<&str, &str> = seen
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect();
+    for key in [
+        "JCODE_SOCKET",
+        "JCODE_RUNTIME_SUPERVISED",
+        "JCODE_SESSION_ID",
+    ] {
+        assert!(!vars.contains_key(key), "{key} reached the probe");
+    }
+    for key in [
+        "HOME",
+        "JCODE_HOME",
+        "JCODE_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "TMPDIR",
+    ] {
+        let value = vars.get(key).unwrap_or_else(|| panic!("{key} is unset"));
+        assert!(
+            Path::new(value).starts_with(state.root()),
+            "{key}={value} leaves the probe state"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn reading_a_candidates_version_never_touches_the_callers_home() {
+    with_temp_jcode_home(|| {
+        let home = PathBuf::from(std::env::var_os("JCODE_HOME").expect("test home"));
+        let scripts = tempfile::tempdir().expect("scripts");
+        let binary = scripts.path().join("candidate");
+        // A candidate that writes into whatever home it is given, as a
+        // migrating startup would.
+        write_executable(
+            &binary,
+            "#!/bin/sh\nmkdir -p \"$JCODE_HOME/migrated\" \"$HOME/.jcode/migrated\"\necho '{\"version\":\"9.9.9\",\"git_hash\":\"abc1234\"}'\n",
+        );
+        smoke_test_binary(&binary).expect("version smoke");
+        let report = read_binary_version_report(&binary).expect("version report");
+        assert_eq!(report.version.as_deref(), Some("9.9.9"));
+        assert!(
+            !home.join("migrated").exists(),
+            "the version probe wrote into the caller's home"
+        );
+    });
+}
+
+/// The real server smoke test on a real candidate leaves the caller's home and
+/// HOME exactly as they were. Run through `scripts/run_isolated_test.py` with
+/// `JCODE_PROBE_BINARY=<candidate>`, so the caller's home is itself private.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs a built candidate: JCODE_PROBE_BINARY"]
+fn the_server_smoke_test_leaves_the_callers_home_untouched() {
+    fn listing(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                }
+                found.push(path);
+            }
+        }
+        found.sort();
+        found
+    }
+    let binary = PathBuf::from(std::env::var_os("JCODE_PROBE_BINARY").expect("JCODE_PROBE_BINARY"));
+    assert!(
+        std::env::var_os("JCODE_TEST_STATE_ROOT").is_some(),
+        "run through scripts/run_isolated_test.py"
+    );
+    let homes = [
+        PathBuf::from(std::env::var_os("JCODE_HOME").expect("JCODE_HOME")),
+        PathBuf::from(std::env::var_os("HOME").expect("HOME")),
+    ];
+    let before: Vec<_> = homes.iter().map(|home| listing(home)).collect();
+    let smoke = smoke_test_server_binary(&binary);
+    let after: Vec<_> = homes.iter().map(|home| listing(home)).collect();
+    // A failed smoke test must leave the home untouched too: that is the
+    // reload failure this isolation exists for.
+    assert_eq!(before, after, "the smoke test changed the caller's home");
+    smoke.expect("server smoke test");
+}
